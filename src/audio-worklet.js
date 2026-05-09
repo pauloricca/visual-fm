@@ -1,4 +1,5 @@
 const TWO_PI = Math.PI * 2;
+const MAX_LINK_DELAY_SECONDS = 3;
 
 class VisualFmEngine extends AudioWorkletProcessor {
   constructor() {
@@ -7,7 +8,11 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.links = [];
     this.incoming = new Map();
     this.outputLinks = [];
+    this.linksById = new Map();
+    this.linkModulations = new Map();
     this.voices = new Map();
+    this.droneVoice = this.createVoice("drone", 440, 1, 0, true);
+    this.hasActiveDroneLinks = false;
     this.sampleCursor = 0;
     this.masterGain = 0.18;
     this.masterEffects = {
@@ -47,19 +52,34 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   setGraph(graph) {
     this.nodes = (graph.nodes || []).map((node) => this.normalizeNode(node));
-    this.links = (graph.links || []).map((link) => ({
-      ...link,
-      modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to),
-      pan: this.clamp(Number(link.pan) || 0, -1, 1),
-      filter: this.normalizeLinkFilter(link.filter),
-    }));
+    const rawLinks = graph.links || [];
+    const rawLinksById = new Map(rawLinks.map((link) => [link.id, link]));
+    this.links = rawLinks.map((link) => {
+      const targetLink = rawLinksById.get(link.to);
+      return {
+        ...link,
+        modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to, targetLink),
+        drone: Boolean(link.drone),
+        amount: Math.max(0, Number(link.amount) || 0),
+        delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
+        pan: this.clamp(Number(link.pan) || 0, -1, 1),
+        filter: this.normalizeLinkFilter(link.filter),
+      };
+    });
+    this.hasActiveDroneLinks = this.links.some((link) => link.drone);
     this.masterEffects = this.normalizeEffects(graph.masterEffects);
     this.incoming = new Map();
     this.outputLinks = [];
+    this.linksById = new Map(this.links.map((link) => [link.id, link]));
+    this.linkModulations = new Map();
 
     for (const link of this.links) {
       if (link.to === "audio") {
         this.outputLinks.push(link);
+      } else if (this.linksById.has(link.to)) {
+        const group = this.linkModulations.get(link.to) || [];
+        group.push(link);
+        this.linkModulations.set(link.to, group);
       } else {
         const group = this.incoming.get(link.to) || [];
         group.push(link);
@@ -67,10 +87,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
     }
 
-    for (const voice of this.voices.values()) {
+    for (const voice of [...this.voices.values(), this.droneVoice]) {
       if (!voice.nodeFilters) voice.nodeFilters = new Map();
       if (!voice.frequencyMods) voice.frequencyMods = new Map();
-      if (!voice.outputFilterMods) voice.outputFilterMods = new Map();
+      if (!voice.linkDelays) voice.linkDelays = new Map();
       for (const node of this.nodes) {
         if (!voice.phases.has(node.id)) {
           voice.phases.set(node.id, Math.random());
@@ -124,9 +144,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
-  normalizeModulationTarget(target, to) {
+  normalizeModulationTarget(target, to, targetLink = null) {
     if (to === "audio") return "amplitude";
-    return ["phase", "frequency", "filterCutoff", "amplitude"].includes(target) ? target : "phase";
+    if (targetLink) {
+      const targets = targetLink.to === "audio"
+        ? ["filterCutoff", "filterResonance", "amplitude", "delay", "pan"]
+        : ["filterCutoff", "filterResonance", "amplitude", "delay"];
+      return targets.includes(target) ? target : "filterCutoff";
+    }
+    return ["phase", "frequency", "ring", "fold", "mix"].includes(target) ? target : "phase";
   }
 
   clamp(value, min, max) {
@@ -210,20 +236,21 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return Math.tanh(effected);
   }
 
-  noteOn(note, velocity = 1) {
+  createVoice(note, frequency, velocity = 1, startedAt = this.sampleCursor / sampleRate, isDrone = false) {
     const voice = {
       note,
-      frequency: 440 * Math.pow(2, (note - 69) / 12),
+      frequency,
       velocity: Math.max(0.05, Math.min(1, velocity)),
-      startedAt: this.sampleCursor / sampleRate,
+      startedAt,
       releasedAt: null,
       releaseLevels: new Map(),
       phases: new Map(),
       feedback: new Map(),
       linkFilters: new Map(),
+      linkDelays: new Map(),
       nodeFilters: new Map(),
       frequencyMods: new Map(),
-      outputFilterMods: new Map(),
+      isDrone,
     };
 
     for (const node of this.nodes) {
@@ -231,6 +258,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
       voice.feedback.set(node.id, { prev1: 0, prev2: 0 });
     }
 
+    return voice;
+  }
+
+  noteOn(note, velocity = 1) {
+    const voice = this.createVoice(
+      note,
+      440 * Math.pow(2, (note - 69) / 12),
+      velocity,
+    );
     this.voices.set(note, voice);
   }
 
@@ -255,6 +291,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   envelopeValue(link, voice, now) {
+    if (link.drone) return 1;
+    if (voice.isDrone) return 0;
+
     const env = link.envelope || { delay: 0, attack: 0.01, decay: 0.16, sustain: 0.72, release: 0.24 };
     const delay = Math.max(0, env.delay || 0);
     const attack = Math.max(0.001, env.attack);
@@ -316,14 +355,6 @@ class VisualFmEngine extends AudioWorkletProcessor {
     voice.feedback.set(nodeId, history);
   }
 
-  modulationAmount(link) {
-    const amount = Number(link.amount) || 0;
-    if (link.from === link.to) {
-      return amount * 0.25;
-    }
-    return amount;
-  }
-
   linkFilterState(voice, link) {
     const key = `${link.id}:${link.filter?.type || "none"}`;
     if (!voice.linkFilters.has(key)) {
@@ -369,8 +400,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
-  applyLinkFilter(link, voice, sample) {
-    const filter = link.filter || { type: "none" };
+  applyLinkFilter(link, voice, sample, filter = link.filter || { type: "none" }) {
     if (filter.type === "none") return sample;
 
     const state = this.linkFilterState(voice, link);
@@ -388,28 +418,39 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return state.y1;
   }
 
-  applyOutputLinkFilter(link, voice, sample) {
-    const filter = link.filter || { type: "none" };
-    if (filter.type === "none") return sample;
+  linkDelayState(voice, link) {
+    if (!voice.linkDelays.has(link.id)) {
+      voice.linkDelays.set(link.id, {
+        buffer: new Float32Array(Math.ceil(sampleRate * MAX_LINK_DELAY_SECONDS) + 1),
+        index: 0,
+        wasDisabled: true,
+      });
+    }
+    return voice.linkDelays.get(link.id);
+  }
 
-    const cutoffMod = voice.outputFilterMods.get(link.from) || 0;
-    const modulatedFilter = {
-      ...filter,
-      cutoff: Number(filter.cutoff || 5000) * Math.pow(2, this.clamp(cutoffMod, -5, 5)),
-    };
-    const state = this.linkFilterState(voice, link);
-    const coefficients = this.filterCoefficients(modulatedFilter);
-    const output = coefficients.b0 * sample
-      + coefficients.b1 * state.x1
-      + coefficients.b2 * state.x2
-      - coefficients.a1 * state.y1
-      - coefficients.a2 * state.y2;
+  applyLinkDelay(link, voice, sample, params = link) {
+    const delay = this.clamp(Number(params.delay) || 0, 0, MAX_LINK_DELAY_SECONDS);
+    if (delay <= 0) {
+      const existing = voice.linkDelays.get(link.id);
+      if (existing && !existing.wasDisabled) {
+        existing.buffer.fill(0);
+        existing.index = 0;
+        existing.wasDisabled = true;
+      }
+      return sample;
+    }
 
-    state.x2 = state.x1;
-    state.x1 = sample;
-    state.y2 = state.y1;
-    state.y1 = Number.isFinite(output) ? this.clamp(output, -4, 4) : 0;
-    return state.y1;
+    const state = this.linkDelayState(voice, link);
+    if (state.wasDisabled) {
+      state.buffer.fill(0);
+      state.index = 0;
+      state.wasDisabled = false;
+    }
+    const delayed = this.readDelay(state.buffer, state.index, delay * sampleRate);
+    state.buffer[state.index] = sample;
+    state.index = (state.index + 1) % state.buffer.length;
+    return delayed;
   }
 
   nodeFilterState(voice, nodeId) {
@@ -437,9 +478,82 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return state.y1;
   }
 
-  linkModulationValue(link, voice, now, source) {
-    const shapedSource = this.applyLinkFilter(link, voice, source);
-    return shapedSource * this.modulationAmount(link) * this.envelopeValue(link, voice, now) * this.velocityScale(link, voice);
+  foldSample(sample, drive) {
+    const wrapped = ((sample * drive + 1) % 4 + 4) % 4;
+    return wrapped <= 2 ? wrapped - 1 : 3 - wrapped;
+  }
+
+  baseLinkParams(link) {
+    return {
+      amount: Math.max(0, Number(link.amount) || 0),
+      delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
+      pan: this.clamp(Number(link.pan) || 0, -1, 1),
+      filter: {
+        type: link.filter?.type || "none",
+        cutoff: Number(link.filter?.cutoff) || 5000,
+        resonance: Number(link.filter?.resonance) || 0.7,
+      },
+    };
+  }
+
+  effectiveLinkParams(link, voice, now, cache, stack, linkStack = new Set()) {
+    const params = this.baseLinkParams(link);
+    if (linkStack.has(link.id)) return params;
+
+    let cutoffMod = 0;
+    let resonanceMod = 0;
+    let amplitudeMod = 0;
+    let delayMod = 0;
+    let panMod = 0;
+    const modulators = this.linkModulations.get(link.id) || [];
+
+    linkStack.add(link.id);
+    for (const modLink of modulators) {
+      const source = this.renderNode(modLink.from, voice, now, cache, stack, linkStack);
+      const modulation = this.linkModulationValue(modLink, voice, now, source, cache, stack, linkStack);
+      if (modLink.modulationTarget === "filterResonance") {
+        resonanceMod += modulation;
+      } else if (modLink.modulationTarget === "amplitude") {
+        amplitudeMod += modulation;
+      } else if (modLink.modulationTarget === "delay") {
+        delayMod += modulation;
+      } else if (modLink.modulationTarget === "pan") {
+        panMod += modulation;
+      } else {
+        cutoffMod += modulation;
+      }
+    }
+    linkStack.delete(link.id);
+
+    params.amount *= this.clamp(1 + amplitudeMod, 0, 4);
+    params.delay = this.clamp(params.delay + delayMod, 0, MAX_LINK_DELAY_SECONDS);
+    params.pan = this.clamp(params.pan + panMod, -1, 1);
+    params.filter = {
+      ...params.filter,
+      cutoff: this.clamp(params.filter.cutoff * Math.pow(2, this.clamp(cutoffMod, -5, 5)), 20, Math.min(12000, sampleRate * 0.45)),
+      resonance: this.clamp(params.filter.resonance + resonanceMod, 0.1, 12),
+    };
+    return params;
+  }
+
+  linkModulationSignal(link, voice, now, source, cache, stack, linkStack = new Set()) {
+    const params = this.effectiveLinkParams(link, voice, now, cache, stack, linkStack);
+    const shapedSource = this.applyLinkFilter(link, voice, source, params.filter);
+    const signal = this.applyLinkDelay(
+      link,
+      voice,
+      shapedSource * this.envelopeValue(link, voice, now) * this.velocityScale(link, voice),
+      params,
+    );
+    return {
+      signal,
+      amount: params.amount,
+      value: signal * params.amount,
+    };
+  }
+
+  linkModulationValue(link, voice, now, source, cache, stack, linkStack = new Set()) {
+    return this.linkModulationSignal(link, voice, now, source, cache, stack, linkStack).value;
   }
 
   panGains(pan) {
@@ -450,7 +564,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
-  renderNode(nodeId, voice, now, cache, stack) {
+  renderNode(nodeId, voice, now, cache, stack, linkStack = new Set()) {
     if (cache.has(nodeId)) return cache.get(nodeId);
     if (stack.has(nodeId)) return 0;
 
@@ -460,23 +574,29 @@ class VisualFmEngine extends AudioWorkletProcessor {
     stack.add(nodeId);
     let phaseMod = 0;
     let frequencyMod = 0;
-    let filterCutoffMod = 0;
-    let amplitudeMod = 0;
+    let foldDrive = 0;
+    let mixAmount = 0;
+    let mixSignal = 0;
+    const ringMods = [];
     const incoming = this.incoming.get(nodeId) || [];
 
     for (const link of incoming) {
       const source = link.from === nodeId
         ? this.feedbackSignal(voice, nodeId)
-        : this.renderNode(link.from, voice, now, cache, stack);
-      const modulation = this.linkModulationValue(link, voice, now, source);
+        : this.renderNode(link.from, voice, now, cache, stack, linkStack);
+      const modulation = this.linkModulationSignal(link, voice, now, source, cache, stack, linkStack);
       if (link.modulationTarget === "frequency") {
-        frequencyMod += modulation;
-      } else if (link.modulationTarget === "filterCutoff") {
-        filterCutoffMod += modulation;
-      } else if (link.modulationTarget === "amplitude") {
-        amplitudeMod += modulation;
+        frequencyMod += modulation.value;
+      } else if (link.modulationTarget === "ring") {
+        ringMods.push(modulation);
+      } else if (link.modulationTarget === "fold") {
+        foldDrive += Math.abs(modulation.value);
+      } else if (link.modulationTarget === "mix") {
+        const amount = Math.max(0, modulation.amount);
+        mixAmount += amount;
+        mixSignal += modulation.signal * amount;
       } else {
-        phaseMod += modulation;
+        phaseMod += modulation.value;
       }
     }
 
@@ -485,10 +605,21 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
 
     const phase = voice.phases.get(nodeId);
-    const amplitude = this.clamp(1 + amplitudeMod, 0, 2.5);
-    const value = this.oscillator(node, phase + phaseMod) * amplitude;
+    let value = this.oscillator(node, phase + phaseMod);
+    for (const modulation of ringMods) {
+      const depth = this.clamp(modulation.amount, 0, 1);
+      value = value * (1 - depth) + value * modulation.signal * depth;
+    }
+    if (foldDrive > 0) {
+      value = this.foldSample(value, 1 + this.clamp(foldDrive, 0, 8) * 3);
+    }
+    if (mixAmount > 0) {
+      const mix = this.clamp(mixAmount, 0, 1);
+      const carrierGain = mix <= 0.5 ? 1 : 1 - (mix - 0.5) * 2;
+      const modulatorGain = mix >= 0.5 ? 1 : mix * 2;
+      value = value * carrierGain + (mixSignal / mixAmount) * modulatorGain;
+    }
     voice.frequencyMods.set(nodeId, frequencyMod);
-    voice.outputFilterMods.set(nodeId, filterCutoffMod);
     cache.set(nodeId, value);
     this.storeFeedback(voice, nodeId, value);
     stack.delete(nodeId);
@@ -511,13 +642,40 @@ class VisualFmEngine extends AudioWorkletProcessor {
   pruneVoices(now) {
     let longestRelease = 0.05;
     for (const link of this.links) {
-      longestRelease = Math.max(longestRelease, link.envelope?.release || 0.05);
+      longestRelease = Math.max(longestRelease, (link.envelope?.release || 0.05) + (link.delay || 0));
     }
     for (const [note, voice] of this.voices) {
       if (voice.releasedAt !== null && now - voice.releasedAt > longestRelease + 0.08) {
         this.voices.delete(note);
       }
     }
+  }
+
+  renderVoice(voice, now) {
+    const cache = new Map();
+    let voiceLeft = 0;
+    let voiceRight = 0;
+    voice.frequencyMods.clear();
+
+    for (const link of this.outputLinks) {
+      const stack = new Set();
+      const linkStack = new Set();
+      const params = this.effectiveLinkParams(link, voice, now, cache, stack, linkStack);
+      const source = this.renderNode(link.from, voice, now, cache, stack, linkStack);
+      const filteredSource = this.applyLinkFilter(link, voice, source, params.filter);
+      const envelope = this.envelopeValue(link, voice, now);
+      const delayedSource = this.applyLinkDelay(link, voice, filteredSource * envelope * this.velocityScale(link, voice), params);
+      const linkSample = delayedSource * params.amount;
+      const pan = this.panGains(params.pan);
+      voiceLeft += linkSample * pan.left;
+      voiceRight += linkSample * pan.right;
+    }
+
+    this.advancePhases(voice);
+    return {
+      left: Math.tanh(voiceLeft),
+      right: Math.tanh(voiceRight),
+    };
   }
 
   process(_inputs, outputs) {
@@ -531,25 +689,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
       let rightSample = 0;
 
       for (const voice of this.voices.values()) {
-        const cache = new Map();
-        let voiceLeft = 0;
-        let voiceRight = 0;
-        voice.frequencyMods.clear();
-        voice.outputFilterMods.clear();
+        const rendered = this.renderVoice(voice, now);
+        leftSample += rendered.left;
+        rightSample += rendered.right;
+      }
 
-        for (const link of this.outputLinks) {
-          const source = this.renderNode(link.from, voice, now, cache, new Set());
-          const filteredSource = this.applyOutputLinkFilter(link, voice, source);
-          const envelope = this.envelopeValue(link, voice, now);
-          const linkSample = filteredSource * link.amount * envelope * this.velocityScale(link, voice);
-          const pan = this.panGains(link.pan);
-          voiceLeft += linkSample * pan.left;
-          voiceRight += linkSample * pan.right;
-        }
-
-        leftSample += Math.tanh(voiceLeft);
-        rightSample += Math.tanh(voiceRight);
-        this.advancePhases(voice);
+      if (this.hasActiveDroneLinks) {
+        const rendered = this.renderVoice(this.droneVoice, now);
+        leftSample += rendered.left;
+        rightSample += rendered.right;
       }
 
       left[i] = this.applyMasterEffects(Math.tanh(leftSample * this.masterGain), 0);

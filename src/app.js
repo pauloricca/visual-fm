@@ -3,6 +3,7 @@ const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
 const addNodeButton = document.querySelector("#addNodeButton");
+const recordButton = document.querySelector("#recordButton");
 const audioOut = document.querySelector("#audioOut");
 const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
@@ -10,7 +11,8 @@ const selectionRect = document.querySelector("#selectionRect");
 
 const STORAGE_KEY = "visual-fm.patch.v1";
 const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
-const LINK_MODULATION_TARGETS = ["phase", "frequency", "filterCutoff", "amplitude"];
+const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
+const LINK_MODULATION_TARGETS = ["filterCutoff", "filterResonance", "amplitude", "delay", "pan"];
 const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
 
 const defaultPatch = {
@@ -32,6 +34,7 @@ const defaultPatch = {
       from: "op-2",
       to: "op-1",
       amount: 0.8,
+      delay: 0,
       velocitySensitivity: 0,
       modulationTarget: "phase",
       drone: false,
@@ -43,6 +46,7 @@ const defaultPatch = {
       from: "op-1",
       to: "audio",
       amount: 0.9,
+      delay: 0,
       pan: 0,
       velocitySensitivity: 1,
       modulationTarget: "amplitude",
@@ -76,6 +80,10 @@ const keyMap = new Map([
 
 let audioContext = null;
 let synthNode = null;
+let recorderDestination = null;
+let mediaRecorder = null;
+let recordingChunks = [];
+let recordingStartedAt = null;
 let nodeCounter = 3;
 let linkCounter = 3;
 let dragState = null;
@@ -121,6 +129,28 @@ function nodeName(node) {
   return node?.name?.trim() || node?.id?.replace("op-", "Operator ") || "Operator";
 }
 
+function linkTargetKind(link) {
+  if (!link) return "none";
+  if (link.to === "audio") return "audio";
+  return linkById(link.to) ? "link" : "node";
+}
+
+function targetName(to, seen = new Set()) {
+  if (to === "audio") return "Audio Out";
+  const targetLink = linkById(to);
+  if (targetLink) return linkName(targetLink, seen);
+  return nodeName(nodeById(to));
+}
+
+function linkName(link, seen = new Set()) {
+  if (!link) return "Link";
+  if (seen.has(link.id)) return "Link";
+  seen.add(link.id);
+  const name = `${nodeName(nodeById(link.from))} -> ${targetName(link.to, seen)}`;
+  seen.delete(link.id);
+  return name;
+}
+
 function clonePatch(patch) {
   return JSON.parse(JSON.stringify(patch));
 }
@@ -161,9 +191,19 @@ function normalizeLinkFilter(filter = {}) {
   };
 }
 
-function normalizeModulationTarget(target, to) {
+function linkHasPan(link) {
+  return link?.to === "audio";
+}
+
+function normalizeModulationTarget(target, to, targetLink = null) {
   if (to === "audio") return "amplitude";
-  return LINK_MODULATION_TARGETS.includes(target) ? target : "phase";
+  if (targetLink) {
+    const targets = linkHasPan(targetLink)
+      ? LINK_MODULATION_TARGETS
+      : LINK_MODULATION_TARGETS.filter((item) => item !== "pan");
+    return targets.includes(target) ? target : "filterCutoff";
+  }
+  return NODE_MODULATION_TARGETS.includes(target) ? target : "phase";
 }
 
 function normalizeFrequencyMode(mode) {
@@ -193,18 +233,34 @@ function normalizePatch(patch) {
     frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0.01, 12000) : 440,
   }));
   const nodeIds = new Set(nodes.map((node) => node.id));
-  const links = source.links
-    .filter((link) => nodeIds.has(link.from) && (nodeIds.has(link.to) || link.to === "audio"))
+  const sourceLinkIds = new Set(source.links.map((link, index) => (
+    typeof link.id === "string" ? link.id : `link-${index + 1}`
+  )));
+  const sourceLinksById = new Map(source.links.map((link, index) => [
+    typeof link.id === "string" ? link.id : `link-${index + 1}`,
+    link,
+  ]));
+  let links = source.links
+    .filter((link, index) => {
+      const id = typeof link.id === "string" ? link.id : `link-${index + 1}`;
+      return nodeIds.has(link.from)
+        && (nodeIds.has(link.to) || link.to === "audio" || (sourceLinkIds.has(link.to) && link.to !== id));
+    })
     .map((link, index) => ({
       id: typeof link.id === "string" ? link.id : `link-${index + 1}`,
       from: link.from,
       to: link.to,
       amount: Number.isFinite(Number(link.amount)) ? Number(link.amount) : 0.65,
+      delay: Number.isFinite(Number(link.delay)) ? clamp(Number(link.delay), 0, 3) : 0,
       pan: Number.isFinite(Number(link.pan)) ? clamp(Number(link.pan), -1, 1) : 0,
       velocitySensitivity: Number.isFinite(Number(link.velocitySensitivity))
         ? clamp(Number(link.velocitySensitivity), 0, 1)
         : link.to === "audio" ? 1 : 0,
-      modulationTarget: normalizeModulationTarget(link.modulationTarget, link.to),
+      modulationTarget: normalizeModulationTarget(
+        link.modulationTarget,
+        link.to,
+        sourceLinkIds.has(link.to) ? sourceLinksById.get(link.to) : null,
+      ),
       drone: Boolean(link.drone),
       filter: normalizeLinkFilter(link.filter),
       envelope: {
@@ -215,6 +271,16 @@ function normalizePatch(patch) {
         release: Number.isFinite(Number(link.envelope?.release)) ? Number(link.envelope.release) : 0.26,
       },
     }));
+  let linksChanged = true;
+  while (linksChanged) {
+    const linkIds = new Set(links.map((link) => link.id));
+    const nextLinks = links.filter((link) => (
+      nodeIds.has(link.from)
+        && (nodeIds.has(link.to) || link.to === "audio" || (linkIds.has(link.to) && link.to !== link.id))
+    ));
+    linksChanged = nextLinks.length !== links.length;
+    links = nextLinks;
+  }
 
   return { patchName, midiChannel, midiInputId, masterEffects: normalizeMasterEffects(source.masterEffects), nodes, links };
 }
@@ -315,17 +381,34 @@ function duplicateNodes(ids) {
     idMap.set(id, copy.id);
     return copy;
   });
-  const links = state.links
-    .filter((link) => idMap.has(link.from) && (idMap.has(link.to) || link.to === "audio"))
-    .map((link) => ({
+  const linkIdMap = new Map();
+  const carrierLinks = state.links
+    .filter((link) => idMap.has(link.from) && (idMap.has(link.to) || link.to === "audio"));
+  const links = carrierLinks.map((link) => {
+    const copy = {
       ...clonePatch(link),
       id: uid("link"),
       from: idMap.get(link.from),
       to: link.to === "audio" ? "audio" : idMap.get(link.to),
-    }));
+    };
+    linkIdMap.set(link.id, copy.id);
+    return copy;
+  });
+  const linkTargetLinks = state.links
+    .filter((link) => idMap.has(link.from) && linkIdMap.has(link.to))
+    .map((link) => {
+      const copy = {
+        ...clonePatch(link),
+        id: uid("link"),
+        from: idMap.get(link.from),
+        to: linkIdMap.get(link.to),
+      };
+      linkIdMap.set(link.id, copy.id);
+      return copy;
+    });
 
   state.nodes.push(...copies);
-  state.links.push(...links);
+  state.links.push(...links, ...linkTargetLinks);
   selectNodes(copies.map((node) => node.id));
   sendGraph();
   savePatch();
@@ -364,11 +447,63 @@ function bezierPath(from, to) {
   return `M ${from.x} ${from.y} C ${from.x} ${from.y + distance}, ${to.x} ${to.y - distance}, ${to.x} ${to.y}`;
 }
 
+function bezierPoint(from, to, t = 0.5) {
+  const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
+  const p0 = from;
+  const p1 = { x: from.x, y: from.y + distance };
+  const p2 = { x: to.x, y: to.y - distance };
+  const p3 = to;
+  const u = 1 - t;
+  return {
+    x: u ** 3 * p0.x + 3 * u ** 2 * t * p1.x + 3 * u * t ** 2 * p2.x + t ** 3 * p3.x,
+    y: u ** 3 * p0.y + 3 * u ** 2 * t * p1.y + 3 * u * t ** 2 * p2.y + t ** 3 * p3.y,
+  };
+}
+
 function feedbackPath(nodeId) {
   const from = nodeOutputPoint(nodeId);
   const to = nodeInputPoint(nodeId);
   const loopWidth = 118;
   return `M ${from.x} ${from.y} C ${from.x + loopWidth} ${from.y + 54}, ${to.x + loopWidth} ${to.y - 54}, ${to.x} ${to.y}`;
+}
+
+function feedbackMidpoint(nodeId) {
+  const node = nodeById(nodeId);
+  return { x: node.x + 92, y: node.y };
+}
+
+function linkEndpointPoint(to, visited = new Set()) {
+  if (to === "audio") return audioInputPoint();
+  if (nodeById(to)) return nodeInputPoint(to);
+  if (linkById(to)) return linkInputPoint(to, visited);
+  return null;
+}
+
+function linkInputPoint(id, visited = new Set()) {
+  if (visited.has(id)) return null;
+  const link = linkById(id);
+  if (!link || !nodeById(link.from)) return null;
+
+  visited.add(id);
+  const to = linkEndpointPoint(link.to, visited);
+  visited.delete(id);
+  if (!to) return null;
+
+  if (link.from === link.to) return feedbackMidpoint(link.from);
+  return bezierPoint(nodeOutputPoint(link.from), to, 0.5);
+}
+
+function linkGeometry(link, visited = new Set()) {
+  if (!link || !nodeById(link.from) || visited.has(link.id)) return null;
+  visited.add(link.id);
+  const from = nodeOutputPoint(link.from);
+  const to = linkEndpointPoint(link.to, visited);
+  visited.delete(link.id);
+  if (!to) return null;
+
+  const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
+  const midpoint = link.from === link.to ? feedbackMidpoint(link.from) : bezierPoint(from, to, 0.5);
+  return { from, to, path, midpoint };
 }
 
 function sendGraph() {
@@ -388,9 +523,11 @@ function sendGraph() {
         from: link.from,
         to: link.to,
         amount: Number(link.amount),
+        delay: Number(link.delay) || 0,
         pan: Number(link.pan) || 0,
         velocitySensitivity: Number(link.velocitySensitivity) || 0,
         modulationTarget: link.modulationTarget || "phase",
+        drone: Boolean(link.drone),
         filter: { ...link.filter },
         envelope: { ...link.envelope },
       })),
@@ -400,8 +537,6 @@ function sendGraph() {
 }
 
 async function ensureAudio() {
-  if (audioContext?.state === "running") return;
-
   if (!audioContext) {
     audioContext = new AudioContext();
     await audioContext.audioWorklet.addModule("./src/audio-worklet.js");
@@ -413,9 +548,150 @@ async function ensureAudio() {
     sendGraph();
   }
 
-  await audioContext.resume();
+  if (synthNode && !recorderDestination) {
+    recorderDestination = audioContext.createMediaStreamDestination();
+    synthNode.connect(recorderDestination);
+  }
+
+  if (audioContext.state !== "running") {
+    await audioContext.resume();
+  }
   audioStatus.textContent = "Audio ready";
   audioStatus.classList.add("ready");
+}
+
+function mediaRecorderOptions() {
+  if (!window.MediaRecorder) return null;
+  const preferredTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+  const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
+  return mimeType ? { mimeType } : {};
+}
+
+function setRecordingButtonState(isRecording) {
+  recordButton.classList.toggle("recording", isRecording);
+  recordButton.setAttribute("aria-label", isRecording ? "Stop recording" : "Start recording");
+  recordButton.title = isRecording ? "Stop recording" : "Start recording";
+}
+
+function timestampForFile(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`,
+  ].join("_");
+}
+
+function recordingFileName(date = new Date()) {
+  return `${slugifyPatchName(state.patchName || "visual-fm-patch")}-${timestampForFile(date)}.wav`;
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function writeString(view, offset, value) {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
+function audioBufferToWav(audioBuffer) {
+  const channelCount = audioBuffer.numberOfChannels;
+  const sampleRateValue = audioBuffer.sampleRate;
+  const length = audioBuffer.length;
+  const bytesPerSample = 2;
+  const blockAlign = channelCount * bytesPerSample;
+  const dataSize = length * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const channels = Array.from({ length: channelCount }, (_, index) => audioBuffer.getChannelData(index));
+  let offset = 44;
+
+  writeString(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channelCount, true);
+  view.setUint32(24, sampleRateValue, true);
+  view.setUint32(28, sampleRateValue * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  for (let sampleIndex = 0; sampleIndex < length; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sample = clamp(channels[channelIndex][sampleIndex], -1, 1);
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function exportRecording() {
+  const sourceBlob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
+  if (!sourceBlob.size) return;
+
+  const arrayBuffer = await sourceBlob.arrayBuffer();
+  const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+  downloadBlob(audioBufferToWav(decoded), recordingFileName(recordingStartedAt || new Date()));
+}
+
+async function startRecording() {
+  const options = mediaRecorderOptions();
+  if (options === null) {
+    alert("Recording is not supported in this browser.");
+    return;
+  }
+
+  await ensureAudio();
+  recordingChunks = [];
+  recordingStartedAt = new Date();
+  mediaRecorder = new MediaRecorder(recorderDestination.stream, options);
+  mediaRecorder.addEventListener("dataavailable", (event) => {
+    if (event.data?.size) recordingChunks.push(event.data);
+  });
+  mediaRecorder.addEventListener("stop", async () => {
+    recordButton.disabled = true;
+    setRecordingButtonState(false);
+    try {
+      await exportRecording();
+    } catch (error) {
+      alert(`Could not export recording: ${error.message}`);
+    } finally {
+      recordButton.disabled = false;
+      mediaRecorder = null;
+      recordingChunks = [];
+      recordingStartedAt = null;
+    }
+  }, { once: true });
+  mediaRecorder.start();
+  setRecordingButtonState(true);
+}
+
+function stopRecording() {
+  if (mediaRecorder?.state === "recording") {
+    mediaRecorder.stop();
+  }
+}
+
+function toggleRecording() {
+  if (mediaRecorder?.state === "recording") {
+    stopRecording();
+  } else {
+    startRecording();
+  }
 }
 
 function noteOn(note, velocity = 1) {
@@ -527,24 +803,34 @@ function renderWires() {
   wireLayer.innerHTML = "";
 
   for (const link of state.links) {
-    const from = nodeOutputPoint(link.from);
-    const to = link.to === "audio" ? audioInputPoint() : nodeInputPoint(link.to);
-    const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
+    const geometry = linkGeometry(link);
+    if (!geometry) continue;
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
     const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const anchor = document.createElementNS("http://www.w3.org/2000/svg", "circle");
 
-    visible.setAttribute("d", path);
-    visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    visible.setAttribute("d", geometry.path);
+    visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
 
-    hit.setAttribute("d", path);
+    hit.setAttribute("d", geometry.path);
     hit.setAttribute("class", "wire-hit");
     hit.addEventListener("click", (event) => {
       event.stopPropagation();
       select("link", link.id);
     });
 
-    group.append(visible, hit);
+    anchor.setAttribute("cx", geometry.midpoint.x);
+    anchor.setAttribute("cy", geometry.midpoint.y);
+    anchor.setAttribute("r", "8");
+    anchor.setAttribute("class", `link-anchor input ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    anchor.dataset.linkId = link.id;
+    anchor.addEventListener("click", (event) => {
+      event.stopPropagation();
+      select("link", link.id);
+    });
+
+    group.append(visible, hit, anchor);
     wireLayer.appendChild(group);
   }
 
@@ -708,32 +994,43 @@ function renderPanel() {
     const link = linkById(selection.id);
     if (!link) return renderEmptyPanel();
     const from = nodeName(nodeById(link.from));
-    const to = link.to === "audio" ? "Audio Out" : nodeName(nodeById(link.to));
-    const outputFilterTarget = link.to === "audio" ? "" : outputFilterTargetLabel(link.to);
+    const to = targetName(link.to);
+    const targetKind = linkTargetKind(link);
+    const modulationTargets = modulationTargetsForLink(link);
+    const amountMax = link.modulationTarget === "mix" ? 1 : 8;
+    if (modulationTargets.length && !modulationTargets.includes(link.modulationTarget)) {
+      link.modulationTarget = modulationTargets[0];
+      sendGraph();
+      savePatch();
+    }
+    const envelopeControls = link.drone ? "" : `
+      <section class="effect-section">
+        <div class="section-title">Envelope</div>
+        ${drawAdsr(link.envelope)}
+        ${adsrField("delay", "Delay", link.envelope.delay, 0, 4)}
+        ${adsrField("attack", "Attack", link.envelope.attack, 0.001, 4)}
+        ${adsrField("decay", "Decay", link.envelope.decay, 0.001, 4)}
+        ${adsrField("sustain", "Sustain", link.envelope.sustain, 0, 1)}
+        ${adsrField("release", "Release", link.envelope.release, 0.001, 6)}
+      </section>
+    `;
 
     panel.innerHTML = `
-      <h1>${link.to === "audio" ? "Output envelope" : "Modulation"}</h1>
+      <h1>${link.to === "audio" ? "Output envelope" : targetKind === "link" ? "Link modulation" : "Modulation"}</h1>
       <p class="panel-subtitle">${from} -> ${to}</p>
-      ${link.to !== "audio" ? `
+      ${modulationTargets.length ? `
         <div class="field">
           <label for="modulationTarget">Modulates</label>
           <select id="modulationTarget">
-            ${LINK_MODULATION_TARGETS.map((target) => `<option value="${target}" ${link.modulationTarget === target ? "selected" : ""}>${modulationTargetLabel(target, to)}</option>`).join("")}
+            ${modulationTargets.map((target) => `<option value="${target}" ${link.modulationTarget === target ? "selected" : ""}>${modulationTargetLabel(target, to)}</option>`).join("")}
           </select>
         </div>
       ` : ""}
-      ${link.modulationTarget === "filterCutoff" ? `
-        <section class="effect-section">
-          <div class="section-title">Output filter target</div>
-          <div class="readout-row"><span>Target</span><strong>${escapeHtml(outputFilterTarget)}</strong></div>
-          <div class="readout-row"><span>Base</span><strong>Yellow link cutoff</strong></div>
-        </section>
-      ` : ""}
       <div class="field">
-        <label for="amount">Amount</label>
+        <label for="amount">Amplitude</label>
         <div class="field-row">
-          <input id="amountRange" type="range" min="0" max="8" step="0.001" value="${link.amount}">
-          <input id="amount" type="number" min="0" max="8" step="0.001" value="${link.amount}">
+          <input id="amountRange" type="range" min="0" max="${amountMax}" step="0.001" value="${clamp(link.amount, 0, amountMax)}">
+          <input id="amount" type="number" min="0" max="${amountMax}" step="0.001" value="${clamp(link.amount, 0, amountMax)}">
         </div>
       </div>
       ${link.to === "audio" ? `
@@ -752,8 +1049,20 @@ function renderPanel() {
           <input id="velocitySensitivity" type="number" min="0" max="1" step="0.001" value="${link.velocitySensitivity}">
         </div>
       </div>
+      <div class="field">
+        <label for="linkDelay">Delay</label>
+        <div class="field-row">
+          <input id="linkDelayRange" type="range" min="0" max="3" step="0.001" value="${link.delay}">
+          <input id="linkDelay" type="number" min="0" max="3" step="0.001" value="${link.delay}">
+        </div>
+      </div>
+      <label class="toggle-row" for="drone">
+        <input id="drone" type="checkbox" ${link.drone ? "checked" : ""}>
+        <span>Drone</span>
+      </label>
+      ${envelopeControls}
       <section class="effect-section">
-        <div class="section-title">${link.to === "audio" ? "Output filter" : `${escapeHtml(from)} pre-filter`}</div>
+        <div class="section-title">Filter</div>
         <div class="field">
           <label for="filterType">Type</label>
           <select id="filterType">
@@ -775,15 +1084,9 @@ function renderPanel() {
           </div>
         </div>
       </section>
-      ${drawAdsr(link.envelope)}
-      ${adsrField("delay", "Delay", link.envelope.delay, 0, 4)}
-      ${adsrField("attack", "Attack", link.envelope.attack, 0.001, 4)}
-      ${adsrField("decay", "Decay", link.envelope.decay, 0.001, 4)}
-      ${adsrField("sustain", "Sustain", link.envelope.sustain, 0, 1)}
-      ${adsrField("release", "Release", link.envelope.release, 0.001, 6)}
     `;
 
-    bindNumberPair("amount", "amountRange", 0, 8, (value) => {
+    bindNumberPair("amount", "amountRange", 0, amountMax, (value) => {
       link.amount = value;
       sendGraph();
       savePatch();
@@ -803,8 +1106,26 @@ function renderPanel() {
       savePatch();
     });
 
+    bindNumberPair("linkDelay", "linkDelayRange", 0, 3, (value) => {
+      link.delay = value;
+      sendGraph();
+      savePatch();
+    });
+
+    panel.querySelector("#drone").addEventListener("change", (event) => {
+      link.drone = event.target.checked;
+      if (link.drone) ensureAudio();
+      renderPanel();
+      sendGraph();
+      savePatch();
+    });
+
     panel.querySelector("#modulationTarget")?.addEventListener("change", (event) => {
       link.modulationTarget = event.target.value;
+      if (link.modulationTarget === "mix") {
+        link.amount = clamp(link.amount, 0, 1);
+        renderPanel();
+      }
       sendGraph();
       savePatch();
     });
@@ -827,15 +1148,17 @@ function renderPanel() {
       savePatch();
     });
 
-    for (const name of ["delay", "attack", "decay", "sustain", "release"]) {
-      const max = name === "sustain" ? 1 : name === "release" ? 6 : 4;
-      const min = name === "delay" || name === "sustain" ? 0 : 0.001;
-      bindNumberPair(name, `${name}Range`, min, max, (value) => {
-        link.envelope[name] = value;
-        refreshAdsrView(link.envelope);
-        sendGraph();
-        savePatch();
-      });
+    if (!link.drone) {
+      for (const name of ["delay", "attack", "decay", "sustain", "release"]) {
+        const max = name === "sustain" ? 1 : name === "release" ? 6 : 4;
+        const min = name === "delay" || name === "sustain" ? 0 : 0.001;
+        bindNumberPair(name, `${name}Range`, min, max, (value) => {
+          link.envelope[name] = value;
+          refreshAdsrView(link.envelope);
+          sendGraph();
+          savePatch();
+        });
+      }
     }
 
     return;
@@ -888,7 +1211,7 @@ function renderMasterEffectsPanel() {
 
 function patchFileName() {
   const name = slugifyPatchName(state.patchName || "visual-fm-patch");
-  return `${name}.yaml`;
+  return `${name}-${timestampForFile(new Date())}.yaml`;
 }
 
 function downloadPatch() {
@@ -1137,21 +1460,32 @@ function nodeFrequencyLabel(node) {
   return `${Number(node.ratio).toFixed(2)}x`;
 }
 
-function outputFilterTargetLabel(nodeId) {
-  const node = nodeById(nodeId);
-  const name = nodeName(node);
-  const hasAudioOutput = state.links.some((link) => link.from === nodeId && link.to === "audio");
-  return hasAudioOutput ? `${name} -> Audio Out filter cutoff` : `${name} output filter cutoff`;
-}
-
 function modulationTargetLabel(target, destination = "") {
   const labels = {
     phase: "Phase (default)",
     frequency: "Frequency",
+    ring: "Ring",
+    fold: "Fold",
+    mix: "Mix",
     filterCutoff: "Filter cutoff",
+    filterResonance: "Resonance",
     amplitude: "Amplitude",
+    delay: "Delay",
+    pan: "Pan",
   };
   return labels[target] || target;
+}
+
+function modulationTargetsForLink(link) {
+  const kind = linkTargetKind(link);
+  if (kind === "link") {
+    const targetLink = linkById(link.to);
+    return linkHasPan(targetLink)
+      ? LINK_MODULATION_TARGETS
+      : LINK_MODULATION_TARGETS.filter((target) => target !== "pan");
+  }
+  if (kind === "node") return NODE_MODULATION_TARGETS;
+  return [];
 }
 
 function adsrField(name, label, value, min, max) {
@@ -1352,10 +1686,25 @@ function removeNode(id) {
   removeNodes([id]);
 }
 
+function pruneDanglingLinkTargets() {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const linkIds = new Set(state.links.map((link) => link.id));
+    const nextLinks = state.links.filter((link) => (
+      nodeById(link.from)
+        && (nodeById(link.to) || link.to === "audio" || (linkIds.has(link.to) && link.to !== link.id))
+    ));
+    changed = nextLinks.length !== state.links.length;
+    state.links = nextLinks;
+  }
+}
+
 function removeNodes(ids) {
   const idSet = new Set(ids);
   state.nodes = state.nodes.filter((node) => !idSet.has(node.id));
   state.links = state.links.filter((link) => !idSet.has(link.from) && !idSet.has(link.to));
+  pruneDanglingLinkTargets();
   state.selected = { type: null, id: null };
   render();
   sendGraph();
@@ -1364,6 +1713,7 @@ function removeNodes(ids) {
 
 function removeLink(id) {
   state.links = state.links.filter((link) => link.id !== id);
+  pruneDanglingLinkTargets();
   state.selected = { type: null, id: null };
   render();
   sendGraph();
@@ -1377,14 +1727,17 @@ function upsertLink(from, to) {
     return;
   }
 
+  const targetLink = linkById(to);
   const link = {
     id: uid("link"),
     from,
     to,
     amount: to === "audio" ? 0.85 : 0.65,
+    delay: 0,
     pan: 0,
     velocitySensitivity: to === "audio" ? 1 : 0,
-    modulationTarget: to === "audio" ? "amplitude" : "phase",
+    modulationTarget: to === "audio" ? "amplitude" : targetLink ? "filterCutoff" : "phase",
+    drone: false,
     filter: { ...DEFAULT_LINK_FILTER },
     envelope: to === "audio"
       ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
@@ -1479,9 +1832,12 @@ function onLinkPointerUp(event) {
   const target = document.elementFromPoint(event.clientX, event.clientY);
   const inputAnchor = target?.closest?.(".anchor.input");
   const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
+  const linkAnchor = target?.closest?.(".link-anchor.input");
 
   if (inputAnchor?.dataset.nodeId) {
     upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+  } else if (linkAnchor?.dataset.linkId) {
+    upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
   } else if (audioAnchor) {
     upsertLink(linkDrag.from, "audio");
   }
@@ -1556,10 +1912,12 @@ addNodeButton.addEventListener("click", () => {
   addNode();
 });
 
+recordButton.addEventListener("click", toggleRecording);
+
 stage.addEventListener("pointerdown", onStagePointerDown);
 
 stage.addEventListener("dblclick", (event) => {
-  if (event.target.closest?.(".node, .audio-out, .wire-hit")) return;
+  if (event.target.closest?.(".node, .audio-out, .wire-hit, .link-anchor")) return;
   ensureAudio();
   addNode(stagePoint(event.clientX, event.clientY));
 });

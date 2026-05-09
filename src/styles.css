@@ -4,13 +4,13 @@
   --surface: #17191d;
   --surface-2: #20242a;
   --surface-3: #2a3038;
-  --line: #3d4652;
-  --line-hot: #75d0a4;
+  --line: #5d4b8a;
+  --line-hot: #8f75d8;
   --text: #f1f4f2;
   --muted: #a7b0b2;
-  --blue: #7fb7ff;
-  --amber: #f4bd5b;
-  --rose: #f0708d;
+  --blue: #456a9a;
+  --amber: #9a7430;
+  --rose: #9a4158;
   --green: #75d0a4;
   --shadow: 0 18px 70px rgba(0, 0, 0, 0.35);
   font-family:
@@ -150,6 +150,39 @@ select {
   line-height: 1;
 }
 
+.record-button {
+  background: rgba(20, 22, 26, 0.78);
+  backdrop-filter: blur(14px);
+}
+
+.record-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.record-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f04f5f;
+  box-shadow: 0 0 0 3px rgba(240, 79, 95, 0.14);
+}
+
+.record-button.recording {
+  border-color: rgba(240, 79, 95, 0.55);
+  color: #f04f5f;
+}
+
+.record-button.recording .record-dot {
+  animation: recordBlink 1s steps(2, start) infinite;
+}
+
+@keyframes recordBlink {
+  50% {
+    opacity: 0.24;
+  }
+}
+
 .icon-button:hover,
 .text-button:hover,
 .audio-out:hover {
@@ -192,13 +225,32 @@ select {
   stroke: var(--amber);
 }
 
+.wire.link-mod {
+  stroke: var(--blue);
+}
+
 .wire.feedback {
   stroke: var(--rose);
 }
 
 .wire.selected {
-  stroke: var(--line-hot);
-  filter: drop-shadow(0 0 7px rgba(117, 208, 164, 0.38));
+  stroke: #8f75d8;
+  filter: drop-shadow(0 0 10px rgba(143, 117, 216, 0.78)) drop-shadow(0 0 18px rgba(143, 117, 216, 0.34));
+}
+
+.wire.output.selected {
+  stroke: #e0a43f;
+  filter: drop-shadow(0 0 10px rgba(224, 164, 63, 0.78)) drop-shadow(0 0 18px rgba(224, 164, 63, 0.34));
+}
+
+.wire.link-mod.selected {
+  stroke: #6fa5e8;
+  filter: drop-shadow(0 0 10px rgba(111, 165, 232, 0.78)) drop-shadow(0 0 18px rgba(111, 165, 232, 0.34));
+}
+
+.wire.feedback.selected {
+  stroke: #d75c78;
+  filter: drop-shadow(0 0 10px rgba(215, 92, 120, 0.78)) drop-shadow(0 0 18px rgba(215, 92, 120, 0.34));
 }
 
 .wire-hit {
@@ -207,6 +259,23 @@ select {
   stroke-width: 18;
   stroke-linecap: round;
   cursor: pointer;
+}
+
+.link-anchor {
+  fill: var(--rose);
+  stroke: #0e1114;
+  stroke-width: 3;
+  cursor: crosshair;
+  pointer-events: auto;
+}
+
+.link-anchor.selected {
+  fill: var(--green);
+  filter: drop-shadow(0 0 6px rgba(117, 208, 164, 0.44));
+}
+
+.link-anchor:hover {
+  filter: drop-shadow(0 0 7px rgba(117, 208, 164, 0.42));
 }
 
 .node {
@@ -229,7 +298,11 @@ select {
 
 .node.selected {
   border-color: var(--green);
-  box-shadow: 0 0 0 1px rgba(117, 208, 164, 0.45), var(--shadow);
+  box-shadow:
+    0 0 0 1px rgba(117, 208, 164, 0.85),
+    0 0 18px rgba(117, 208, 164, 0.42),
+    0 0 42px rgba(117, 208, 164, 0.18),
+    var(--shadow);
 }
 
 .node-title {
@@ -382,7 +455,8 @@ select {
 .toggle-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 10px;
   margin: 0 0 14px;
   color: var(--text);
   font-weight: 720;
@@ -398,26 +472,6 @@ select {
   margin: 0 0 14px;
   color: var(--text);
   font-weight: 720;
-}
-
-.readout-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 0 10px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.readout-row:last-child {
-  margin-bottom: 0;
-}
-
-.readout-row strong {
-  color: var(--text);
-  font-weight: 700;
-  text-align: right;
 }
 
 .field input,
