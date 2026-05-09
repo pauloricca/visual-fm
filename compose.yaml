@@ -1,0 +1,9 @@
+services:
+  visual-fm:
+    build: .
+    command: ["python", "-m", "http.server", "8839", "--bind", "0.0.0.0"]
+    ports:
+      - "8839:8839"
+    volumes:
+      - .:/app:ro
+    restart: unless-stopped

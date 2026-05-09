@@ -1,0 +1,1617 @@
+const stage = document.querySelector("#stage");
+const nodeLayer = document.querySelector("#nodeLayer");
+const wireLayer = document.querySelector("#wireLayer");
+const panel = document.querySelector("#panel");
+const addNodeButton = document.querySelector("#addNodeButton");
+const audioOut = document.querySelector("#audioOut");
+const audioStatus = document.querySelector("#audioStatus");
+const midiStatus = document.querySelector("#midiStatus");
+const selectionRect = document.querySelector("#selectionRect");
+
+const STORAGE_KEY = "visual-fm.patch.v1";
+const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
+const LINK_MODULATION_TARGETS = ["phase", "frequency", "filterCutoff", "amplitude"];
+const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
+
+const defaultPatch = {
+  patchName: "Visual FM Patch",
+  midiChannel: "all",
+  midiInputId: "all",
+  masterEffects: {
+    chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },
+    delay: { enabled: false, time: 0.28, feedback: 0.35, mix: 0.25 },
+    reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
+  },
+  nodes: [
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440 },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880 },
+  ],
+  links: [
+    {
+      id: "link-1",
+      from: "op-2",
+      to: "op-1",
+      amount: 0.8,
+      velocitySensitivity: 0,
+      modulationTarget: "phase",
+      drone: false,
+      filter: { ...DEFAULT_LINK_FILTER },
+      envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
+    },
+    {
+      id: "link-2",
+      from: "op-1",
+      to: "audio",
+      amount: 0.9,
+      pan: 0,
+      velocitySensitivity: 1,
+      modulationTarget: "amplitude",
+      drone: false,
+      filter: { ...DEFAULT_LINK_FILTER },
+      envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },
+    },
+  ],
+};
+
+const state = {
+  ...loadPatch(),
+  selected: { type: "node", id: "op-1" },
+};
+
+const keyMap = new Map([
+  ["z", 48],
+  ["s", 49],
+  ["x", 50],
+  ["d", 51],
+  ["c", 52],
+  ["v", 53],
+  ["g", 54],
+  ["b", 55],
+  ["h", 56],
+  ["n", 57],
+  ["j", 58],
+  ["m", 59],
+  [",", 60],
+]);
+
+let audioContext = null;
+let synthNode = null;
+let nodeCounter = 3;
+let linkCounter = 3;
+let dragState = null;
+let linkDrag = null;
+let marqueeState = null;
+let pressedKeys = new Set();
+let midiAccess = null;
+let suppressNextStageClick = false;
+
+syncCounters();
+if (!nodeById(state.selected.id) && state.nodes[0]) {
+  state.selected = { type: "node", id: state.nodes[0].id };
+}
+
+function uid(prefix) {
+  const next = prefix === "op" ? nodeCounter++ : linkCounter++;
+  return `${prefix}-${next}`;
+}
+
+function alphaName(index) {
+  let name = "";
+  let value = index + 1;
+
+  while (value > 0) {
+    value -= 1;
+    name = String.fromCharCode(65 + (value % 26)) + name;
+    value = Math.floor(value / 26);
+  }
+
+  return name;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function nodeName(node) {
+  return node?.name?.trim() || node?.id?.replace("op-", "Operator ") || "Operator";
+}
+
+function clonePatch(patch) {
+  return JSON.parse(JSON.stringify(patch));
+}
+
+function normalizeMasterEffects(effects = {}) {
+  return {
+    chorus: {
+      enabled: Boolean(effects.chorus?.enabled),
+      rate: clamp(Number(effects.chorus?.rate) || 0.8, 0.05, 6),
+      depth: clamp(Number(effects.chorus?.depth) || 0.012, 0.001, 0.04),
+      mix: clamp(Number(effects.chorus?.mix) || 0.25, 0, 1),
+    },
+    delay: {
+      enabled: Boolean(effects.delay?.enabled),
+      time: clamp(Number(effects.delay?.time) || 0.28, 0.02, 1.5),
+      feedback: clamp(Number(effects.delay?.feedback) || 0.35, 0, 0.92),
+      mix: clamp(Number(effects.delay?.mix) || 0.25, 0, 1),
+    },
+    reverb: {
+      enabled: Boolean(effects.reverb?.enabled),
+      size: clamp(Number(effects.reverb?.size) || 0.55, 0.1, 1),
+      decay: clamp(Number(effects.reverb?.decay) || 0.45, 0, 0.94),
+      mix: clamp(Number(effects.reverb?.mix) || 0.25, 0, 1),
+    },
+  };
+}
+
+function normalizeLinkFilter(filter = {}) {
+  const type = LINK_FILTER_TYPES.includes(filter.type) ? filter.type : DEFAULT_LINK_FILTER.type;
+  return {
+    type,
+    cutoff: Number.isFinite(Number(filter.cutoff))
+      ? clamp(Number(filter.cutoff), 20, 12000)
+      : DEFAULT_LINK_FILTER.cutoff,
+    resonance: Number.isFinite(Number(filter.resonance))
+      ? clamp(Number(filter.resonance), 0.1, 12)
+      : DEFAULT_LINK_FILTER.resonance,
+  };
+}
+
+function normalizeModulationTarget(target, to) {
+  if (to === "audio") return "amplitude";
+  return LINK_MODULATION_TARGETS.includes(target) ? target : "phase";
+}
+
+function normalizeFrequencyMode(mode) {
+  return mode === "fixed" ? "fixed" : "ratio";
+}
+
+function normalizePatch(patch) {
+  const source = patch && Array.isArray(patch.nodes) && Array.isArray(patch.links) ? patch : defaultPatch;
+  const patchName = typeof source.patchName === "string" && source.patchName.trim()
+    ? source.patchName.trim()
+    : "Visual FM Patch";
+  const sourceMidiChannel = String(source.midiChannel || "all");
+  const midiChannel = sourceMidiChannel === "all" || (Number(sourceMidiChannel) >= 1 && Number(sourceMidiChannel) <= 16)
+    ? sourceMidiChannel
+    : "all";
+  const midiInputId = typeof source.midiInputId === "string" && source.midiInputId.trim()
+    ? source.midiInputId
+    : "all";
+  const nodes = source.nodes.map((node, index) => ({
+    id: typeof node.id === "string" ? node.id : `op-${index + 1}`,
+    name: typeof node.name === "string" && node.name.trim() ? node.name : alphaName(index),
+    x: Number.isFinite(node.x) ? node.x : 220 + index * 210,
+    y: Number.isFinite(node.y) ? node.y : 220,
+    wave: ["sine", "triangle", "saw", "square", "noise"].includes(node.wave) ? node.wave : "sine",
+    frequencyMode: normalizeFrequencyMode(node.frequencyMode),
+    ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0.125, 16) : 1,
+    frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0.01, 12000) : 440,
+  }));
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const links = source.links
+    .filter((link) => nodeIds.has(link.from) && (nodeIds.has(link.to) || link.to === "audio"))
+    .map((link, index) => ({
+      id: typeof link.id === "string" ? link.id : `link-${index + 1}`,
+      from: link.from,
+      to: link.to,
+      amount: Number.isFinite(Number(link.amount)) ? Number(link.amount) : 0.65,
+      pan: Number.isFinite(Number(link.pan)) ? clamp(Number(link.pan), -1, 1) : 0,
+      velocitySensitivity: Number.isFinite(Number(link.velocitySensitivity))
+        ? clamp(Number(link.velocitySensitivity), 0, 1)
+        : link.to === "audio" ? 1 : 0,
+      modulationTarget: normalizeModulationTarget(link.modulationTarget, link.to),
+      drone: Boolean(link.drone),
+      filter: normalizeLinkFilter(link.filter),
+      envelope: {
+        delay: Number.isFinite(Number(link.envelope?.delay)) ? Number(link.envelope.delay) : 0,
+        attack: Number.isFinite(Number(link.envelope?.attack)) ? Number(link.envelope.attack) : 0.03,
+        decay: Number.isFinite(Number(link.envelope?.decay)) ? Number(link.envelope.decay) : 0.16,
+        sustain: Number.isFinite(Number(link.envelope?.sustain)) ? Number(link.envelope.sustain) : 0.65,
+        release: Number.isFinite(Number(link.envelope?.release)) ? Number(link.envelope.release) : 0.26,
+      },
+    }));
+
+  return { patchName, midiChannel, midiInputId, masterEffects: normalizeMasterEffects(source.masterEffects), nodes, links };
+}
+
+function loadPatch() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return normalizePatch(saved ? JSON.parse(saved) : clonePatch(defaultPatch));
+  } catch {
+    return normalizePatch(clonePatch(defaultPatch));
+  }
+}
+
+function savePatch() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchData()));
+  } catch {
+    // Storage can fail in private browsing or restricted contexts; the synth should keep running.
+  }
+}
+
+function currentPatchData() {
+  return {
+    patchName: state.patchName,
+    midiChannel: state.midiChannel,
+    midiInputId: state.midiInputId,
+    masterEffects: state.masterEffects,
+    nodes: state.nodes,
+    links: state.links,
+  };
+}
+
+function syncCounters() {
+  const maxNodeId = state.nodes.reduce((max, node) => {
+    const match = /^op-(\d+)$/.exec(node.id);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  const maxLinkId = state.links.reduce((max, link) => {
+    const match = /^link-(\d+)$/.exec(link.id);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+  nodeCounter = maxNodeId + 1;
+  linkCounter = maxLinkId + 1;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function nodeById(id) {
+  return state.nodes.find((node) => node.id === id);
+}
+
+function linkById(id) {
+  return state.links.find((link) => link.id === id);
+}
+
+function selectedNodeIds() {
+  if (state.selected.type === "node" && state.selected.id) return [state.selected.id];
+  if (state.selected.type === "nodes") return state.selected.ids || [];
+  return [];
+}
+
+function isNodeSelected(id) {
+  return selectedNodeIds().includes(id);
+}
+
+function selectNodes(ids) {
+  const uniqueIds = [...new Set(ids)].filter((id) => nodeById(id));
+  if (uniqueIds.length === 0) {
+    state.selected = { type: null, id: null };
+  } else if (uniqueIds.length === 1) {
+    state.selected = { type: "node", id: uniqueIds[0] };
+  } else {
+    state.selected = { type: "nodes", ids: uniqueIds };
+  }
+  render();
+}
+
+function addNodeToSelection(id) {
+  selectNodes([...selectedNodeIds(), id]);
+}
+
+function removeNodeFromSelection(id) {
+  selectNodes(selectedNodeIds().filter((selectedId) => selectedId !== id));
+}
+
+function duplicateNodes(ids) {
+  const uniqueIds = [...new Set(ids)].filter((id) => nodeById(id));
+  const idMap = new Map();
+  const copies = uniqueIds.map((id) => {
+    const source = nodeById(id);
+    const copy = {
+      ...clonePatch(source),
+      id: uid("op"),
+      name: `${nodeName(source)} copy`,
+    };
+    idMap.set(id, copy.id);
+    return copy;
+  });
+  const links = state.links
+    .filter((link) => idMap.has(link.from) && (idMap.has(link.to) || link.to === "audio"))
+    .map((link) => ({
+      ...clonePatch(link),
+      id: uid("link"),
+      from: idMap.get(link.from),
+      to: link.to === "audio" ? "audio" : idMap.get(link.to),
+    }));
+
+  state.nodes.push(...copies);
+  state.links.push(...links);
+  selectNodes(copies.map((node) => node.id));
+  sendGraph();
+  savePatch();
+  return { copies, idMap };
+}
+
+function stagePoint(clientX, clientY) {
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: clientX - rect.left,
+    y: clientY - rect.top,
+  };
+}
+
+function nodeOutputPoint(id) {
+  const node = nodeById(id);
+  return { x: node.x, y: node.y + 43 };
+}
+
+function nodeInputPoint(id) {
+  const node = nodeById(id);
+  return { x: node.x, y: node.y - 43 };
+}
+
+function audioInputPoint() {
+  const stageRect = stage.getBoundingClientRect();
+  const rect = audioOut.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2 - stageRect.left,
+    y: rect.top - stageRect.top,
+  };
+}
+
+function bezierPath(from, to) {
+  const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
+  return `M ${from.x} ${from.y} C ${from.x} ${from.y + distance}, ${to.x} ${to.y - distance}, ${to.x} ${to.y}`;
+}
+
+function feedbackPath(nodeId) {
+  const from = nodeOutputPoint(nodeId);
+  const to = nodeInputPoint(nodeId);
+  const loopWidth = 118;
+  return `M ${from.x} ${from.y} C ${from.x + loopWidth} ${from.y + 54}, ${to.x + loopWidth} ${to.y - 54}, ${to.x} ${to.y}`;
+}
+
+function sendGraph() {
+  if (!synthNode) return;
+  synthNode.port.postMessage({
+    type: "graph",
+    payload: {
+      nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency }) => ({
+        id,
+        wave,
+        frequencyMode,
+        ratio,
+        frequency,
+      })),
+      links: state.links.map((link) => ({
+        id: link.id,
+        from: link.from,
+        to: link.to,
+        amount: Number(link.amount),
+        pan: Number(link.pan) || 0,
+        velocitySensitivity: Number(link.velocitySensitivity) || 0,
+        modulationTarget: link.modulationTarget || "phase",
+        filter: { ...link.filter },
+        envelope: { ...link.envelope },
+      })),
+      masterEffects: state.masterEffects,
+    },
+  });
+}
+
+async function ensureAudio() {
+  if (audioContext?.state === "running") return;
+
+  if (!audioContext) {
+    audioContext = new AudioContext();
+    await audioContext.audioWorklet.addModule("./src/audio-worklet.js");
+    synthNode = new AudioWorkletNode(audioContext, "visual-fm-engine", {
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    synthNode.connect(audioContext.destination);
+    sendGraph();
+  }
+
+  await audioContext.resume();
+  audioStatus.textContent = "Audio ready";
+  audioStatus.classList.add("ready");
+}
+
+function noteOn(note, velocity = 1) {
+  ensureAudio().then(() => {
+    synthNode?.port.postMessage({ type: "noteOn", payload: { note, velocity } });
+  });
+}
+
+function noteOff(note) {
+  synthNode?.port.postMessage({ type: "noteOff", payload: { note } });
+}
+
+async function setupMidi() {
+  if (!navigator.requestMIDIAccess) {
+    midiStatus.textContent = "MIDI unavailable";
+    return;
+  }
+
+  try {
+    const midi = await navigator.requestMIDIAccess();
+    midiAccess = midi;
+    const wireInput = (input) => {
+      input.onmidimessage = (event) => {
+        if (!isMidiInputSelected(input)) return;
+
+        const [status, note, value] = event.data;
+        const command = status & 0xf0;
+        const channel = (status & 0x0f) + 1;
+        if (state.midiChannel !== "all" && channel !== Number(state.midiChannel)) {
+          return;
+        }
+
+        if (command === 0x90 && value > 0) {
+          noteOn(note, value / 127);
+        } else if (command === 0x80 || (command === 0x90 && value === 0)) {
+          noteOff(note);
+        }
+      };
+    };
+
+    midi.inputs.forEach(wireInput);
+    midi.onstatechange = () => {
+      midi.inputs.forEach(wireInput);
+      updateMidiStatus(midi);
+      if (!state.selected.type) {
+        renderPanel();
+      }
+    };
+    updateMidiStatus(midi);
+  } catch {
+    midiStatus.textContent = "MIDI blocked";
+  }
+}
+
+function isMidiInputSelected(input) {
+  return state.midiInputId === "all" || input.id === state.midiInputId;
+}
+
+function midiChannelLabel() {
+  return state.midiChannel === "all" ? "all" : `ch ${state.midiChannel}`;
+}
+
+function midiInputs(midi = midiAccess) {
+  return midi?.inputs ? [...midi.inputs.values()] : [];
+}
+
+function midiInputLabel(id = state.midiInputId, midi = midiAccess) {
+  if (id === "all") return "all inputs";
+  const input = midiInputs(midi).find((item) => item.id === id);
+  return input?.name || "selected input";
+}
+
+function updateMidiStatus(midi = midiAccess) {
+  const count = midi?.inputs?.size || 0;
+  midiStatus.textContent = count ? `${midiInputLabel(state.midiInputId, midi)} · ${midiChannelLabel()}` : "No MIDI input";
+  midiStatus.classList.toggle("ready", count > 0);
+}
+
+function renderNodes() {
+  nodeLayer.innerHTML = "";
+
+  for (const node of state.nodes) {
+    const element = document.createElement("div");
+    element.className = `node ${isNodeSelected(node.id) ? "selected" : ""}`;
+    element.style.left = `${node.x}px`;
+    element.style.top = `${node.y}px`;
+    element.dataset.nodeId = node.id;
+    element.innerHTML = `
+      <span class="anchor input" data-anchor="input" data-node-id="${node.id}" title="Input"></span>
+      <div class="node-title">${escapeHtml(nodeName(node))}</div>
+      <div class="node-meta"><span>${node.wave}</span><span>${nodeFrequencyLabel(node)}</span></div>
+      <span class="anchor output" data-anchor="output" data-node-id="${node.id}" title="Output"></span>
+    `;
+
+    element.addEventListener("pointerdown", onNodePointerDown);
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+
+    nodeLayer.appendChild(element);
+  }
+}
+
+function renderAudioOut() {
+  audioOut.classList.toggle("selected", state.selected.type === "audio");
+}
+
+function renderWires() {
+  wireLayer.innerHTML = "";
+
+  for (const link of state.links) {
+    const from = nodeOutputPoint(link.from);
+    const to = link.to === "audio" ? audioInputPoint() : nodeInputPoint(link.to);
+    const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+
+    visible.setAttribute("d", path);
+    visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+
+    hit.setAttribute("d", path);
+    hit.setAttribute("class", "wire-hit");
+    hit.addEventListener("click", (event) => {
+      event.stopPropagation();
+      select("link", link.id);
+    });
+
+    group.append(visible, hit);
+    wireLayer.appendChild(group);
+  }
+
+  if (linkDrag) {
+    const preview = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    preview.setAttribute("d", bezierPath(nodeOutputPoint(linkDrag.from), linkDrag.to));
+    preview.setAttribute("class", "wire selected");
+    preview.setAttribute("stroke-dasharray", "7 7");
+    wireLayer.appendChild(preview);
+  }
+}
+
+function drawAdsr(envelope) {
+  const width = 276;
+  const height = 116;
+  const left = 14;
+  const right = 262;
+  const bottom = 94;
+  const top = 20;
+  const timelineWidth = right - left;
+  const delay = Math.max(0, envelope.delay || 0);
+  const attack = Math.max(0.001, envelope.attack);
+  const decay = Math.max(0.001, envelope.decay);
+  const release = Math.max(0.001, envelope.release);
+  const sustain = clamp(envelope.sustain, 0, 1);
+  const sustainHold = 0.55;
+  const total = delay + attack + decay + release + sustainHold;
+  const delayWidth = Math.max(delay > 0 ? 8 : 0, (delay / total) * timelineWidth);
+  const attackWidth = Math.max(8, (attack / total) * timelineWidth);
+  const decayWidth = Math.max(8, (decay / total) * timelineWidth);
+  const releaseWidth = Math.max(8, (release / total) * timelineWidth);
+  const used = delayWidth + attackWidth + decayWidth + releaseWidth;
+  const holdWidth = Math.max(16, timelineWidth - used);
+  const scale = timelineWidth / (delayWidth + attackWidth + decayWidth + holdWidth + releaseWidth);
+  const delayX = left + delayWidth * scale;
+  const attackX = delayX + attackWidth * scale;
+  const decayX = attackX + decayWidth * scale;
+  const sustainX = decayX + holdWidth * scale;
+  const releaseX = right;
+  const sustainY = bottom - (bottom - top) * sustain;
+  const attackControl = Math.max(6, (attackX - delayX) * 0.35);
+  const decayControl = Math.max(6, (decayX - attackX) * 0.45);
+  const releaseControl = Math.max(6, (releaseX - sustainX) * 0.5);
+  const points = [
+    [left, bottom],
+    [delayX, bottom],
+    [attackX, top],
+    [decayX, sustainY],
+    [sustainX, sustainY],
+    [releaseX, bottom],
+  ];
+  const line = `
+    M ${left} ${bottom}
+    L ${delayX} ${bottom}
+    C ${delayX + attackControl * 0.35} ${bottom}, ${attackX - attackControl} ${top}, ${attackX} ${top}
+    C ${attackX + decayControl} ${top}, ${decayX - decayControl * 0.5} ${sustainY}, ${decayX} ${sustainY}
+    L ${sustainX} ${sustainY}
+    C ${sustainX + releaseControl * 0.45} ${sustainY}, ${releaseX - releaseControl} ${bottom}, ${releaseX} ${bottom}
+  `;
+  const fill = `${line} L ${releaseX} ${bottom} L ${left} ${bottom} Z`;
+  return `
+    <svg class="adsr-view" viewBox="0 0 ${width} ${height}" role="img" aria-label="Envelope">
+      <path d="${fill}" fill="rgba(117, 208, 164, 0.16)"></path>
+      <path d="${line}" fill="none" stroke="#75d0a4" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+      ${points.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="4" fill="#f1f4f2"></circle>`).join("")}
+    </svg>
+  `;
+}
+
+function renderPanel() {
+  const selection = state.selected;
+  if (selection.type === "nodes") {
+    const count = selectedNodeIds().length;
+    panel.innerHTML = `
+      <h1>${count} nodes selected</h1>
+      <p class="panel-subtitle">Drag any selected node to move the group.</p>
+    `;
+    return;
+  }
+
+  if (selection.type === "node") {
+    const node = nodeById(selection.id);
+    if (!node) return renderEmptyPanel();
+    const isFixedFrequency = node.frequencyMode === "fixed";
+    const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
+    const frequencyMin = isFixedFrequency ? 0.01 : 0.125;
+    const frequencyMax = isFixedFrequency ? 12000 : 16;
+    const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
+
+    panel.innerHTML = `
+      <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
+      <p class="panel-subtitle">Oscillator</p>
+      <div class="field">
+        <label for="nodeName">Name</label>
+        <input id="nodeName" type="text" value="${escapeHtml(nodeName(node))}" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="wave">Wave type</label>
+        <select id="wave">
+          ${["sine", "triangle", "saw", "square", "noise"].map((wave) => `<option value="${wave}" ${node.wave === wave ? "selected" : ""}>${wave}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label for="frequencyMode">Tuning</label>
+        <select id="frequencyMode">
+          <option value="ratio" ${node.frequencyMode === "ratio" ? "selected" : ""}>Ratio</option>
+          <option value="fixed" ${node.frequencyMode === "fixed" ? "selected" : ""}>Fixed</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="frequencyValue">${isFixedFrequency ? "Frequency (Hz)" : "Ratio (x)"}</label>
+        <div class="field-row">
+          <input id="frequencyValueRange" type="range" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
+          <input id="frequencyValue" type="number" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
+        </div>
+      </div>
+    `;
+
+    panel.querySelector("#nodeName").addEventListener("input", (event) => {
+      node.name = event.target.value;
+      panel.querySelector("#nodeHeading").textContent = nodeName(node);
+      renderNodes();
+      savePatch();
+    });
+    panel.querySelector("#nodeName").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.currentTarget.blur();
+      }
+    });
+    panel.querySelector("#wave").addEventListener("change", (event) => {
+      node.wave = event.target.value;
+      renderNodes();
+      sendGraph();
+      savePatch();
+    });
+    panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
+      node.frequencyMode = event.target.value;
+      render();
+      sendGraph();
+      savePatch();
+    });
+    bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
+      if (node.frequencyMode === "fixed") {
+        node.frequency = value;
+      } else {
+        node.ratio = value;
+      }
+      renderNodes();
+      sendGraph();
+      savePatch();
+    });
+    return;
+  }
+
+  if (selection.type === "audio") {
+    renderMasterEffectsPanel();
+    return;
+  }
+
+  if (selection.type === "link") {
+    const link = linkById(selection.id);
+    if (!link) return renderEmptyPanel();
+    const from = nodeName(nodeById(link.from));
+    const to = link.to === "audio" ? "Audio Out" : nodeName(nodeById(link.to));
+    const outputFilterTarget = link.to === "audio" ? "" : outputFilterTargetLabel(link.to);
+
+    panel.innerHTML = `
+      <h1>${link.to === "audio" ? "Output envelope" : "Modulation"}</h1>
+      <p class="panel-subtitle">${from} -> ${to}</p>
+      ${link.to !== "audio" ? `
+        <div class="field">
+          <label for="modulationTarget">Modulates</label>
+          <select id="modulationTarget">
+            ${LINK_MODULATION_TARGETS.map((target) => `<option value="${target}" ${link.modulationTarget === target ? "selected" : ""}>${modulationTargetLabel(target, to)}</option>`).join("")}
+          </select>
+        </div>
+      ` : ""}
+      ${link.modulationTarget === "filterCutoff" ? `
+        <section class="effect-section">
+          <div class="section-title">Output filter target</div>
+          <div class="readout-row"><span>Target</span><strong>${escapeHtml(outputFilterTarget)}</strong></div>
+          <div class="readout-row"><span>Base</span><strong>Yellow link cutoff</strong></div>
+        </section>
+      ` : ""}
+      <div class="field">
+        <label for="amount">Amount</label>
+        <div class="field-row">
+          <input id="amountRange" type="range" min="0" max="8" step="0.001" value="${link.amount}">
+          <input id="amount" type="number" min="0" max="8" step="0.001" value="${link.amount}">
+        </div>
+      </div>
+      ${link.to === "audio" ? `
+        <div class="field">
+          <label for="pan">Pan</label>
+          <div class="field-row">
+            <input id="panRange" type="range" min="-1" max="1" step="0.001" value="${link.pan}">
+            <input id="pan" type="number" min="-1" max="1" step="0.001" value="${link.pan}">
+          </div>
+        </div>
+      ` : ""}
+      <div class="field">
+        <label for="velocitySensitivity">Velocity</label>
+        <div class="field-row">
+          <input id="velocitySensitivityRange" type="range" min="0" max="1" step="0.001" value="${link.velocitySensitivity}">
+          <input id="velocitySensitivity" type="number" min="0" max="1" step="0.001" value="${link.velocitySensitivity}">
+        </div>
+      </div>
+      <section class="effect-section">
+        <div class="section-title">${link.to === "audio" ? "Output filter" : `${escapeHtml(from)} pre-filter`}</div>
+        <div class="field">
+          <label for="filterType">Type</label>
+          <select id="filterType">
+            ${LINK_FILTER_TYPES.map((type) => `<option value="${type}" ${link.filter.type === type ? "selected" : ""}>${filterTypeLabel(type)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label for="filterCutoff">Cutoff (Hz)</label>
+          <div class="field-row">
+            <input id="filterCutoffRange" type="range" min="20" max="12000" step="1" value="${link.filter.cutoff}">
+            <input id="filterCutoff" type="number" min="20" max="12000" step="1" value="${link.filter.cutoff}">
+          </div>
+        </div>
+        <div class="field">
+          <label for="filterResonance">Resonance</label>
+          <div class="field-row">
+            <input id="filterResonanceRange" type="range" min="0.1" max="12" step="0.001" value="${link.filter.resonance}">
+            <input id="filterResonance" type="number" min="0.1" max="12" step="0.001" value="${link.filter.resonance}">
+          </div>
+        </div>
+      </section>
+      ${drawAdsr(link.envelope)}
+      ${adsrField("delay", "Delay", link.envelope.delay, 0, 4)}
+      ${adsrField("attack", "Attack", link.envelope.attack, 0.001, 4)}
+      ${adsrField("decay", "Decay", link.envelope.decay, 0.001, 4)}
+      ${adsrField("sustain", "Sustain", link.envelope.sustain, 0, 1)}
+      ${adsrField("release", "Release", link.envelope.release, 0.001, 6)}
+    `;
+
+    bindNumberPair("amount", "amountRange", 0, 8, (value) => {
+      link.amount = value;
+      sendGraph();
+      savePatch();
+    });
+
+    if (link.to === "audio") {
+      bindNumberPair("pan", "panRange", -1, 1, (value) => {
+        link.pan = value;
+        sendGraph();
+        savePatch();
+      });
+    }
+
+    bindNumberPair("velocitySensitivity", "velocitySensitivityRange", 0, 1, (value) => {
+      link.velocitySensitivity = value;
+      sendGraph();
+      savePatch();
+    });
+
+    panel.querySelector("#modulationTarget")?.addEventListener("change", (event) => {
+      link.modulationTarget = event.target.value;
+      sendGraph();
+      savePatch();
+    });
+
+    panel.querySelector("#filterType").addEventListener("change", (event) => {
+      link.filter.type = event.target.value;
+      sendGraph();
+      savePatch();
+    });
+
+    bindNumberPair("filterCutoff", "filterCutoffRange", 20, 12000, (value) => {
+      link.filter.cutoff = value;
+      sendGraph();
+      savePatch();
+    });
+
+    bindNumberPair("filterResonance", "filterResonanceRange", 0.1, 12, (value) => {
+      link.filter.resonance = value;
+      sendGraph();
+      savePatch();
+    });
+
+    for (const name of ["delay", "attack", "decay", "sustain", "release"]) {
+      const max = name === "sustain" ? 1 : name === "release" ? 6 : 4;
+      const min = name === "delay" || name === "sustain" ? 0 : 0.001;
+      bindNumberPair(name, `${name}Range`, min, max, (value) => {
+        link.envelope[name] = value;
+        refreshAdsrView(link.envelope);
+        sendGraph();
+        savePatch();
+      });
+    }
+
+    return;
+  }
+
+  renderEmptyPanel();
+}
+
+function renderMasterEffectsPanel() {
+  const { chorus, delay, reverb } = state.masterEffects;
+  panel.innerHTML = `
+    <h1>Audio Out</h1>
+    <p class="panel-subtitle">Master effects</p>
+    ${effectSection("chorus", "Chorus", chorus, [
+      ["rate", "Rate", 0.05, 6, "Hz"],
+      ["depth", "Depth", 0.001, 0.04, "s"],
+      ["mix", "Mix", 0, 1, ""],
+    ])}
+    ${effectSection("delay", "Delay", delay, [
+      ["time", "Time", 0.02, 1.5, "s"],
+      ["feedback", "Feedback", 0, 0.92, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ])}
+    ${effectSection("reverb", "Reverb", reverb, [
+      ["size", "Size", 0.1, 1, ""],
+      ["decay", "Decay", 0, 0.94, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ])}
+  `;
+
+  for (const effectName of ["chorus", "delay", "reverb"]) {
+    const effect = state.masterEffects[effectName];
+    const toggle = panel.querySelector(`#${effectName}Enabled`);
+    toggle.addEventListener("change", (event) => {
+      effect.enabled = event.target.checked;
+      sendGraph();
+      savePatch();
+    });
+
+    for (const input of panel.querySelectorAll(`[data-effect="${effectName}"]`)) {
+      const key = input.dataset.param;
+      bindNumberPair(`${effectName}-${key}`, `${effectName}-${key}Range`, Number(input.min), Number(input.max), (value) => {
+        effect[key] = value;
+        sendGraph();
+        savePatch();
+      });
+    }
+  }
+}
+
+function patchFileName() {
+  const name = slugifyPatchName(state.patchName || "visual-fm-patch");
+  return `${name}.yaml`;
+}
+
+function downloadPatch() {
+  const patch = currentPatchData();
+  const yaml = `# Visual FM patch\n# visual-fm-json: ${encodePatchJson(patch)}\n${toYaml(patch)}\n`;
+  const blob = new Blob([yaml], { type: "application/x-yaml" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = patchFileName();
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function loadPatchFile(file) {
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const patch = parsePatchFile(text);
+    applyPatchData(patch);
+  } catch (error) {
+    alert(`Could not load patch: ${error.message}`);
+  } finally {
+    const input = panel.querySelector("#loadPatchInput");
+    if (input) input.value = "";
+  }
+}
+
+function applyPatchData(patch) {
+  const normalized = normalizePatch(patch);
+  state.patchName = normalized.patchName;
+  state.midiChannel = normalized.midiChannel;
+  state.midiInputId = normalized.midiInputId;
+  state.masterEffects = normalized.masterEffects;
+  state.nodes = normalized.nodes;
+  state.links = normalized.links;
+  state.selected = state.nodes[0] ? { type: "node", id: state.nodes[0].id } : { type: null, id: null };
+  syncCounters();
+  synthNode?.port.postMessage({ type: "panic" });
+  pressedKeys.clear();
+  updateMidiStatus();
+  render();
+  sendGraph();
+  savePatch();
+}
+
+function newPatch() {
+  if (!confirm("Clear the current patch and start a new one? Unsaved changes will be lost.")) {
+    return;
+  }
+
+  const midiChannel = state.midiChannel;
+  const midiInputId = state.midiInputId;
+  const normalized = normalizePatch(clonePatch(defaultPatch));
+  state.patchName = "Untitled Patch";
+  state.midiChannel = midiChannel;
+  state.midiInputId = midiInputId;
+  state.masterEffects = normalized.masterEffects;
+  state.nodes = normalized.nodes;
+  state.links = normalized.links;
+  state.selected = { type: null, id: null };
+  syncCounters();
+  synthNode?.port.postMessage({ type: "panic" });
+  pressedKeys.clear();
+  updateMidiStatus();
+  render();
+  sendGraph();
+  savePatch();
+}
+
+function slugifyPatchName(name) {
+  const slug = String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "visual-fm-patch";
+}
+
+function parsePatchFile(text) {
+  const encoded = /^# visual-fm-json: (.+)$/m.exec(text)?.[1];
+  if (encoded) {
+    return JSON.parse(decodePatchJson(encoded.trim()));
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return parseSimpleYaml(text);
+  }
+}
+
+function encodePatchJson(patch) {
+  const bytes = new TextEncoder().encode(JSON.stringify(patch));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodePatchJson(encoded) {
+  const binary = atob(encoded);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function toYaml(value, indent = 0) {
+  const space = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `${space}[]`;
+    return value.map((item) => `${space}-\n${toYaml(item, indent + 2)}`).join("\n");
+  }
+
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return `${space}{}`;
+    return entries.map(([key, item]) => {
+      if (Array.isArray(item) && item.length === 0) return `${space}${key}: []`;
+      if (item && typeof item === "object" && Object.keys(item).length === 0) return `${space}${key}: {}`;
+      if (item && typeof item === "object") {
+        return `${space}${key}:\n${toYaml(item, indent + 2)}`;
+      }
+      return `${space}${key}: ${yamlScalar(item)}`;
+    }).join("\n");
+  }
+
+  return `${space}${yamlScalar(value)}`;
+}
+
+function yamlScalar(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  return JSON.stringify(value);
+}
+
+function parseSimpleYaml(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((raw) => ({ indent: raw.match(/^ */)?.[0].length || 0, text: raw.trim() }))
+    .filter((line) => line.text && !line.text.startsWith("#"));
+
+  const [value, index] = parseYamlBlock(lines, 0, 0);
+  if (index < lines.length) throw new Error("Unsupported YAML structure");
+  return value;
+}
+
+function parseYamlBlock(lines, index, indent) {
+  if (!lines[index]) return [{}, index];
+  if (lines[index].indent < indent) return [{}, index];
+  return lines[index].text.startsWith("-")
+    ? parseYamlArray(lines, index, indent)
+    : parseYamlObject(lines, index, indent);
+}
+
+function parseYamlArray(lines, index, indent) {
+  const array = [];
+  while (lines[index] && lines[index].indent === indent && lines[index].text.startsWith("-")) {
+    const inline = lines[index].text.slice(1).trim();
+    index += 1;
+    if (inline) {
+      array.push(parseYamlScalar(inline));
+    } else {
+      const [item, nextIndex] = parseYamlBlock(lines, index, indent + 2);
+      array.push(item);
+      index = nextIndex;
+    }
+  }
+  return [array, index];
+}
+
+function parseYamlObject(lines, index, indent) {
+  const object = {};
+  while (lines[index] && lines[index].indent === indent && !lines[index].text.startsWith("-")) {
+    const separator = lines[index].text.indexOf(":");
+    if (separator === -1) throw new Error("Invalid YAML line");
+    const key = lines[index].text.slice(0, separator).trim();
+    const inline = lines[index].text.slice(separator + 1).trim();
+    index += 1;
+    if (inline) {
+      object[key] = parseYamlScalar(inline);
+    } else {
+      const [item, nextIndex] = parseYamlBlock(lines, index, indent + 2);
+      object[key] = item;
+      index = nextIndex;
+    }
+  }
+  return [object, index];
+}
+
+function parseYamlScalar(value) {
+  if (value === "[]") return [];
+  if (value === "{}") return {};
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (value === "null") return null;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (value.startsWith('"')) return JSON.parse(value);
+  return value;
+}
+
+function effectSection(id, title, effect, params) {
+  return `
+    <section class="effect-section">
+      <label class="toggle-row" for="${id}Enabled">
+        <span>${title}</span>
+        <input id="${id}Enabled" type="checkbox" ${effect.enabled ? "checked" : ""}>
+      </label>
+      ${params.map(([key, label, min, max, unit]) => effectField(id, key, label, effect[key], min, max, unit)).join("")}
+    </section>
+  `;
+}
+
+function effectField(effectId, key, label, value, min, max, unit) {
+  const id = `${effectId}-${key}`;
+  const step = max <= 1 ? 0.001 : 0.01;
+  return `
+    <div class="field">
+      <label for="${id}">${label}${unit ? ` (${unit})` : ""}</label>
+      <div class="field-row">
+        <input id="${id}Range" type="range" min="${min}" max="${max}" step="${step}" value="${value}">
+        <input id="${id}" data-effect="${effectId}" data-param="${key}" type="number" min="${min}" max="${max}" step="${step}" value="${value}">
+      </div>
+    </div>
+  `;
+}
+
+function filterTypeLabel(type) {
+  const labels = {
+    none: "None",
+    lowpass: "Low-pass",
+    highpass: "High-pass",
+    bandpass: "Band-pass",
+  };
+  return labels[type] || type;
+}
+
+function nodeFrequencyLabel(node) {
+  if (node.frequencyMode === "fixed") {
+    const frequency = Number(node.frequency);
+    const label = frequency < 10 ? frequency.toFixed(2) : frequency < 100 ? frequency.toFixed(1) : String(Math.round(frequency));
+    return `${label} Hz`;
+  }
+  return `${Number(node.ratio).toFixed(2)}x`;
+}
+
+function outputFilterTargetLabel(nodeId) {
+  const node = nodeById(nodeId);
+  const name = nodeName(node);
+  const hasAudioOutput = state.links.some((link) => link.from === nodeId && link.to === "audio");
+  return hasAudioOutput ? `${name} -> Audio Out filter cutoff` : `${name} output filter cutoff`;
+}
+
+function modulationTargetLabel(target, destination = "") {
+  const labels = {
+    phase: "Phase (default)",
+    frequency: "Frequency",
+    filterCutoff: "Filter cutoff",
+    amplitude: "Amplitude",
+  };
+  return labels[target] || target;
+}
+
+function adsrField(name, label, value, min, max) {
+  return `
+    <div class="field">
+      <label for="${name}">${label}</label>
+      <div class="field-row">
+        <input id="${name}Range" type="range" min="${min}" max="${max}" step="0.001" value="${value}">
+        <input id="${name}" type="number" min="${min}" max="${max}" step="0.001" value="${value}">
+      </div>
+    </div>
+  `;
+}
+
+function bindNumberPair(numberId, rangeId, min, max, onValue) {
+  const number = panel.querySelector(`#${numberId}`);
+  const range = panel.querySelector(`#${rangeId}`);
+
+  const commitValue = (rawValue, { updateNumber = true } = {}) => {
+    if (rawValue === "" || rawValue === "." || rawValue === "-") return;
+
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+
+    const value = clamp(parsed, min, max);
+    if (updateNumber) {
+      number.value = String(value);
+    }
+    range.value = String(value);
+    onValue(value);
+  };
+
+  number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false }));
+  number.addEventListener("focus", (event) => event.target.select());
+  number.addEventListener("pointerup", (event) => {
+    event.preventDefault();
+    event.target.select();
+  });
+  number.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      commitValue(event.currentTarget.value);
+      event.currentTarget.blur();
+    }
+  });
+  number.addEventListener("blur", (event) => commitValue(event.target.value));
+  range.addEventListener("input", (event) => commitValue(event.target.value));
+}
+
+function refreshAdsrView(envelope) {
+  const current = panel.querySelector(".adsr-view");
+  if (!current) return;
+
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = drawAdsr(envelope).trim();
+  current.replaceWith(wrapper.firstElementChild);
+}
+
+function selectionBounds(start, current) {
+  return {
+    x: Math.min(start.x, current.x),
+    y: Math.min(start.y, current.y),
+    width: Math.abs(current.x - start.x),
+    height: Math.abs(current.y - start.y),
+  };
+}
+
+function renderSelectionRect() {
+  if (!marqueeState?.active) {
+    selectionRect.style.display = "none";
+    return;
+  }
+
+  const bounds = selectionBounds(marqueeState.start, marqueeState.current);
+  selectionRect.style.display = "block";
+  selectionRect.style.left = `${bounds.x}px`;
+  selectionRect.style.top = `${bounds.y}px`;
+  selectionRect.style.width = `${bounds.width}px`;
+  selectionRect.style.height = `${bounds.height}px`;
+}
+
+function nodesInsideSelection() {
+  if (!marqueeState) return [];
+  const bounds = selectionBounds(marqueeState.start, marqueeState.current);
+  const right = bounds.x + bounds.width;
+  const bottom = bounds.y + bounds.height;
+  return state.nodes
+    .filter((node) => node.x >= bounds.x && node.x <= right && node.y >= bounds.y && node.y <= bottom)
+    .map((node) => node.id);
+}
+
+function renderEmptyPanel() {
+  const midiChannelOptions = [
+    `<option value="all" ${state.midiChannel === "all" ? "selected" : ""}>All channels</option>`,
+    ...Array.from({ length: 16 }, (_, index) => {
+      const channel = String(index + 1);
+      return `<option value="${channel}" ${state.midiChannel === channel ? "selected" : ""}>Channel ${channel}</option>`;
+    }),
+  ].join("");
+  const inputs = midiInputs();
+  const hasSelectedInput = state.midiInputId === "all" || inputs.some((input) => input.id === state.midiInputId);
+  const midiInputOptions = [
+    `<option value="all" ${state.midiInputId === "all" ? "selected" : ""}>All inputs</option>`,
+    ...inputs.map((input) => (
+      `<option value="${escapeHtml(input.id)}" ${state.midiInputId === input.id ? "selected" : ""}>${escapeHtml(input.name || "MIDI input")}</option>`
+    )),
+    ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
+  ].join("");
+
+  panel.innerHTML = `
+    <div class="panel-empty">
+      <h1>Patch</h1>
+      <p class="panel-subtitle">File and MIDI settings</p>
+      <div class="field">
+        <label for="patchName">Name</label>
+        <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
+      </div>
+      <div class="panel-actions">
+        <button class="text-button" id="newPatchButton" type="button">New</button>
+        <button class="text-button" id="savePatchButton" type="button">Save</button>
+        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <input class="visually-hidden" id="loadPatchInput" type="file" accept=".yaml,.yml,.json,application/x-yaml,application/json">
+      </div>
+      <div class="field">
+        <label for="midiInput">MIDI input</label>
+        <select id="midiInput">${midiInputOptions}</select>
+      </div>
+      <div class="field">
+        <label for="midiChannel">Receive channel</label>
+        <select id="midiChannel">${midiChannelOptions}</select>
+      </div>
+    </div>
+  `;
+
+  panel.querySelector("#patchName").addEventListener("input", (event) => {
+    state.patchName = event.target.value;
+    savePatch();
+  });
+  panel.querySelector("#patchName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    }
+  });
+  panel.querySelector("#savePatchButton").addEventListener("click", downloadPatch);
+  panel.querySelector("#newPatchButton").addEventListener("click", newPatch);
+  panel.querySelector("#loadPatchButton").addEventListener("click", () => {
+    panel.querySelector("#loadPatchInput").click();
+  });
+  panel.querySelector("#loadPatchInput").addEventListener("change", (event) => {
+    loadPatchFile(event.target.files?.[0]);
+  });
+  panel.querySelector("#midiInput").addEventListener("change", (event) => {
+    state.midiInputId = event.target.value;
+    synthNode?.port.postMessage({ type: "panic" });
+    pressedKeys.clear();
+    updateMidiStatus();
+    savePatch();
+  });
+  panel.querySelector("#midiChannel").addEventListener("change", (event) => {
+    state.midiChannel = event.target.value;
+    synthNode?.port.postMessage({ type: "panic" });
+    pressedKeys.clear();
+    updateMidiStatus();
+    savePatch();
+  });
+}
+
+function select(type, id) {
+  state.selected = { type, id };
+  render();
+}
+
+function render() {
+  renderNodes();
+  renderWires();
+  renderAudioOut();
+  renderPanel();
+}
+
+function addNode(position = null) {
+  const rect = stage.getBoundingClientRect();
+  const node = {
+    id: uid("op"),
+    name: alphaName(nodeCounter - 2),
+    x: position ? clamp(position.x, 90, rect.width - 90) : rect.width / 2 + (Math.random() - 0.5) * 160,
+    y: position ? clamp(position.y, 96, rect.height - 126) : Math.max(128, rect.height / 2 + (Math.random() - 0.5) * 120),
+    wave: "sine",
+    frequencyMode: "ratio",
+    ratio: 1,
+    frequency: 440,
+  };
+  state.nodes.push(node);
+  select("node", node.id);
+  sendGraph();
+  savePatch();
+}
+
+function removeNode(id) {
+  removeNodes([id]);
+}
+
+function removeNodes(ids) {
+  const idSet = new Set(ids);
+  state.nodes = state.nodes.filter((node) => !idSet.has(node.id));
+  state.links = state.links.filter((link) => !idSet.has(link.from) && !idSet.has(link.to));
+  state.selected = { type: null, id: null };
+  render();
+  sendGraph();
+  savePatch();
+}
+
+function removeLink(id) {
+  state.links = state.links.filter((link) => link.id !== id);
+  state.selected = { type: null, id: null };
+  render();
+  sendGraph();
+  savePatch();
+}
+
+function upsertLink(from, to) {
+  const existing = state.links.find((link) => link.from === from && link.to === to);
+  if (existing) {
+    select("link", existing.id);
+    return;
+  }
+
+  const link = {
+    id: uid("link"),
+    from,
+    to,
+    amount: to === "audio" ? 0.85 : 0.65,
+    pan: 0,
+    velocitySensitivity: to === "audio" ? 1 : 0,
+    modulationTarget: to === "audio" ? "amplitude" : "phase",
+    filter: { ...DEFAULT_LINK_FILTER },
+    envelope: to === "audio"
+      ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
+      : { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
+  };
+  state.links.push(link);
+  select("link", link.id);
+  sendGraph();
+  savePatch();
+}
+
+function onNodePointerDown(event) {
+  const anchor = event.target.closest("[data-anchor]");
+  const nodeElement = event.currentTarget;
+  const nodeId = nodeElement.dataset.nodeId;
+
+  event.preventDefault();
+  ensureAudio();
+
+  if (anchor?.dataset.anchor === "output") {
+    event.stopPropagation();
+    linkDrag = {
+      from: nodeId,
+      to: stagePoint(event.clientX, event.clientY),
+    };
+    window.addEventListener("pointermove", onLinkPointerMove);
+    window.addEventListener("pointerup", onLinkPointerUp, { once: true });
+    renderWires();
+    return;
+  }
+
+  if (anchor?.dataset.anchor === "input") {
+    return;
+  }
+
+  if (event.shiftKey || event.metaKey) {
+    event.stopPropagation();
+    addNodeToSelection(nodeId);
+    return;
+  }
+
+  const start = stagePoint(event.clientX, event.clientY);
+  const sourceIds = isNodeSelected(nodeId) ? selectedNodeIds() : [nodeId];
+  const ids = event.altKey ? duplicateNodes(sourceIds).copies.map((node) => node.id) : sourceIds;
+  dragState = {
+    nodes: ids.map((id) => {
+      const node = nodeById(id);
+      return {
+        id,
+        offsetX: start.x - node.x,
+        offsetY: start.y - node.y,
+      };
+    }),
+  };
+  window.addEventListener("pointermove", onNodePointerMove);
+  window.addEventListener("pointerup", onNodePointerUp, { once: true });
+  if (!event.altKey && !isNodeSelected(nodeId)) {
+    select("node", nodeId);
+  }
+}
+
+function onNodePointerMove(event) {
+  if (!dragState) return;
+  const point = stagePoint(event.clientX, event.clientY);
+  const rect = stage.getBoundingClientRect();
+  for (const item of dragState.nodes) {
+    const node = nodeById(item.id);
+    if (!node) continue;
+    node.x = clamp(point.x - item.offsetX, 90, rect.width - 90);
+    node.y = clamp(point.y - item.offsetY, 96, rect.height - 126);
+  }
+  renderNodes();
+  renderWires();
+}
+
+function onNodePointerUp() {
+  if (dragState) {
+    savePatch();
+  }
+  dragState = null;
+  window.removeEventListener("pointermove", onNodePointerMove);
+}
+
+function onLinkPointerMove(event) {
+  if (!linkDrag) return;
+  linkDrag.to = stagePoint(event.clientX, event.clientY);
+  renderWires();
+}
+
+function onLinkPointerUp(event) {
+  if (!linkDrag) return;
+  const target = document.elementFromPoint(event.clientX, event.clientY);
+  const inputAnchor = target?.closest?.(".anchor.input");
+  const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
+
+  if (inputAnchor?.dataset.nodeId) {
+    upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+  } else if (audioAnchor) {
+    upsertLink(linkDrag.from, "audio");
+  }
+
+  linkDrag = null;
+  window.removeEventListener("pointermove", onLinkPointerMove);
+  renderWires();
+}
+
+function onStageResize() {
+  renderWires();
+}
+
+function isEmptyCanvasTarget(target) {
+  return target === stage || target === nodeLayer || target === wireLayer;
+}
+
+function onStagePointerDown(event) {
+  if (event.button !== 0 || !isEmptyCanvasTarget(event.target)) return;
+
+  const point = stagePoint(event.clientX, event.clientY);
+  marqueeState = {
+    active: true,
+    moved: false,
+    start: point,
+    current: point,
+  };
+  renderSelectionRect();
+  window.addEventListener("pointermove", onMarqueePointerMove);
+  window.addEventListener("pointerup", onMarqueePointerUp, { once: true });
+}
+
+function onMarqueePointerMove(event) {
+  if (!marqueeState) return;
+
+  marqueeState.current = stagePoint(event.clientX, event.clientY);
+  const bounds = selectionBounds(marqueeState.start, marqueeState.current);
+  marqueeState.moved = bounds.width > 4 || bounds.height > 4;
+  renderSelectionRect();
+
+  if (marqueeState.moved) {
+    const ids = nodesInsideSelection();
+    if (ids.length > 1) {
+      state.selected = { type: "nodes", ids };
+    } else if (ids.length === 1) {
+      state.selected = { type: "node", id: ids[0] };
+    } else {
+      state.selected = { type: null, id: null };
+    }
+    renderNodes();
+    renderPanel();
+  }
+}
+
+function onMarqueePointerUp() {
+  if (!marqueeState) return;
+
+  const shouldSelect = marqueeState.moved;
+  const ids = shouldSelect ? nodesInsideSelection() : [];
+  marqueeState = null;
+  renderSelectionRect();
+  window.removeEventListener("pointermove", onMarqueePointerMove);
+
+  if (shouldSelect) {
+    suppressNextStageClick = true;
+    selectNodes(ids);
+  }
+}
+
+addNodeButton.addEventListener("click", () => {
+  ensureAudio();
+  addNode();
+});
+
+stage.addEventListener("pointerdown", onStagePointerDown);
+
+stage.addEventListener("dblclick", (event) => {
+  if (event.target.closest?.(".node, .audio-out, .wire-hit")) return;
+  ensureAudio();
+  addNode(stagePoint(event.clientX, event.clientY));
+});
+
+stage.addEventListener("click", (event) => {
+  if (suppressNextStageClick) {
+    suppressNextStageClick = false;
+    return;
+  }
+  if (event.target === stage || event.target === nodeLayer || event.target === wireLayer) {
+    state.selected = { type: null, id: null };
+    render();
+  }
+});
+
+audioOut.addEventListener("click", (event) => {
+  event.stopPropagation();
+  select("audio", "audio");
+});
+
+window.addEventListener("resize", onStageResize);
+
+window.addEventListener("keydown", (event) => {
+  if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
+  if ((event.key === "Backspace" || event.key === "Delete") && state.selected.id) {
+    event.preventDefault();
+    if (state.selected.type === "node") {
+      removeNode(state.selected.id);
+    } else if (state.selected.type === "link") {
+      removeLink(state.selected.id);
+    }
+    return;
+  }
+
+  if ((event.key === "Backspace" || event.key === "Delete") && state.selected.type === "nodes") {
+    event.preventDefault();
+    removeNodes(selectedNodeIds());
+    return;
+  }
+
+  const note = keyMap.get(event.key);
+  if (note === undefined || pressedKeys.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return;
+  pressedKeys.add(event.key);
+  noteOn(note, 0.82);
+});
+
+window.addEventListener("keyup", (event) => {
+  const note = keyMap.get(event.key);
+  if (note === undefined) return;
+  pressedKeys.delete(event.key);
+  noteOff(note);
+});
+
+render();
+setupMidi();

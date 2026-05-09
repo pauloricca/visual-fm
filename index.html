@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Visual FM</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="stage" id="stage" aria-label="Visual FM patch canvas">
+        <div class="topbar">
+          <div class="brand">
+            <span class="brand-mark"></span>
+            <span>Visual FM</span>
+          </div>
+          <div class="transport">
+            <span class="status-pill" id="audioStatus">Audio idle</span>
+            <span class="status-pill" id="midiStatus">MIDI scanning</span>
+            <button class="icon-button primary" id="addNodeButton" type="button" aria-label="Add oscillator" title="Add oscillator">+</button>
+          </div>
+        </div>
+
+        <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
+        <div class="node-layer" id="nodeLayer"></div>
+        <div class="selection-rect" id="selectionRect" aria-hidden="true"></div>
+        <div class="link-preview" id="linkPreview"></div>
+
+        <button class="audio-out" id="audioOut" type="button" aria-label="Audio out">
+          <span class="audio-anchor" data-anchor="audio"></span>
+          <span>Audio Out</span>
+        </button>
+      </section>
+
+      <aside class="panel" id="panel" aria-label="Selection parameters"></aside>
+    </main>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
