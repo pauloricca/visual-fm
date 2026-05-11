@@ -118,6 +118,9 @@ let marqueeState = null;
 let pressedKeys = new Set();
 let midiAccess = null;
 let pendingPatchSave = null;
+let pendingGraphFrame = null;
+let pendingNodesAndWiresFrame = null;
+let pendingWiresFrame = null;
 let suppressNextStageClick = false;
 
 syncCounters();
@@ -899,34 +902,74 @@ function linkGeometry(link, visited = new Set()) {
   return { from, to, path, midpoint };
 }
 
-function sendGraph() {
+function graphPayload() {
+  return {
+    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency }) => ({
+      id,
+      wave,
+      frequencyMode,
+      ratio,
+      frequency,
+    })),
+    links: state.links.map((link) => ({
+      id: link.id,
+      from: link.from,
+      to: link.to,
+      amount: Number(link.amount),
+      delay: Number(link.delay) || 0,
+      pan: Number(link.pan) || 0,
+      velocitySensitivity: Number(link.velocitySensitivity) || 0,
+      modulationTarget: link.modulationTarget || "phase",
+      drone: Boolean(link.drone),
+      filter: { ...link.filter },
+      envelope: { ...link.envelope },
+    })),
+    maxVoices: state.maxVoices,
+    masterEffects: state.masterEffects,
+  };
+}
+
+function postGraph() {
   if (!synthNode) return;
   synthNode.port.postMessage({
     type: "graph",
-    payload: {
-      nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency }) => ({
-        id,
-        wave,
-        frequencyMode,
-        ratio,
-        frequency,
-      })),
-      links: state.links.map((link) => ({
-        id: link.id,
-        from: link.from,
-        to: link.to,
-        amount: Number(link.amount),
-        delay: Number(link.delay) || 0,
-        pan: Number(link.pan) || 0,
-        velocitySensitivity: Number(link.velocitySensitivity) || 0,
-        modulationTarget: link.modulationTarget || "phase",
-        drone: Boolean(link.drone),
-        filter: { ...link.filter },
-        envelope: { ...link.envelope },
-      })),
-      maxVoices: state.maxVoices,
-      masterEffects: state.masterEffects,
-    },
+    payload: graphPayload(),
+  });
+}
+
+function sendGraph({ immediate = false } = {}) {
+  if (!synthNode) return;
+
+  if (immediate) {
+    if (pendingGraphFrame) {
+      cancelAnimationFrame(pendingGraphFrame);
+      pendingGraphFrame = null;
+    }
+    postGraph();
+    return;
+  }
+
+  if (pendingGraphFrame) return;
+  pendingGraphFrame = requestAnimationFrame(() => {
+    pendingGraphFrame = null;
+    postGraph();
+  });
+}
+
+function scheduleNodesAndWiresRender() {
+  if (pendingNodesAndWiresFrame) return;
+  pendingNodesAndWiresFrame = requestAnimationFrame(() => {
+    pendingNodesAndWiresFrame = null;
+    renderNodes();
+    renderWires();
+  });
+}
+
+function scheduleWiresRender() {
+  if (pendingWiresFrame) return;
+  pendingWiresFrame = requestAnimationFrame(() => {
+    pendingWiresFrame = null;
+    renderWires();
   });
 }
 
@@ -939,7 +982,7 @@ async function ensureAudio() {
       outputChannelCount: [2],
     });
     synthNode.connect(audioContext.destination);
-    sendGraph();
+    sendGraph({ immediate: true });
   }
 
   if (synthNode && !recorderDestination) {
@@ -2403,8 +2446,7 @@ function onNodePointerMove(event) {
     node.x = clamp(point.x - item.offsetX, 90, rect.width - 90);
     node.y = clamp(point.y - item.offsetY, 96, rect.height - 126);
   }
-  renderNodes();
-  renderWires();
+  scheduleNodesAndWiresRender();
 }
 
 function onNodePointerUp() {
@@ -2418,7 +2460,7 @@ function onNodePointerUp() {
 function onLinkPointerMove(event) {
   if (!linkDrag) return;
   linkDrag.to = stagePoint(event.clientX, event.clientY);
-  renderWires();
+  scheduleWiresRender();
 }
 
 function onLinkPointerUp(event) {
@@ -2442,7 +2484,7 @@ function onLinkPointerUp(event) {
 }
 
 function onStageResize() {
-  renderWires();
+  scheduleWiresRender();
 }
 
 function isEmptyCanvasTarget(target) {

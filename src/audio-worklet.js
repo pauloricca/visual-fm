@@ -7,11 +7,20 @@ const MAX_MAX_ACTIVE_VOICES = 16;
 const NOTE_ON_BATCH_SECONDS = 0.008;
 const VOICE_START_FADE_SECONDS = 0.006;
 const VOICE_STEAL_FADE_SECONDS = 0.03;
+const EMPTY_LINKS = Object.freeze([]);
+const DEFAULT_ENVELOPE = Object.freeze({
+  delay: 0,
+  attack: 0.01,
+  decay: 0.16,
+  sustain: 0.72,
+  release: 0.24,
+});
 
 class VisualFmEngine extends AudioWorkletProcessor {
   constructor() {
     super();
     this.nodes = [];
+    this.nodesById = new Map();
     this.links = [];
     this.incoming = new Map();
     this.outputLinks = [];
@@ -65,20 +74,29 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   setGraph(graph) {
     this.nodes = (graph.nodes || []).map((node) => this.normalizeNode(node));
+    this.nodesById = new Map(this.nodes.map((node) => [node.id, node]));
     this.maxVoices = this.normalizeMaxVoices(graph.maxVoices);
     const rawLinks = graph.links || [];
     const rawLinksById = new Map(rawLinks.map((link) => [link.id, link]));
     this.links = rawLinks.map((link) => {
       const targetLink = rawLinksById.get(link.to);
-      return {
+      const filter = this.normalizeLinkFilter(link.filter);
+      const normalized = {
         ...link,
         modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to, targetLink),
         drone: Boolean(link.drone),
         amount: Math.max(0, Number(link.amount) || 0),
         delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
         pan: this.clamp(Number(link.pan) || 0, -1, 1),
-        filter: this.normalizeLinkFilter(link.filter),
+        velocitySensitivity: this.clamp(Number(link.velocitySensitivity) || 0, 0, VELOCITY_SENSITIVITY_MAX),
+        filter,
       };
+      normalized.filter = filter;
+      normalized.filterStateKey = `${normalized.id}:${filter.type}`;
+      normalized.baseParams = this.createBaseLinkParams(normalized);
+      normalized.modulators = EMPTY_LINKS;
+      normalized.hasModulators = false;
+      return normalized;
     });
     this.hasActiveDroneLinks = this.links.some((link) => link.drone);
     this.masterEffects = this.normalizeEffects(graph.masterEffects);
@@ -101,10 +119,20 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
     }
 
+    for (const link of this.links) {
+      const modulators = this.linkModulations.get(link.id);
+      link.modulators = modulators || EMPTY_LINKS;
+      link.hasModulators = Boolean(modulators?.length);
+    }
+
     for (const voice of [...this.voices.values(), this.droneVoice]) {
       if (!voice.nodeFilters) voice.nodeFilters = new Map();
       if (!voice.frequencyMods) voice.frequencyMods = new Map();
       if (!voice.linkDelays) voice.linkDelays = new Map();
+      if (!voice.renderCache) voice.renderCache = new Map();
+      if (!voice.renderStack) voice.renderStack = new Set();
+      if (!voice.linkStack) voice.linkStack = new Set();
+      if (!voice.linkParamCache) voice.linkParamCache = new Map();
       for (const node of this.nodes) {
         if (!voice.phases.has(node.id)) {
           voice.phases.set(node.id, Math.random());
@@ -160,11 +188,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   normalizeLinkFilter(filter = {}) {
     const type = ["none", "lowpass", "highpass", "bandpass"].includes(filter.type) ? filter.type : "none";
-    return {
+    const normalized = {
       type,
       cutoff: this.clamp(Number(filter.cutoff) || 5000, 20, Math.min(12000, sampleRate * 0.45)),
       resonance: this.clamp(Number(filter.resonance) || 0.7, 0.1, 12),
     };
+    normalized.coefficients = type === "none" ? null : this.filterCoefficients(normalized);
+    return normalized;
   }
 
   normalizeModulationTarget(target, to, targetLink = null) {
@@ -192,7 +222,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
   readDelay(buffer, writeIndex, delaySamples) {
     const length = buffer.length;
     let index = writeIndex - delaySamples;
-    while (index < 0) index += length;
+    if (index < 0) index += length;
 
     const indexA = Math.floor(index) % length;
     const indexB = (indexA + 1) % length;
@@ -253,9 +283,16 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   applyMasterEffects(sample, channel) {
     let effected = sample;
-    effected = this.applyChorus(effected, channel);
-    effected = this.applyDelay(effected, channel);
-    effected = this.applyReverb(effected, channel);
+    const { chorus, delay, reverb } = this.masterEffects;
+    if (chorus.enabled && chorus.mix > 0) {
+      effected = this.applyChorus(effected, channel);
+    }
+    if (delay.enabled && delay.mix > 0) {
+      effected = this.applyDelay(effected, channel);
+    }
+    if (reverb.enabled && reverb.mix > 0) {
+      effected = this.applyReverb(effected, channel);
+    }
     return Math.tanh(effected);
   }
 
@@ -275,6 +312,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
       linkDelays: new Map(),
       nodeFilters: new Map(),
       frequencyMods: new Map(),
+      renderCache: new Map(),
+      renderStack: new Set(),
+      linkStack: new Set(),
+      linkParamCache: new Map(),
       isDrone,
     };
 
@@ -468,8 +509,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   velocityScale(link, voice) {
-    const sensitivity = this.clamp(Number(link.velocitySensitivity) || 0, 0, VELOCITY_SENSITIVITY_MAX);
-    const velocity = this.clamp(Number(voice.velocity) || 0, 0, 1);
+    const sensitivity = link.velocitySensitivity;
+    if (sensitivity <= 0) return 1;
+    const velocity = voice.velocity;
+    if (sensitivity === 1) return velocity;
     if (sensitivity <= 1) {
       return 1 - sensitivity + sensitivity * velocity;
     }
@@ -499,35 +542,37 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return startGain * stealFade;
   }
 
-  envelopeValue(link, voice, now) {
-    if (link.drone) return 1;
-    if (voice.isDrone) return 0;
-
-    const env = link.envelope || { delay: 0, attack: 0.01, decay: 0.16, sustain: 0.72, release: 0.24 };
+  heldEnvelopeValue(link, voice, time) {
+    const env = link.envelope || DEFAULT_ENVELOPE;
     const delay = Math.max(0, env.delay || 0);
     const attack = Math.max(0.001, env.attack);
     const decay = Math.max(0.001, env.decay);
     const sustain = Math.max(0, Math.min(1, env.sustain));
+
+    let elapsed = Math.max(0, time - voice.startedAt);
+    if (elapsed < delay) return 0;
+    elapsed -= delay;
+    if (elapsed < attack) return this.attackCurve(elapsed / attack);
+    if (elapsed < attack + decay) {
+      const t = (elapsed - attack) / decay;
+      return sustain + (1 - sustain) * this.decayCurve(t);
+    }
+    return sustain;
+  }
+
+  envelopeValue(link, voice, now) {
+    if (link.drone) return 1;
+    if (voice.isDrone) return 0;
+
+    const env = link.envelope || DEFAULT_ENVELOPE;
     const release = Math.max(0.001, env.release);
 
-    const heldValue = (time) => {
-      let elapsed = Math.max(0, time - voice.startedAt);
-      if (elapsed < delay) return 0;
-      elapsed -= delay;
-      if (elapsed < attack) return this.attackCurve(elapsed / attack);
-      if (elapsed < attack + decay) {
-        const t = (elapsed - attack) / decay;
-        return sustain + (1 - sustain) * this.decayCurve(t);
-      }
-      return sustain;
-    };
-
     if (voice.releasedAt === null) {
-      return heldValue(now);
+      return this.heldEnvelopeValue(link, voice, now);
     }
 
     if (!voice.releaseLevels.has(link.id)) {
-      voice.releaseLevels.set(link.id, heldValue(voice.releasedAt));
+      voice.releaseLevels.set(link.id, this.heldEnvelopeValue(link, voice, voice.releasedAt));
     }
 
     const t = Math.max(0, Math.min(1, (now - voice.releasedAt) / release));
@@ -565,7 +610,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   linkFilterState(voice, link) {
-    const key = `${link.id}:${link.filter?.type || "none"}`;
+    const key = link.filterStateKey || link.id;
     if (!voice.linkFilters.has(key)) {
       voice.linkFilters.set(key, { x1: 0, x2: 0, y1: 0, y2: 0 });
     }
@@ -613,7 +658,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (filter.type === "none") return sample;
 
     const state = this.linkFilterState(voice, link);
-    const coefficients = this.filterCoefficients(filter);
+    const coefficients = filter.coefficients || this.filterCoefficients(filter);
     const output = coefficients.b0 * sample
       + coefficients.b1 * state.x1
       + coefficients.b2 * state.x2
@@ -692,29 +737,39 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return wrapped <= 2 ? wrapped - 1 : 3 - wrapped;
   }
 
-  baseLinkParams(link) {
+  createBaseLinkParams(link) {
+    const panGains = this.panGains(link.pan);
     return {
-      amount: Math.max(0, Number(link.amount) || 0),
-      delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
-      pan: this.clamp(Number(link.pan) || 0, -1, 1),
-      filter: {
-        type: link.filter?.type || "none",
-        cutoff: Number(link.filter?.cutoff) || 5000,
-        resonance: Number(link.filter?.resonance) || 0.7,
-      },
+      amount: link.amount,
+      delay: link.delay,
+      pan: link.pan,
+      panGains,
+      filter: link.filter,
     };
   }
 
   effectiveLinkParams(link, voice, now, cache, stack, linkStack = new Set()) {
-    const params = this.baseLinkParams(link);
-    if (linkStack.has(link.id)) return params;
+    const baseParams = link.baseParams || this.createBaseLinkParams(link);
+    if (!link.hasModulators || linkStack.has(link.id)) return baseParams;
+
+    const canUseCache = linkStack.size === 0;
+    const cachedParams = canUseCache ? voice.linkParamCache.get(link.id) : null;
+    if (cachedParams) return cachedParams;
+
+    const params = {
+      amount: baseParams.amount,
+      delay: baseParams.delay,
+      pan: baseParams.pan,
+      panGains: baseParams.panGains,
+      filter: baseParams.filter,
+    };
 
     let cutoffMod = 0;
     let resonanceMod = 0;
     let amplitudeMod = 0;
     let delayMod = 0;
     let panMod = 0;
-    const modulators = this.linkModulations.get(link.id) || [];
+    const modulators = link.modulators;
 
     linkStack.add(link.id);
     for (const modLink of modulators) {
@@ -737,11 +792,18 @@ class VisualFmEngine extends AudioWorkletProcessor {
     params.amount *= this.clamp(1 + amplitudeMod, 0, 4);
     params.delay = this.clamp(params.delay + delayMod, 0, MAX_LINK_DELAY_SECONDS);
     params.pan = this.clamp(params.pan + panMod, -1, 1);
+    params.panGains = panMod === 0 ? baseParams.panGains : this.panGains(params.pan);
     params.filter = {
-      ...params.filter,
+      type: params.filter.type,
       cutoff: this.clamp(params.filter.cutoff * Math.pow(2, this.clamp(cutoffMod, -5, 5)), 20, Math.min(12000, sampleRate * 0.45)),
       resonance: this.clamp(params.filter.resonance + resonanceMod, 0.1, 12),
     };
+    if (cutoffMod === 0 && resonanceMod === 0) {
+      params.filter = baseParams.filter;
+    }
+    if (canUseCache) {
+      voice.linkParamCache.set(link.id, params);
+    }
     return params;
   }
 
@@ -783,7 +845,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (cache.has(nodeId)) return cache.get(nodeId);
     if (stack.has(nodeId)) return 0;
 
-    const node = this.nodes.find((item) => item.id === nodeId);
+    const node = this.nodesById.get(nodeId);
     if (!node) return 0;
 
     stack.add(nodeId);
@@ -871,21 +933,27 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   renderVoice(voice, now) {
-    const cache = new Map();
+    const cache = voice.renderCache;
+    const stack = voice.renderStack;
+    const linkStack = voice.linkStack;
+    cache.clear();
+    stack.clear();
+    linkStack.clear();
+    voice.linkParamCache.clear();
     let voiceLeft = 0;
     let voiceRight = 0;
     voice.frequencyMods.clear();
 
     for (const link of this.outputLinks) {
-      const stack = new Set();
-      const linkStack = new Set();
+      stack.clear();
+      linkStack.clear();
       const params = this.effectiveLinkParams(link, voice, now, cache, stack, linkStack);
       const source = this.renderNode(link.from, voice, now, cache, stack, linkStack);
       const filteredSource = this.applyLinkFilter(link, voice, source, params.filter);
       const envelope = this.envelopeValue(link, voice, now);
       const delayedSource = this.applyLinkDelay(link, voice, filteredSource * envelope * this.velocityScale(link, voice), params);
       const linkSample = delayedSource * params.amount;
-      const pan = this.panGains(params.pan);
+      const pan = params.panGains;
       voiceLeft += linkSample * pan.left;
       voiceRight += linkSample * pan.right;
     }
