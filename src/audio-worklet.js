@@ -1,5 +1,10 @@
 const TWO_PI = Math.PI * 2;
 const MAX_LINK_DELAY_SECONDS = 3;
+const VELOCITY_SENSITIVITY_MAX = 8;
+const MAX_ACTIVE_VOICES = 5;
+const VOICE_START_FADE_SECONDS = 0.006;
+const MAX_STOLEN_FADE_VOICES = 1;
+const VOICE_STEAL_FADE_SECONDS = 0.012;
 
 class VisualFmEngine extends AudioWorkletProcessor {
   constructor() {
@@ -11,6 +16,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.linksById = new Map();
     this.linkModulations = new Map();
     this.voices = new Map();
+    this.activeVoicesByNote = new Map();
+    this.voiceCounter = 1;
     this.droneVoice = this.createVoice("drone", 440, 1, 0, true);
     this.hasActiveDroneLinks = false;
     this.sampleCursor = 0;
@@ -46,6 +53,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
       if (type === "panic") {
         this.voices.clear();
+        this.activeVoicesByNote.clear();
       }
     };
   }
@@ -103,12 +111,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   normalizeNode(node = {}) {
+    const ratio = Number(node.ratio);
+    const frequency = Number(node.frequency);
     return {
       id: node.id,
       wave: ["sine", "triangle", "saw", "square", "noise"].includes(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
-      ratio: this.clamp(Number(node.ratio) || 1, 0.125, 16),
-      frequency: this.clamp(Number(node.frequency) || 440, 0.01, Math.min(12000, sampleRate * 0.45)),
+      ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
+      frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
     };
   }
 
@@ -238,11 +248,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   createVoice(note, frequency, velocity = 1, startedAt = this.sampleCursor / sampleRate, isDrone = false) {
     const voice = {
+      id: isDrone ? "drone" : `voice-${this.voiceCounter++}`,
       note,
       frequency,
       velocity: Math.max(0.05, Math.min(1, velocity)),
       startedAt,
       releasedAt: null,
+      stolenAt: null,
       releaseLevels: new Map(),
       phases: new Map(),
       feedback: new Map(),
@@ -261,25 +273,122 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return voice;
   }
 
+  deleteVoice(voiceId) {
+    this.voices.delete(voiceId);
+    for (const [note, activeVoiceId] of this.activeVoicesByNote) {
+      if (activeVoiceId === voiceId) {
+        this.activeVoicesByNote.delete(note);
+      }
+    }
+  }
+
+  voiceStealCandidate() {
+    let candidateId = null;
+    let candidate = null;
+
+    for (const [voiceId, voice] of this.voices) {
+      if (voice.stolenAt !== null) continue;
+
+      if (!candidate) {
+        candidateId = voiceId;
+        candidate = voice;
+        continue;
+      }
+
+      const voiceReleased = voice.releasedAt !== null;
+      const candidateReleased = candidate.releasedAt !== null;
+      if (voiceReleased !== candidateReleased) {
+        if (voiceReleased) {
+          candidateId = voiceId;
+          candidate = voice;
+        }
+        continue;
+      }
+
+      const voiceTime = voiceReleased ? voice.releasedAt : voice.startedAt;
+      const candidateTime = candidateReleased ? candidate.releasedAt : candidate.startedAt;
+      if (voiceTime < candidateTime) {
+        candidateId = voiceId;
+        candidate = voice;
+      }
+    }
+
+    return candidateId;
+  }
+
+  enforceVoiceLimit(limit = MAX_ACTIVE_VOICES) {
+    const activeVoiceCount = () => {
+      let count = 0;
+      for (const voice of this.voices.values()) {
+        if (voice.stolenAt === null) count += 1;
+      }
+      return count;
+    };
+
+    while (activeVoiceCount() > limit) {
+      const voiceId = this.voiceStealCandidate();
+      if (!voiceId) return;
+      const voice = this.voices.get(voiceId);
+      if (!voice) return;
+      voice.stolenAt = this.sampleCursor / sampleRate;
+      this.forgetActiveVoice(voiceId);
+      this.enforceStolenFadeLimit();
+    }
+  }
+
+  forgetActiveVoice(voiceId) {
+    for (const [note, activeVoiceId] of this.activeVoicesByNote) {
+      if (activeVoiceId === voiceId) {
+        this.activeVoicesByNote.delete(note);
+      }
+    }
+  }
+
+  enforceStolenFadeLimit() {
+    const stolenVoices = [...this.voices.entries()]
+      .filter(([, voice]) => voice.stolenAt !== null)
+      .sort(([, voiceA], [, voiceB]) => voiceA.stolenAt - voiceB.stolenAt);
+
+    while (stolenVoices.length > MAX_STOLEN_FADE_VOICES) {
+      const [voiceId] = stolenVoices.shift();
+      this.deleteVoice(voiceId);
+    }
+  }
+
   noteOn(note, velocity = 1) {
+    const now = this.sampleCursor / sampleRate;
+    const activeVoice = this.voices.get(this.activeVoicesByNote.get(note));
+    if (activeVoice && activeVoice.releasedAt === null) {
+      activeVoice.releasedAt = now;
+      activeVoice.releaseLevels.clear();
+    }
+    this.enforceVoiceLimit(MAX_ACTIVE_VOICES - 1);
+
     const voice = this.createVoice(
       note,
       440 * Math.pow(2, (note - 69) / 12),
       velocity,
     );
-    this.voices.set(note, voice);
+    this.voices.set(voice.id, voice);
+    this.activeVoicesByNote.set(note, voice.id);
   }
 
   noteOff(note) {
-    const voice = this.voices.get(note);
+    const voiceId = this.activeVoicesByNote.get(note);
+    const voice = this.voices.get(voiceId);
     if (!voice) return;
     voice.releasedAt = this.sampleCursor / sampleRate;
     voice.releaseLevels.clear();
+    this.activeVoicesByNote.delete(note);
   }
 
   velocityScale(link, voice) {
-    const sensitivity = Math.max(0, Math.min(1, Number(link.velocitySensitivity) || 0));
-    return 1 - sensitivity + sensitivity * voice.velocity;
+    const sensitivity = this.clamp(Number(link.velocitySensitivity) || 0, 0, VELOCITY_SENSITIVITY_MAX);
+    const velocity = this.clamp(Number(voice.velocity) || 0, 0, 1);
+    if (sensitivity <= 1) {
+      return 1 - sensitivity + sensitivity * velocity;
+    }
+    return Math.pow(velocity, sensitivity);
   }
 
   attackCurve(t) {
@@ -288,6 +397,21 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   decayCurve(t) {
     return Math.pow(1 - t, 2);
+  }
+
+  smoothStep(t) {
+    const x = this.clamp(t, 0, 1);
+    return x * x * (3 - 2 * x);
+  }
+
+  voiceLifecycleGain(voice, now) {
+    const startGain = voice.isDrone
+      ? 1
+      : this.smoothStep((now - voice.startedAt) / VOICE_START_FADE_SECONDS);
+    if (voice.stolenAt === null) return startGain;
+
+    const stealFade = 1 - this.smoothStep((now - voice.stolenAt) / VOICE_STEAL_FADE_SECONDS);
+    return startGain * stealFade;
   }
 
   envelopeValue(link, voice, now) {
@@ -564,6 +688,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
+  baseFrequency(node, voice) {
+    return node.frequencyMode === "fixed"
+      ? node.frequency
+      : voice.frequency * (Number.isFinite(node.ratio) ? node.ratio : 1);
+  }
+
   renderNode(nodeId, voice, now, cache, stack, linkStack = new Set()) {
     if (cache.has(nodeId)) return cache.get(nodeId);
     if (stack.has(nodeId)) return 0;
@@ -605,7 +735,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
 
     const phase = voice.phases.get(nodeId);
-    let value = this.oscillator(node, phase + phaseMod);
+    const baseFrequency = this.baseFrequency(node, voice);
+    let value = baseFrequency <= 0 ? 0 : this.oscillator(node, phase + phaseMod);
     for (const modulation of ringMods) {
       const depth = this.clamp(modulation.amount, 0, 1);
       value = value * (1 - depth) + value * modulation.signal * depth;
@@ -629,9 +760,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
   advancePhases(voice) {
     for (const node of this.nodes) {
       if (node.wave === "noise") continue;
-      const baseFrequency = node.frequencyMode === "fixed"
-        ? node.frequency
-        : voice.frequency * (Number.isFinite(node.ratio) ? node.ratio : 1);
+      const baseFrequency = this.baseFrequency(node, voice);
       const frequencyMod = this.clamp(voice.frequencyMods.get(node.id) || 0, -5, 5);
       const frequencyMultiplier = Math.pow(2, frequencyMod);
       const current = voice.phases.get(node.id) || 0;
@@ -644,11 +773,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
     for (const link of this.links) {
       longestRelease = Math.max(longestRelease, (link.envelope?.release || 0.05) + (link.delay || 0));
     }
-    for (const [note, voice] of this.voices) {
-      if (voice.releasedAt !== null && now - voice.releasedAt > longestRelease + 0.08) {
-        this.voices.delete(note);
+    for (const [voiceId, voice] of this.voices) {
+      const stealFinished = voice.stolenAt !== null && now - voice.stolenAt > VOICE_STEAL_FADE_SECONDS;
+      const releaseFinished = voice.releasedAt !== null && now - voice.releasedAt > longestRelease + 0.08;
+      if (stealFinished || releaseFinished) {
+        this.deleteVoice(voiceId);
       }
     }
+    this.enforceVoiceLimit();
   }
 
   renderVoice(voice, now) {
@@ -672,9 +804,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
 
     this.advancePhases(voice);
+    const lifecycleGain = this.voiceLifecycleGain(voice, now);
     return {
-      left: Math.tanh(voiceLeft),
-      right: Math.tanh(voiceRight),
+      left: Math.tanh(voiceLeft) * lifecycleGain,
+      right: Math.tanh(voiceRight) * lifecycleGain,
     };
   }
 
