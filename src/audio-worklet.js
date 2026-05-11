@@ -1,5 +1,6 @@
 const TWO_PI = Math.PI * 2;
 const MAX_LINK_DELAY_SECONDS = 3;
+const VELOCITY_SENSITIVITY_MIN = -8;
 const VELOCITY_SENSITIVITY_MAX = 8;
 const DEFAULT_MAX_ACTIVE_VOICES = 5;
 const MIN_MAX_ACTIVE_VOICES = 1;
@@ -34,6 +35,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.droneVoice = this.createVoice("drone", 440, 1, 0, true);
     this.hasActiveDroneLinks = false;
     this.sampleCursor = 0;
+    this.currentInputSample = 0;
     this.masterGain = 0.18;
     this.masterEffects = {
       chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },
@@ -87,8 +89,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
         drone: Boolean(link.drone),
         amount: Math.max(0, Number(link.amount) || 0),
         delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
+        noise: this.clamp(Number(link.noise) || 0, 0, 1),
         pan: this.clamp(Number(link.pan) || 0, -1, 1),
-        velocitySensitivity: this.clamp(Number(link.velocitySensitivity) || 0, 0, VELOCITY_SENSITIVITY_MAX),
+        velocitySensitivity: this.clamp(
+          Number(link.velocitySensitivity) || 0,
+          VELOCITY_SENSITIVITY_MIN,
+          VELOCITY_SENSITIVITY_MAX,
+        ),
         filter,
       };
       normalized.filter = filter;
@@ -149,7 +156,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const frequency = Number(node.frequency);
     return {
       id: node.id,
-      wave: ["sine", "triangle", "saw", "square", "noise"].includes(node.wave) ? node.wave : "sine",
+      wave: ["sine", "triangle", "saw", "ramp", "square", "noise", "audio-input"].includes(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
@@ -201,8 +208,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (to === "audio") return "amplitude";
     if (targetLink) {
       const targets = targetLink.to === "audio"
-        ? ["filterCutoff", "filterResonance", "amplitude", "delay", "pan"]
-        : ["filterCutoff", "filterResonance", "amplitude", "delay"];
+        ? ["filterCutoff", "filterResonance", "amplitude", "delay", "noise", "pan"]
+        : ["filterCutoff", "filterResonance", "amplitude", "delay", "noise"];
       return targets.includes(target) ? target : "filterCutoff";
     }
     return ["phase", "frequency", "ring", "fold", "mix"].includes(target) ? target : "phase";
@@ -510,8 +517,16 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   velocityScale(link, voice) {
     const sensitivity = link.velocitySensitivity;
-    if (sensitivity <= 0) return 1;
+    if (sensitivity === 0) return 1;
     const velocity = voice.velocity;
+    if (sensitivity < 0) {
+      const invertedVelocity = this.clamp(1 - velocity, 0, 1);
+      const depth = Math.abs(sensitivity);
+      if (depth <= 1) {
+        return 1 - depth + depth * invertedVelocity;
+      }
+      return Math.pow(invertedVelocity, depth);
+    }
     if (sensitivity === 1) return velocity;
     if (sensitivity <= 1) {
       return 1 - sensitivity + sensitivity * velocity;
@@ -586,10 +601,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
         return 1 - 4 * Math.abs(Math.round(p - 0.25) - (p - 0.25));
       case "saw":
         return 2 * p - 1;
+      case "ramp":
+        return 1 - 2 * p;
       case "square":
         return p < 0.5 ? 1 : -1;
       case "noise":
         return Math.random() * 2 - 1;
+      case "audio-input":
+        return this.currentInputSample;
       case "sine":
       default:
         return Math.sin(TWO_PI * p);
@@ -742,6 +761,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return {
       amount: link.amount,
       delay: link.delay,
+      noise: link.noise,
       pan: link.pan,
       panGains,
       filter: link.filter,
@@ -759,6 +779,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const params = {
       amount: baseParams.amount,
       delay: baseParams.delay,
+      noise: baseParams.noise,
       pan: baseParams.pan,
       panGains: baseParams.panGains,
       filter: baseParams.filter,
@@ -768,6 +789,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     let resonanceMod = 0;
     let amplitudeMod = 0;
     let delayMod = 0;
+    let noiseMod = 0;
     let panMod = 0;
     const modulators = link.modulators;
 
@@ -781,6 +803,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
         amplitudeMod += modulation;
       } else if (modLink.modulationTarget === "delay") {
         delayMod += modulation;
+      } else if (modLink.modulationTarget === "noise") {
+        noiseMod += modulation;
       } else if (modLink.modulationTarget === "pan") {
         panMod += modulation;
       } else {
@@ -791,6 +815,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
     params.amount *= this.clamp(1 + amplitudeMod, 0, 4);
     params.delay = this.clamp(params.delay + delayMod, 0, MAX_LINK_DELAY_SECONDS);
+    params.noise = this.clamp(params.noise + noiseMod, 0, 1);
     params.pan = this.clamp(params.pan + panMod, -1, 1);
     params.panGains = panMod === 0 ? baseParams.panGains : this.panGains(params.pan);
     params.filter = {
@@ -807,15 +832,22 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return params;
   }
 
+  applyLinkNoise(sample, params) {
+    const noise = this.clamp(Number(params.noise) || 0, 0, 1);
+    if (noise <= 0) return sample;
+    return sample + (Math.random() * 2 - 1) * noise;
+  }
+
   linkModulationSignal(link, voice, now, source, cache, stack, linkStack = new Set()) {
     const params = this.effectiveLinkParams(link, voice, now, cache, stack, linkStack);
     const shapedSource = this.applyLinkFilter(link, voice, source, params.filter);
-    const signal = this.applyLinkDelay(
+    const delayed = this.applyLinkDelay(
       link,
       voice,
       shapedSource * this.envelopeValue(link, voice, now) * this.velocityScale(link, voice),
       params,
     );
+    const signal = this.applyLinkNoise(delayed, params);
     return {
       signal,
       amount: params.amount,
@@ -843,7 +875,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   renderNode(nodeId, voice, now, cache, stack, linkStack = new Set()) {
     if (cache.has(nodeId)) return cache.get(nodeId);
-    if (stack.has(nodeId)) return 0;
+    if (stack.has(nodeId)) return this.feedbackSignal(voice, nodeId);
 
     const node = this.nodesById.get(nodeId);
     if (!node) return 0;
@@ -906,7 +938,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   advancePhases(voice) {
     for (const node of this.nodes) {
-      if (node.wave === "noise") continue;
+      if (node.wave === "noise" || node.wave === "audio-input") continue;
       const baseFrequency = this.baseFrequency(node, voice);
       const frequencyMod = this.clamp(voice.frequencyMods.get(node.id) || 0, -5, 5);
       const frequencyMultiplier = Math.pow(2, frequencyMod);
@@ -952,7 +984,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       const filteredSource = this.applyLinkFilter(link, voice, source, params.filter);
       const envelope = this.envelopeValue(link, voice, now);
       const delayedSource = this.applyLinkDelay(link, voice, filteredSource * envelope * this.velocityScale(link, voice), params);
-      const linkSample = delayedSource * params.amount;
+      const linkSample = this.applyLinkNoise(delayedSource, params) * params.amount;
       const pan = params.panGains;
       voiceLeft += linkSample * pan.left;
       voiceRight += linkSample * pan.right;
@@ -967,12 +999,18 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   process(_inputs, outputs) {
+    const input = _inputs[0];
+    const inputLeft = input?.[0];
+    const inputRight = input?.[1] || inputLeft;
     const output = outputs[0];
     const left = output[0];
     const right = output[1] || output[0];
 
     for (let i = 0; i < left.length; i += 1) {
       const now = this.sampleCursor / sampleRate;
+      this.currentInputSample = inputLeft
+        ? ((inputLeft[i] || 0) + (inputRight?.[i] || 0)) * 0.5
+        : 0;
       let leftSample = 0;
       let rightSample = 0;
 
