@@ -246,7 +246,7 @@ select {
 }
 
 .wire.feedback {
-  stroke: var(--rose);
+  stroke: var(--line);
 }
 
 .wire.selected {
@@ -265,8 +265,8 @@ select {
 }
 
 .wire.feedback.selected {
-  stroke: #d75c78;
-  filter: drop-shadow(0 0 10px rgba(215, 92, 120, 0.78)) drop-shadow(0 0 18px rgba(215, 92, 120, 0.34));
+  stroke: #8f75d8;
+  filter: drop-shadow(0 0 10px rgba(143, 117, 216, 0.78)) drop-shadow(0 0 18px rgba(143, 117, 216, 0.34));
 }
 
 .wire-hit {

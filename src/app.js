@@ -23,6 +23,7 @@ const MIN_MAX_VOICES = 1;
 const MAX_MAX_VOICES = 16;
 const MIDI_CC_SMOOTH_SECONDS = 0.035;
 const MIDI_CC_SETTLE_RATIO = 0.0005;
+const LINK_INPUT_T = 0.45;
 const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency"]);
 const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
@@ -1008,7 +1009,7 @@ function linkInputPoint(id, visited = new Set()) {
   if (!to) return null;
 
   if (link.from === link.to) return feedbackMidpoint(link.from);
-  return bezierPoint(nodeOutputPoint(link.from), to, 0.5);
+  return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T);
 }
 
 function linkGeometry(link, visited = new Set()) {
@@ -1020,7 +1021,7 @@ function linkGeometry(link, visited = new Set()) {
   if (!to) return null;
 
   const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
-  const midpoint = link.from === link.to ? feedbackMidpoint(link.from) : bezierPoint(from, to, 0.5);
+  const midpoint = link.from === link.to ? feedbackMidpoint(link.from) : bezierPoint(from, to, LINK_INPUT_T);
   return { from, to, path, midpoint };
 }
 
