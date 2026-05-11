@@ -17,6 +17,9 @@ const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
 const LINK_MODULATION_TARGETS = ["filterCutoff", "filterResonance", "amplitude", "delay", "pan"];
 const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
 const VELOCITY_SENSITIVITY_MAX = 8;
+const DEFAULT_MAX_VOICES = 5;
+const MIN_MAX_VOICES = 1;
+const MAX_MAX_VOICES = 16;
 const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency"]);
 const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
@@ -37,6 +40,7 @@ const LINK_MIDI_PARAMETERS = new Set([
 
 const defaultPatch = {
   patchName: "Visual FM Patch",
+  maxVoices: DEFAULT_MAX_VOICES,
   midiChannel: "all",
   midiInputId: "all",
   midiBindings: [],
@@ -271,6 +275,9 @@ function normalizePatch(patch) {
   const patchName = typeof source.patchName === "string" && source.patchName.trim()
     ? source.patchName.trim()
     : "Visual FM Patch";
+  const maxVoices = Number.isFinite(Number(source.maxVoices))
+    ? clamp(Math.round(Number(source.maxVoices)), MIN_MAX_VOICES, MAX_MAX_VOICES)
+    : DEFAULT_MAX_VOICES;
   const sourceMidiChannel = String(source.midiChannel || "all");
   const midiChannel = sourceMidiChannel === "all" || (Number(sourceMidiChannel) >= 1 && Number(sourceMidiChannel) <= 16)
     ? sourceMidiChannel
@@ -340,6 +347,7 @@ function normalizePatch(patch) {
 
   return {
     patchName,
+    maxVoices,
     midiChannel,
     midiInputId,
     midiBindings: normalizeMidiBindings(source.midiBindings, nodes, links),
@@ -369,6 +377,7 @@ function savePatch() {
 function currentPatchData() {
   return {
     patchName: state.patchName,
+    maxVoices: state.maxVoices,
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
     midiBindings: state.midiBindings,
@@ -915,6 +924,7 @@ function sendGraph() {
         filter: { ...link.filter },
         envelope: { ...link.envelope },
       })),
+      maxVoices: state.maxVoices,
       masterEffects: state.masterEffects,
     },
   });
@@ -1638,6 +1648,7 @@ async function loadPatchFile(file) {
 function applyPatchData(patch) {
   const normalized = normalizePatch(patch);
   state.patchName = normalized.patchName;
+  state.maxVoices = normalized.maxVoices;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
   state.midiBindings = normalized.midiBindings;
@@ -1663,6 +1674,7 @@ function newPatch() {
   const midiInputId = state.midiInputId;
   const normalized = normalizePatch(clonePatch(defaultPatch));
   state.patchName = "Untitled Patch";
+  state.maxVoices = normalized.maxVoices;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
   state.midiBindings = normalized.midiBindings;
@@ -2168,6 +2180,13 @@ function renderEmptyPanel() {
         <label for="patchName">Name</label>
         <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
       </div>
+      <div class="field">
+        <label for="maxVoices">Max voices</label>
+        <div class="field-row">
+          <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+          <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+        </div>
+      </div>
       <div class="panel-actions">
         <button class="text-button" id="newPatchButton" type="button">New</button>
         <button class="text-button" id="savePatchButton" type="button">Save</button>
@@ -2194,6 +2213,11 @@ function renderEmptyPanel() {
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
+  });
+  bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
+    state.maxVoices = Math.round(value);
+    sendGraph();
+    savePatch();
   });
   panel.querySelector("#savePatchButton").addEventListener("click", downloadPatch);
   panel.querySelector("#newPatchButton").addEventListener("click", newPatch);

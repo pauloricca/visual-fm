@@ -1,10 +1,12 @@
 const TWO_PI = Math.PI * 2;
 const MAX_LINK_DELAY_SECONDS = 3;
 const VELOCITY_SENSITIVITY_MAX = 8;
-const MAX_ACTIVE_VOICES = 5;
+const DEFAULT_MAX_ACTIVE_VOICES = 5;
+const MIN_MAX_ACTIVE_VOICES = 1;
+const MAX_MAX_ACTIVE_VOICES = 16;
+const NOTE_ON_BATCH_SECONDS = 0.008;
 const VOICE_START_FADE_SECONDS = 0.006;
-const MAX_STOLEN_FADE_VOICES = 1;
-const VOICE_STEAL_FADE_SECONDS = 0.012;
+const VOICE_STEAL_FADE_SECONDS = 0.03;
 
 class VisualFmEngine extends AudioWorkletProcessor {
   constructor() {
@@ -17,6 +19,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.linkModulations = new Map();
     this.voices = new Map();
     this.activeVoicesByNote = new Map();
+    this.pendingVoiceStarts = [];
+    this.maxVoices = DEFAULT_MAX_ACTIVE_VOICES;
     this.voiceCounter = 1;
     this.droneVoice = this.createVoice("drone", 440, 1, 0, true);
     this.hasActiveDroneLinks = false;
@@ -54,12 +58,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
       if (type === "panic") {
         this.voices.clear();
         this.activeVoicesByNote.clear();
+        this.pendingVoiceStarts = [];
       }
     };
   }
 
   setGraph(graph) {
     this.nodes = (graph.nodes || []).map((node) => this.normalizeNode(node));
+    this.maxVoices = this.normalizeMaxVoices(graph.maxVoices);
     const rawLinks = graph.links || [];
     const rawLinksById = new Map(rawLinks.map((link) => [link.id, link]));
     this.links = rawLinks.map((link) => {
@@ -120,6 +126,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
     };
+  }
+
+  normalizeMaxVoices(maxVoices) {
+    const value = Number(maxVoices);
+    return Number.isFinite(value)
+      ? this.clamp(Math.round(value), MIN_MAX_ACTIVE_VOICES, MAX_MAX_ACTIVE_VOICES)
+      : DEFAULT_MAX_ACTIVE_VOICES;
   }
 
   normalizeEffects(effects = {}) {
@@ -316,24 +329,113 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return candidateId;
   }
 
-  enforceVoiceLimit(limit = MAX_ACTIVE_VOICES) {
-    const activeVoiceCount = () => {
-      let count = 0;
-      for (const voice of this.voices.values()) {
-        if (voice.stolenAt === null) count += 1;
-      }
-      return count;
-    };
-
-    while (activeVoiceCount() > limit) {
-      const voiceId = this.voiceStealCandidate();
-      if (!voiceId) return;
-      const voice = this.voices.get(voiceId);
-      if (!voice) return;
-      voice.stolenAt = this.sampleCursor / sampleRate;
-      this.forgetActiveVoice(voiceId);
-      this.enforceStolenFadeLimit();
+  activeVoiceCount() {
+    let count = 0;
+    for (const voice of this.voices.values()) {
+      if (voice.stolenAt === null) count += 1;
     }
+    return count;
+  }
+
+  stealVoiceForFade() {
+    const voiceId = this.voiceStealCandidate();
+    if (!voiceId) return false;
+    const voice = this.voices.get(voiceId);
+    if (!voice) return false;
+    voice.stolenAt = this.sampleCursor / sampleRate;
+    this.forgetActiveVoice(voiceId);
+    return true;
+  }
+
+  enforceVoiceLimit(limit = this.maxVoices) {
+    while (this.activeVoiceCount() > limit) {
+      if (!this.stealVoiceForFade()) return;
+    }
+  }
+
+  reserveVoiceSlot() {
+    return this.stealVoiceForFade();
+  }
+
+  hardPruneStolenOverflow() {
+    while (this.voices.size > this.maxVoices) {
+      const stolenVoice = [...this.voices.entries()]
+        .filter(([, voice]) => voice.stolenAt !== null)
+        .sort(([, voiceA], [, voiceB]) => voiceA.stolenAt - voiceB.stolenAt)[0];
+      const voiceId = stolenVoice?.[0] || this.voiceStealCandidate();
+      if (!voiceId) return;
+      this.deleteVoice(voiceId);
+    }
+  }
+
+  latestStolenFadeEnd(now = this.sampleCursor / sampleRate) {
+    let fadeEnd = now;
+    for (const voice of this.voices.values()) {
+      if (voice.stolenAt !== null) {
+        fadeEnd = Math.max(fadeEnd, voice.stolenAt + VOICE_STEAL_FADE_SECONDS);
+      }
+    }
+    return fadeEnd;
+  }
+
+  startVoice(note, velocity = 1, startedAt = this.sampleCursor / sampleRate) {
+    const voice = this.createVoice(
+      note,
+      440 * Math.pow(2, (note - 69) / 12),
+      velocity,
+      startedAt,
+    );
+    this.voices.set(voice.id, voice);
+    this.activeVoicesByNote.set(note, voice.id);
+  }
+
+  queueVoiceStart(note, velocity, readyAt) {
+    this.pendingVoiceStarts = this.pendingVoiceStarts.filter((pending) => pending.note !== note);
+    this.pendingVoiceStarts.push({ note, velocity, readyAt });
+  }
+
+  flushPendingVoiceStarts(now) {
+    if (!this.pendingVoiceStarts.length) return;
+
+    let ready = [];
+    const remaining = [];
+    for (const pending of this.pendingVoiceStarts) {
+      if (pending.readyAt > now) {
+        remaining.push(pending);
+        continue;
+      }
+      ready.push(pending);
+    }
+
+    if (!ready.length) {
+      this.pendingVoiceStarts = remaining;
+      return;
+    }
+
+    if (ready.length > this.maxVoices) {
+      ready = ready.slice(ready.length - this.maxVoices);
+    }
+
+    const freeSlots = Math.max(0, this.maxVoices - this.voices.size);
+    const slotsToReserve = Math.max(0, ready.length - freeSlots);
+    if (slotsToReserve > 0) {
+      let reservedSlots = 0;
+      while (reservedSlots < slotsToReserve && this.reserveVoiceSlot()) {
+        reservedSlots += 1;
+      }
+
+      const delayedReadyAt = this.latestStolenFadeEnd(now);
+      this.pendingVoiceStarts = [
+        ...remaining,
+        ...ready.map((pending) => ({ ...pending, readyAt: delayedReadyAt })),
+      ];
+      return;
+    }
+
+    for (const pending of ready) {
+      this.startVoice(pending.note, pending.velocity, now);
+    }
+    this.pendingVoiceStarts = remaining;
   }
 
   forgetActiveVoice(voiceId) {
@@ -344,17 +446,6 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
   }
 
-  enforceStolenFadeLimit() {
-    const stolenVoices = [...this.voices.entries()]
-      .filter(([, voice]) => voice.stolenAt !== null)
-      .sort(([, voiceA], [, voiceB]) => voiceA.stolenAt - voiceB.stolenAt);
-
-    while (stolenVoices.length > MAX_STOLEN_FADE_VOICES) {
-      const [voiceId] = stolenVoices.shift();
-      this.deleteVoice(voiceId);
-    }
-  }
-
   noteOn(note, velocity = 1) {
     const now = this.sampleCursor / sampleRate;
     const activeVoice = this.voices.get(this.activeVoicesByNote.get(note));
@@ -362,18 +453,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
       activeVoice.releasedAt = now;
       activeVoice.releaseLevels.clear();
     }
-    this.enforceVoiceLimit(MAX_ACTIVE_VOICES - 1);
 
-    const voice = this.createVoice(
-      note,
-      440 * Math.pow(2, (note - 69) / 12),
-      velocity,
-    );
-    this.voices.set(voice.id, voice);
-    this.activeVoicesByNote.set(note, voice.id);
+    this.queueVoiceStart(note, velocity, now + NOTE_ON_BATCH_SECONDS);
   }
 
   noteOff(note) {
+    this.pendingVoiceStarts = this.pendingVoiceStarts.filter((pending) => pending.note !== note);
     const voiceId = this.activeVoicesByNote.get(note);
     const voice = this.voices.get(voiceId);
     if (!voice) return;
@@ -781,6 +866,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
     }
     this.enforceVoiceLimit();
+    this.hardPruneStolenOverflow();
+    this.flushPendingVoiceStarts(now);
   }
 
   renderVoice(voice, now) {
