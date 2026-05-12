@@ -3000,18 +3000,18 @@ function renderEmptyPanel() {
         <label for="patchName">Name</label>
         <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
       </div>
+      <div class="panel-actions">
+        <button class="text-button" id="newPatchButton" type="button">New</button>
+        <button class="text-button" id="savePatchButton" type="button">Save</button>
+        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <input class="visually-hidden" id="loadPatchInput" type="file" accept=".yaml,.yml,.json,application/x-yaml,application/json">
+      </div>
       <div class="field">
         <label for="maxVoices">Max voices</label>
         <div class="field-row">
           <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
           <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
         </div>
-      </div>
-      <div class="panel-actions">
-        <button class="text-button" id="newPatchButton" type="button">New</button>
-        <button class="text-button" id="savePatchButton" type="button">Save</button>
-        <button class="text-button" id="loadPatchButton" type="button">Load</button>
-        <input class="visually-hidden" id="loadPatchInput" type="file" accept=".yaml,.yml,.json,application/x-yaml,application/json">
       </div>
       <div class="field">
         <label for="midiInput">MIDI input</label>
