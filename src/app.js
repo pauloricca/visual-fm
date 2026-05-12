@@ -16,13 +16,43 @@ const FREQUENCY_MODES = ["ratio", "fixed"];
 const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
 const LINK_MODULATION_TARGETS = ["filterCutoff", "filterResonance", "amplitude", "delay", "noise", "pan"];
 const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
+const MASTER_EFFECTS = {
+  chorus: {
+    label: "Chorus",
+    params: [
+      ["rate", "Rate", 0.05, 6, "Hz"],
+      ["depth", "Depth", 0.001, 0.04, "s"],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+  delay: {
+    label: "Delay",
+    params: [
+      ["time", "Time", 0.02, 1.5, "s"],
+      ["feedback", "Feedback", 0, 0.92, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+  reverb: {
+    label: "Reverb",
+    params: [
+      ["size", "Size", 0.1, 1, ""],
+      ["decay", "Decay", 0, 0.94, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+};
+const MASTER_EFFECT_IDS = Object.keys(MASTER_EFFECTS);
 const VELOCITY_SENSITIVITY_MIN = -8;
 const VELOCITY_SENSITIVITY_MAX = 8;
 const DEFAULT_MAX_VOICES = 5;
 const MIN_MAX_VOICES = 1;
 const MAX_MAX_VOICES = 16;
-const MIDI_CC_SMOOTH_SECONDS = 0.035;
-const MIDI_CC_SETTLE_RATIO = 0.0005;
+const MIDI_CC_SMOOTH_SECONDS = 0.09;
+const MIDI_CC_SETTLE_RATIO = 0.00025;
+const MIDI_CC_MAX_SMOOTH_DT = 1 / 60;
+const RECENT_MIDI_CC_WINDOW_MS = 2000;
+const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
 const LINK_INPUT_T = 0.45;
 const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency"]);
 const LINK_MIDI_PARAMETERS = new Set([
@@ -112,12 +142,14 @@ const keyMap = new Map([
 
 let audioContext = null;
 let synthNode = null;
+let outputGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
 let recorderDestination = null;
 let mediaRecorder = null;
 let recordingChunks = [];
 let recordingStartedAt = null;
+let audioMuted = false;
 let nodeCounter = 3;
 let linkCounter = 3;
 let midiBindingCounter = 1;
@@ -133,6 +165,10 @@ let pendingWiresFrame = null;
 let pendingMidiCcLearn = null;
 let pendingMidiCcSmoothingFrame = null;
 const midiCcSmoothing = new Map();
+const recentMidiCc = new Map();
+const recentMidiCcListeners = new Set();
+const midiBindingFlashTimers = new Map();
+const midiTargetFlashTimers = new Map();
 let suppressNextStageClick = false;
 
 syncCounters();
@@ -266,14 +302,14 @@ function normalizeMidiBindings(bindings, nodes, links) {
 
   const nodeIds = new Set(nodes.map((node) => node.id));
   const linkIds = new Set(links.map((link) => link.id));
+  const targetTypes = new Set(["node", "link", "effect"]);
   return bindings
     .map((binding, index) => {
-      const targetType = binding.targetType === "link" ? "link" : "node";
+      const targetType = targetTypes.has(binding.targetType) ? binding.targetType : "node";
       const targetId = typeof binding.targetId === "string" ? binding.targetId : "";
       const parameter = typeof binding.parameter === "string" ? binding.parameter : "";
       const cc = Number(binding.cc);
-
-      return {
+      const normalized = {
         id: typeof binding.id === "string" && binding.id.trim()
           ? binding.id
           : `midi-binding-${index + 1}`,
@@ -282,11 +318,21 @@ function normalizeMidiBindings(bindings, nodes, links) {
         parameter,
         cc: Number.isFinite(cc) ? clamp(Math.round(cc), 0, 127) : 0,
       };
+      if (Number.isFinite(Number(binding.min))) normalized.min = Number(binding.min);
+      if (Number.isFinite(Number(binding.max))) normalized.max = Number(binding.max);
+      if (MIDI_CC_CURVES.includes(binding.curve)) normalized.curve = binding.curve;
+      return normalized;
     })
-    .filter((binding) => (
-      (binding.targetType === "node" ? nodeIds.has(binding.targetId) : linkIds.has(binding.targetId))
-        && (binding.targetType === "link" ? LINK_MIDI_PARAMETERS : NODE_MIDI_PARAMETERS).has(binding.parameter)
-    ));
+    .filter((binding) => {
+      if (binding.targetType === "node") {
+        return nodeIds.has(binding.targetId) && NODE_MIDI_PARAMETERS.has(binding.parameter);
+      }
+      if (binding.targetType === "link") {
+        return linkIds.has(binding.targetId) && LINK_MIDI_PARAMETERS.has(binding.parameter);
+      }
+      return MASTER_EFFECT_IDS.includes(binding.targetId)
+        && hasEffectMidiParameter(binding.targetId, binding.parameter);
+    });
 }
 
 function normalizePatch(patch) {
@@ -449,7 +495,7 @@ function nodeParameterDefinitions(node) {
         node.wave = value;
         if (node.wave === "audio-input") {
           ensureAudio().catch(() => {
-            audioStatus.textContent = "Audio input blocked";
+            setAudioStatusLabel("Audio input blocked");
           });
         }
       },
@@ -633,7 +679,52 @@ function linkParameterDefinitions(link) {
   return definitions;
 }
 
+function effectLabel(effectId) {
+  return MASTER_EFFECTS[effectId]?.label || effectId;
+}
+
+function effectParameterSpecs(effectId) {
+  return MASTER_EFFECTS[effectId]?.params || [];
+}
+
+function hasEffectMidiParameter(effectId, parameter) {
+  return parameter === "enabled"
+    || effectParameterSpecs(effectId).some(([key]) => key === parameter);
+}
+
+function effectParameterDefinitions(effectId) {
+  const effect = state.masterEffects[effectId];
+  if (!effect) return [];
+
+  return [
+    {
+      id: "enabled",
+      label: "Enabled",
+      type: "boolean",
+      get: () => effect.enabled,
+      set: (value) => {
+        effect.enabled = value;
+      },
+    },
+    ...effectParameterSpecs(effectId).map(([id, label, min, max, unit]) => ({
+      id,
+      label: unit ? `${label} (${unit})` : label,
+      type: "number",
+      min,
+      max,
+      get: () => effect[id],
+      set: (value) => {
+        effect[id] = value;
+      },
+    })),
+  ];
+}
+
 function midiParameterDefinitions(targetType, targetId) {
+  if (targetType === "effect") {
+    return effectParameterDefinitions(targetId);
+  }
+
   if (targetType === "link") {
     const link = linkById(targetId);
     return link ? linkParameterDefinitions(link) : [];
@@ -649,6 +740,10 @@ function midiParameterDefinition(binding) {
 }
 
 function midiElementLabel(targetType, targetId) {
+  if (targetType === "effect") {
+    return `Audio Out: ${effectLabel(targetId)}`;
+  }
+
   if (targetType === "link") {
     return linkName(linkById(targetId));
   }
@@ -658,6 +753,12 @@ function midiElementLabel(targetType, targetId) {
 
 function midiParameterLabel(binding) {
   return midiParameterDefinition(binding)?.label || binding.parameter;
+}
+
+function midiBindingTouchesSelection(binding) {
+  return binding.targetType === "effect"
+    ? state.selected.type === "audio"
+    : state.selected.type === binding.targetType && state.selected.id === binding.targetId;
 }
 
 function midiBindingForParameter(targetType, targetId, parameter) {
@@ -711,6 +812,7 @@ function pruneMidiBindings() {
   const validTargetIds = {
     node: new Set(state.nodes.map((node) => node.id)),
     link: new Set(state.links.map((link) => link.id)),
+    effect: new Set(MASTER_EFFECT_IDS),
   };
   const nextBindings = state.midiBindings.filter((binding) => (
     validTargetIds[binding.targetType]?.has(binding.targetId)
@@ -729,7 +831,29 @@ function schedulePatchSave() {
   }, 180);
 }
 
-function valueFromCc(definition, value) {
+function midiBindingRange(binding, definition) {
+  if (definition.type !== "number") return null;
+  const min = Number.isFinite(Number(binding.min))
+    ? clamp(Number(binding.min), definition.min, definition.max)
+    : definition.min;
+  const max = Number.isFinite(Number(binding.max))
+    ? clamp(Number(binding.max), definition.min, definition.max)
+    : definition.max;
+  return { min, max };
+}
+
+function midiBindingCurveValue(binding, normal) {
+  const curve = MIDI_CC_CURVES.includes(binding.curve) ? binding.curve : "linear";
+  if (curve === "logarithmic") {
+    return Math.log10(1 + normal * 9);
+  }
+  if (curve === "exponential") {
+    return (Math.pow(10, normal) - 1) / 9;
+  }
+  return normal;
+}
+
+function valueFromCc(definition, value, binding) {
   const normal = clamp(Number(value) || 0, 0, 127) / 127;
   if (definition.type === "choice") {
     const index = clamp(Math.round(normal * (definition.options.length - 1)), 0, definition.options.length - 1);
@@ -738,7 +862,9 @@ function valueFromCc(definition, value) {
   if (definition.type === "boolean") {
     return normal >= 0.5;
   }
-  return definition.min + normal * (definition.max - definition.min);
+  const range = midiBindingRange(binding, definition);
+  const curved = midiBindingCurveValue(binding, normal);
+  return range.min + curved * (range.max - range.min);
 }
 
 function midiSmoothingKey(binding) {
@@ -756,6 +882,7 @@ function queueMidiCcSmoothing(binding, definition, targetValue) {
   const currentValue = Number(definition.get());
   const current = existing?.current ?? (Number.isFinite(currentValue) ? currentValue : targetValue);
   const now = performance.now();
+  const range = midiBindingRange(binding, definition);
 
   midiCcSmoothing.set(key, {
     targetType: binding.targetType,
@@ -763,16 +890,72 @@ function queueMidiCcSmoothing(binding, definition, targetValue) {
     parameter: binding.parameter,
     target: clamp(Number(targetValue), definition.min, definition.max),
     current,
+    span: Math.max(0.000001, Math.abs(range.max - range.min)),
     lastTime: existing?.lastTime ?? now,
   });
   scheduleMidiCcSmoothing();
 }
 
+function setPanelNumberPair(inputId, rangeId, value) {
+  const input = panel.querySelector(`#${inputId}`);
+  const range = panel.querySelector(`#${rangeId}`);
+  if (input) input.value = String(value);
+  if (range) range.value = String(value);
+}
+
+function updatePanelForMidiNumber(smoothing, value) {
+  if (!midiBindingTouchesSelection(smoothing)) return;
+
+  if (smoothing.targetType === "effect") {
+    setPanelNumberPair(
+      `${smoothing.targetId}-${smoothing.parameter}`,
+      `${smoothing.targetId}-${smoothing.parameter}Range`,
+      value,
+    );
+    return;
+  }
+
+  if (smoothing.targetType === "node") {
+    const node = nodeById(smoothing.targetId);
+    if (
+      node
+        && ((smoothing.parameter === "frequency" && node.frequencyMode === "fixed")
+          || (smoothing.parameter === "ratio" && node.frequencyMode === "ratio"))
+    ) {
+      setPanelNumberPair("frequencyValue", "frequencyValueRange", value);
+    }
+    return;
+  }
+
+  const linkControlIds = {
+    amount: "amount",
+    pan: "pan",
+    velocitySensitivity: "velocitySensitivity",
+    noise: "noise",
+    delay: "linkDelay",
+    "filter.cutoff": "filterCutoff",
+    "filter.resonance": "filterResonance",
+    "envelope.delay": "delay",
+    "envelope.attack": "attack",
+    "envelope.decay": "decay",
+    "envelope.sustain": "sustain",
+    "envelope.release": "release",
+  };
+  const inputId = linkControlIds[smoothing.parameter];
+  if (!inputId) return;
+
+  setPanelNumberPair(inputId, `${inputId}Range`, value);
+  if (smoothing.parameter.startsWith("envelope.")) {
+    const link = linkById(smoothing.targetId);
+    if (link) refreshAdsrView(link.envelope);
+  }
+}
+
 function processMidiCcSmoothing(timestamp) {
   pendingMidiCcSmoothingFrame = null;
   let changed = false;
-  let shouldRenderNodes = false;
-  let shouldRenderPanel = false;
+  let shouldRenderNodesWhenSettled = false;
+  let shouldRenderPanelWhenSettled = false;
 
   for (const [key, smoothing] of midiCcSmoothing) {
     const definition = midiParameterDefinition(smoothing);
@@ -781,8 +964,8 @@ function processMidiCcSmoothing(timestamp) {
       continue;
     }
 
-    const span = Math.max(0.000001, definition.max - definition.min);
-    const dt = Math.max(0.001, (timestamp - smoothing.lastTime) / 1000);
+    const span = smoothing.span || Math.max(0.000001, definition.max - definition.min);
+    const dt = Math.min(MIDI_CC_MAX_SMOOTH_DT, Math.max(0.001, (timestamp - smoothing.lastTime) / 1000));
     const alpha = 1 - Math.exp(-dt / MIDI_CC_SMOOTH_SECONDS);
     const next = smoothing.current + (smoothing.target - smoothing.current) * alpha;
     const settled = Math.abs(smoothing.target - next) <= Math.max(0.000001, span * MIDI_CC_SETTLE_RATIO);
@@ -791,20 +974,20 @@ function processMidiCcSmoothing(timestamp) {
     smoothing.current = clamp(value, definition.min, definition.max);
     smoothing.lastTime = timestamp;
     definition.set(smoothing.current);
+    updatePanelForMidiNumber(smoothing, smoothing.current);
     changed = true;
-    shouldRenderNodes = shouldRenderNodes || smoothing.targetType === "node";
-    shouldRenderPanel = shouldRenderPanel
-      || (state.selected.type === smoothing.targetType && state.selected.id === smoothing.targetId);
 
     if (settled) {
       midiCcSmoothing.delete(key);
+      shouldRenderNodesWhenSettled = shouldRenderNodesWhenSettled || smoothing.targetType === "node";
+      shouldRenderPanelWhenSettled = shouldRenderPanelWhenSettled || midiBindingTouchesSelection(smoothing);
     }
   }
 
   if (changed) {
-    if (shouldRenderNodes) renderNodes();
-    if (shouldRenderPanel) renderPanel();
-    sendGraph();
+    if (shouldRenderNodesWhenSettled) renderNodes();
+    if (shouldRenderPanelWhenSettled) renderPanel();
+    sendGraph({ immediate: true });
     schedulePatchSave();
   }
 
@@ -820,11 +1003,13 @@ function applyMidiCc(cc, value) {
 
   for (const binding of state.midiBindings) {
     if (binding.cc !== cc) continue;
+    flashMidiBindingItem(binding.id);
+    flashMidiCanvasTarget(binding);
 
     const definition = midiParameterDefinition(binding);
     if (!definition) continue;
 
-    const nextValue = valueFromCc(definition, value);
+    const nextValue = valueFromCc(definition, value, binding);
     if (definition.type === "number") {
       queueMidiCcSmoothing(binding, definition, nextValue);
       continue;
@@ -833,8 +1018,7 @@ function applyMidiCc(cc, value) {
     definition.set(nextValue);
     immediateChanged = true;
     shouldRenderNodes = shouldRenderNodes || binding.targetType === "node";
-    shouldRenderPanel = shouldRenderPanel
-      || (state.selected.type === binding.targetType && state.selected.id === binding.targetId);
+    shouldRenderPanel = shouldRenderPanel || midiBindingTouchesSelection(binding);
   }
 
   if (!immediateChanged) return;
@@ -855,6 +1039,36 @@ function capturePendingMidiCc(cc) {
   input.value = String(clamp(Math.round(Number(cc)), 0, 127));
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.select();
+}
+
+function recentMidiCcEntries(now = Date.now()) {
+  return [...recentMidiCc.entries()]
+    .map(([cc, item]) => ({ cc, value: item.value, timestamp: item.timestamp }))
+    .filter((item) => now - item.timestamp <= RECENT_MIDI_CC_WINDOW_MS)
+    .sort((a, b) => b.timestamp - a.timestamp || a.cc - b.cc);
+}
+
+function notifyRecentMidiCcListeners() {
+  for (const listener of recentMidiCcListeners) listener();
+}
+
+function pruneRecentMidiCc(now = Date.now()) {
+  let changed = false;
+  for (const [cc, item] of recentMidiCc) {
+    if (now - item.timestamp > RECENT_MIDI_CC_WINDOW_MS) {
+      recentMidiCc.delete(cc);
+      changed = true;
+    }
+  }
+  if (changed) notifyRecentMidiCcListeners();
+}
+
+function recordRecentMidiCc(cc, value) {
+  recentMidiCc.set(clamp(Math.round(Number(cc)), 0, 127), {
+    value: clamp(Math.round(Number(value)), 0, 127),
+    timestamp: Date.now(),
+  });
+  notifyRecentMidiCcListeners();
 }
 
 function selectedNodeIds() {
@@ -1080,6 +1294,42 @@ function sendGraph({ immediate = false } = {}) {
   });
 }
 
+function syncOutputMute() {
+  if (!outputGainNode) return;
+  const value = audioMuted ? 0 : 1;
+  outputGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+}
+
+function setAudioStatusLabel(text) {
+  audioStatus.textContent = text;
+  audioStatus.disabled = true;
+  audioStatus.classList.remove("ready", "muted");
+  audioStatus.removeAttribute("aria-pressed");
+  audioStatus.title = text;
+  audioStatus.setAttribute("aria-label", text);
+}
+
+function updateAudioReadyButton() {
+  const label = audioMuted ? "Unmute" : "Mute";
+  audioStatus.textContent = label;
+  audioStatus.disabled = false;
+  audioStatus.classList.toggle("ready", !audioMuted);
+  audioStatus.classList.toggle("muted", audioMuted);
+  audioStatus.setAttribute("aria-pressed", String(audioMuted));
+  audioStatus.title = audioMuted ? "Unmute audio output" : "Mute audio output";
+  audioStatus.setAttribute("aria-label", audioStatus.title);
+}
+
+function updateAudioStatus({ inputBlocked = false } = {}) {
+  if (inputBlocked) {
+    setAudioStatusLabel("Audio input blocked");
+  } else if (audioContext && synthNode) {
+    updateAudioReadyButton();
+  } else {
+    setAudioStatusLabel("Audio idle");
+  }
+}
+
 function scheduleNodesAndWiresRender() {
   if (pendingNodesAndWiresFrame) return;
   pendingNodesAndWiresFrame = requestAnimationFrame(() => {
@@ -1107,7 +1357,10 @@ async function ensureAudio() {
       inputChannelCount: [2],
       outputChannelCount: [2],
     });
-    synthNode.connect(audioContext.destination);
+    outputGainNode = audioContext.createGain();
+    syncOutputMute();
+    synthNode.connect(outputGainNode);
+    outputGainNode.connect(audioContext.destination);
     sendGraph({ immediate: true });
   }
 
@@ -1127,15 +1380,14 @@ async function ensureAudio() {
       inputBlocked = true;
     }
   }
-  audioStatus.textContent = inputBlocked ? "Audio input blocked" : "Audio ready";
-  audioStatus.classList.toggle("ready", !inputBlocked);
+  updateAudioStatus({ inputBlocked });
 }
 
 async function ensureAudioInput() {
   if (audioInputSource || !audioContext || !synthNode) return;
   if (!navigator.mediaDevices?.getUserMedia) {
-    audioStatus.textContent = "Audio input unavailable";
-    return;
+    setAudioStatusLabel("Audio input unavailable");
+    throw new Error("Audio input unavailable");
   }
 
   audioInputStream = await navigator.mediaDevices.getUserMedia({
@@ -1170,7 +1422,7 @@ function showAudioEnableModal() {
       await ensureAudio();
       overlay.remove();
     } catch {
-      audioStatus.textContent = "Audio blocked";
+      setAudioStatusLabel("Audio blocked");
     }
   });
 }
@@ -1344,6 +1596,7 @@ async function setupMidi() {
         } else if (command === 0x80 || (command === 0x90 && value === 0)) {
           noteOff(data1);
         } else if (command === 0xb0) {
+          recordRecentMidiCc(data1, value);
           capturePendingMidiCc(data1);
           applyMidiCc(data1, value);
         }
@@ -1415,6 +1668,8 @@ function renderNodes() {
 
 function renderAudioOut() {
   audioOut.classList.toggle("selected", state.selected.type === "audio");
+  audioOut.dataset.midiTargetType = "audio";
+  audioOut.dataset.midiTargetId = "audio";
 }
 
 function renderWires() {
@@ -1433,6 +1688,8 @@ function renderWires() {
 
     visible.setAttribute("d", geometry.path);
     visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    visible.dataset.midiTargetType = "link";
+    visible.dataset.midiTargetId = link.id;
 
     hit.setAttribute("d", geometry.path);
     hit.setAttribute("class", "wire-hit");
@@ -1443,6 +1700,8 @@ function renderWires() {
 
     anchor.setAttribute("class", `link-anchor input ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
     anchor.dataset.linkId = link.id;
+    anchor.dataset.midiTargetType = "link";
+    anchor.dataset.midiTargetId = link.id;
     anchorHit.setAttribute("cx", geometry.midpoint.x);
     anchorHit.setAttribute("cy", geometry.midpoint.y);
     anchorHit.setAttribute("r", "22");
@@ -1591,7 +1850,7 @@ function renderPanel() {
       node.wave = event.target.value;
       if (node.wave === "audio-input") {
         ensureAudio().catch(() => {
-          audioStatus.textContent = "Audio input blocked";
+          setAudioStatusLabel("Audio input blocked");
         });
       }
       renderNodes();
@@ -1826,28 +2085,15 @@ function renderPanel() {
 }
 
 function renderMasterEffectsPanel() {
-  const { chorus, delay, reverb } = state.masterEffects;
   panel.innerHTML = `
     <h1>Audio Out</h1>
     <p class="panel-subtitle">Master effects</p>
-    ${effectSection("chorus", "Chorus", chorus, [
-      ["rate", "Rate", 0.05, 6, "Hz"],
-      ["depth", "Depth", 0.001, 0.04, "s"],
-      ["mix", "Mix", 0, 1, ""],
-    ])}
-    ${effectSection("delay", "Delay", delay, [
-      ["time", "Time", 0.02, 1.5, "s"],
-      ["feedback", "Feedback", 0, 0.92, ""],
-      ["mix", "Mix", 0, 1, ""],
-    ])}
-    ${effectSection("reverb", "Reverb", reverb, [
-      ["size", "Size", 0.1, 1, ""],
-      ["decay", "Decay", 0, 0.94, ""],
-      ["mix", "Mix", 0, 1, ""],
-    ])}
+    ${effectSection("chorus", effectLabel("chorus"), state.masterEffects.chorus, effectParameterSpecs("chorus"))}
+    ${effectSection("delay", effectLabel("delay"), state.masterEffects.delay, effectParameterSpecs("delay"))}
+    ${effectSection("reverb", effectLabel("reverb"), state.masterEffects.reverb, effectParameterSpecs("reverb"))}
   `;
 
-  for (const effectName of ["chorus", "delay", "reverb"]) {
+  for (const effectName of MASTER_EFFECT_IDS) {
     const effect = state.masterEffects[effectName];
     const toggle = panel.querySelector(`#${effectName}Enabled`);
     toggle.addEventListener("change", (event) => {
@@ -1865,6 +2111,8 @@ function renderMasterEffectsPanel() {
       });
     }
   }
+
+  attachParameterMidiButtons();
 }
 
 function patchFileName() {
@@ -2080,10 +2328,13 @@ function parseYamlScalar(value) {
 function effectSection(id, title, effect, params) {
   return `
     <section class="effect-section">
-      <label class="toggle-row" for="${id}Enabled">
-        <span>${title}</span>
-        <input id="${id}Enabled" type="checkbox" ${effect.enabled ? "checked" : ""}>
-      </label>
+      <div class="toggle-field">
+        <label class="toggle-row" for="${id}Enabled">
+          <input id="${id}Enabled" type="checkbox" ${effect.enabled ? "checked" : ""}>
+          <span>${title}</span>
+        </label>
+        ${midiCcButton("effect", id, "enabled")}
+      </div>
       ${params.map(([key, label, min, max, unit]) => effectField(id, key, label, effect[key], min, max, unit)).join("")}
     </section>
   `;
@@ -2094,7 +2345,7 @@ function effectField(effectId, key, label, value, min, max, unit) {
   const step = max <= 1 ? 0.001 : 0.01;
   return `
     <div class="field">
-      <label for="${id}">${label}${unit ? ` (${unit})` : ""}</label>
+      ${parameterLabel(id, `${label}${unit ? ` (${unit})` : ""}`, "effect", effectId, key)}
       <div class="field-row">
         <input id="${id}Range" type="range" min="${min}" max="${max}" step="${step}" value="${value}">
         <input id="${id}" data-effect="${effectId}" data-param="${key}" type="number" min="${min}" max="${max}" step="${step}" value="${value}">
@@ -2333,6 +2584,27 @@ function midiElementValue(targetType, targetId) {
   return `${targetType}:${targetId}`;
 }
 
+function midiSelectionForBinding(binding) {
+  if (binding.targetType === "effect") {
+    return { type: "audio", id: "audio" };
+  }
+  return { type: binding.targetType, id: binding.targetId };
+}
+
+function midiCanvasTargetForBinding(binding) {
+  if (binding.targetType === "effect") {
+    return { type: "audio", id: "audio" };
+  }
+  return { type: binding.targetType, id: binding.targetId };
+}
+
+function isMidiCanvasTargetSelected(target) {
+  if (target.type === "node") return isNodeSelected(target.id);
+  if (target.type === "link") return state.selected.type === "link" && state.selected.id === target.id;
+  if (target.type === "audio") return state.selected.type === "audio";
+  return false;
+}
+
 function parseMidiElementValue(value) {
   const separator = value.indexOf(":");
   if (separator === -1) return { targetType: "node", targetId: value };
@@ -2350,9 +2622,14 @@ function renderMidiBindingItems() {
   return `
     <div class="midi-binding-list">
       ${state.midiBindings.map((binding) => `
-        <div class="midi-binding-item">
+        <div class="midi-binding-item" data-midi-binding-item="${escapeHtml(binding.id)}">
           <div class="midi-binding-copy">
-            <strong>${escapeHtml(midiElementLabel(binding.targetType, binding.targetId))}</strong>
+            <button
+              class="midi-target-link"
+              type="button"
+              data-midi-select-target-type="${escapeHtml(midiSelectionForBinding(binding).type)}"
+              data-midi-select-target-id="${escapeHtml(midiSelectionForBinding(binding).id)}"
+            >${escapeHtml(midiElementLabel(binding.targetType, binding.targetId))}</button>
             <span>${escapeHtml(midiParameterLabel(binding))} · CC ${binding.cc}</span>
           </div>
           <div class="binding-actions">
@@ -2377,8 +2654,62 @@ function renderMidiBindingsSection() {
   `;
 }
 
+function flashMidiBindingItem(bindingId) {
+  for (const item of document.querySelectorAll(`[data-midi-binding-item="${CSS.escape(bindingId)}"]`)) {
+    item.classList.add("active");
+  }
+  clearTimeout(midiBindingFlashTimers.get(bindingId));
+  midiBindingFlashTimers.set(bindingId, setTimeout(() => {
+    midiBindingFlashTimers.delete(bindingId);
+    for (const item of document.querySelectorAll(`[data-midi-binding-item="${CSS.escape(bindingId)}"]`)) {
+      item.classList.remove("active");
+    }
+  }, 500));
+}
+
+function midiCanvasTargetElements(target) {
+  if (target.type === "node") {
+    return [...nodeLayer.querySelectorAll(`[data-node-id="${CSS.escape(target.id)}"]`)]
+      .filter((element) => element.classList.contains("node"));
+  }
+
+  if (target.type === "link") {
+    return [...wireLayer.querySelectorAll(
+      `[data-midi-target-type="link"][data-midi-target-id="${CSS.escape(target.id)}"]`,
+    )];
+  }
+
+  if (target.type === "audio") {
+    return [audioOut];
+  }
+
+  return [];
+}
+
+function flashMidiCanvasTarget(binding) {
+  const target = midiCanvasTargetForBinding(binding);
+  if (isMidiCanvasTargetSelected(target)) return;
+
+  const key = `${target.type}:${target.id}`;
+  for (const element of midiCanvasTargetElements(target)) {
+    element.classList.add("midi-active");
+  }
+  clearTimeout(midiTargetFlashTimers.get(key));
+  midiTargetFlashTimers.set(key, setTimeout(() => {
+    midiTargetFlashTimers.delete(key);
+    for (const element of midiCanvasTargetElements(target)) {
+      element.classList.remove("midi-active");
+    }
+  }, 500));
+}
+
 function attachMidiBindingEvents() {
   panel.querySelector("#newMidiBindingButton")?.addEventListener("click", () => openMidiBindingModal());
+  for (const button of panel.querySelectorAll("[data-midi-select-target-type]")) {
+    button.addEventListener("click", () => {
+      select(button.dataset.midiSelectTargetType, button.dataset.midiSelectTargetId);
+    });
+  }
   for (const button of panel.querySelectorAll("[data-midi-edit]")) {
     button.addEventListener("click", () => openMidiBindingModal(button.dataset.midiEdit));
   }
@@ -2400,10 +2731,15 @@ function renderMidiElementOptions(selectedValue) {
     const value = midiElementValue("link", link.id);
     return `<option value="${escapeHtml(value)}" ${selectedValue === value ? "selected" : ""}>${escapeHtml(linkName(link))}</option>`;
   }).join("");
+  const effectOptions = MASTER_EFFECT_IDS.map((effectId) => {
+    const value = midiElementValue("effect", effectId);
+    return `<option value="${escapeHtml(value)}" ${selectedValue === value ? "selected" : ""}>${escapeHtml(effectLabel(effectId))}</option>`;
+  }).join("");
 
   return `
     ${nodeOptions ? `<optgroup label="Operators">${nodeOptions}</optgroup>` : ""}
     ${linkOptions ? `<optgroup label="Links">${linkOptions}</optgroup>` : ""}
+    <optgroup label="Audio Out">${effectOptions}</optgroup>
   `;
 }
 
@@ -2413,63 +2749,174 @@ function renderMidiParameterOptions(targetType, targetId, selectedParameter) {
   )).join("");
 }
 
+function midiBindingNumberStep(definition) {
+  if (!definition || definition.type !== "number") return 1;
+  return definition.max <= 1 ? 0.001 : definition.max >= 100 ? 1 : 0.01;
+}
+
+function midiCurveLabel(curve) {
+  const labels = {
+    linear: "Linear",
+    logarithmic: "Logarithmic",
+    exponential: "Exponential",
+  };
+  return labels[curve] || curve;
+}
+
+function renderRecentMidiCcItems() {
+  const entries = recentMidiCcEntries();
+  if (!entries.length) {
+    return `<span class="recent-midi-empty">No recent CC movement</span>`;
+  }
+
+  return entries.map((entry) => `
+    <span class="recent-midi-item">
+      <span>CC ${entry.cc}</span>
+      <span>${entry.value}</span>
+    </span>
+  `).join("");
+}
+
 function openMidiBindingModal(bindingId = null, preset = null) {
   const existing = state.midiBindings.find((binding) => binding.id === bindingId);
   const defaultTarget = existing
     || preset
     || (state.nodes[0] ? { targetType: "node", targetId: state.nodes[0].id, parameter: "wave", cc: 1 } : null)
-    || (state.links[0] ? { targetType: "link", targetId: state.links[0].id, parameter: "amount", cc: 1 } : null);
+    || (state.links[0] ? { targetType: "link", targetId: state.links[0].id, parameter: "amount", cc: 1 } : null)
+    || { targetType: "effect", targetId: "chorus", parameter: "mix", cc: 1 };
   if (!defaultTarget) return;
 
   const selectedElementValue = midiElementValue(defaultTarget.targetType, defaultTarget.targetId);
   const overlay = document.createElement("div");
   overlay.className = "modal-backdrop";
   overlay.innerHTML = `
-    <form class="modal" id="midiBindingForm">
-      <h2>${existing ? "Edit MIDI binding" : "New MIDI binding"}</h2>
-      <div class="field">
-        <label for="midiBindingElement">Element</label>
-        <select id="midiBindingElement">${renderMidiElementOptions(selectedElementValue)}</select>
+    <div class="modal-stack">
+      <form class="modal" id="midiBindingForm">
+        <h2>${existing ? "Edit MIDI binding" : "New MIDI binding"}</h2>
+        <div class="field">
+          <label for="midiBindingElement">Element</label>
+          <select id="midiBindingElement">${renderMidiElementOptions(selectedElementValue)}</select>
+        </div>
+        <div class="field">
+          <label for="midiBindingParameter">Parameter</label>
+          <select id="midiBindingParameter"></select>
+        </div>
+        <div class="midi-range-row">
+          <div class="field">
+            <label for="midiBindingMin">Min</label>
+            <input id="midiBindingMin" type="number">
+          </div>
+          <div class="field">
+            <label for="midiBindingMax">Max</label>
+            <input id="midiBindingMax" type="number">
+          </div>
+          <div class="field">
+            <label for="midiBindingCurve">Curve</label>
+            <select id="midiBindingCurve">
+              ${MIDI_CC_CURVES.map((curve) => `<option value="${curve}">${midiCurveLabel(curve)}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="midiBindingCc">CC number</label>
+          <input id="midiBindingCc" type="number" min="0" max="127" step="1" value="${existing?.cc ?? 1}">
+        </div>
+        <div class="modal-actions">
+          ${existing ? `<button class="text-button danger" type="button" id="removeMidiBindingButton">Remove</button>` : ""}
+          <button class="text-button" type="button" id="cancelMidiBindingButton">Cancel</button>
+          <button class="text-button primary" type="submit">Save</button>
+        </div>
+      </form>
+      <div class="recent-midi-cc" id="recentMidiCcList" aria-live="polite">
+        ${renderRecentMidiCcItems()}
       </div>
-      <div class="field">
-        <label for="midiBindingParameter">Parameter</label>
-        <select id="midiBindingParameter"></select>
-      </div>
-      <div class="field">
-        <label for="midiBindingCc">CC number</label>
-        <input id="midiBindingCc" type="number" min="0" max="127" step="1" value="${existing?.cc ?? 1}">
-      </div>
-      <div class="modal-actions">
-        ${existing ? `<button class="text-button danger" type="button" id="removeMidiBindingButton">Remove</button>` : ""}
-        <button class="text-button" type="button" id="cancelMidiBindingButton">Cancel</button>
-        <button class="text-button primary" type="submit">Save</button>
-      </div>
-    </form>
+    </div>
   `;
   document.body.appendChild(overlay);
 
   const form = overlay.querySelector("#midiBindingForm");
   const elementSelect = overlay.querySelector("#midiBindingElement");
   const parameterSelect = overlay.querySelector("#midiBindingParameter");
+  const minInput = overlay.querySelector("#midiBindingMin");
+  const maxInput = overlay.querySelector("#midiBindingMax");
+  const curveSelect = overlay.querySelector("#midiBindingCurve");
   const ccInput = overlay.querySelector("#midiBindingCc");
+  const recentList = overlay.querySelector("#recentMidiCcList");
   const learnSession = existing ? null : { input: ccInput };
+  let cleanupRecentTimer = null;
   if (learnSession) {
     pendingMidiCcLearn = learnSession;
   }
+  const renderRecentList = () => {
+    pruneRecentMidiCc();
+    if (recentList.isConnected) {
+      recentList.innerHTML = renderRecentMidiCcItems();
+    }
+  };
+  recentMidiCcListeners.add(renderRecentList);
+  cleanupRecentTimer = setInterval(renderRecentList, 250);
   const close = () => {
     if (pendingMidiCcLearn === learnSession) {
       pendingMidiCcLearn = null;
     }
+    recentMidiCcListeners.delete(renderRecentList);
+    clearInterval(cleanupRecentTimer);
     overlay.remove();
+  };
+  const currentDefinition = () => {
+    const { targetType, targetId } = parseMidiElementValue(elementSelect.value);
+    return midiParameterDefinitions(targetType, targetId)
+      .find((definition) => definition.id === parameterSelect.value);
+  };
+  const syncRangeInputs = (preserveCurrent = false) => {
+    const definition = currentDefinition();
+    const isNumber = definition?.type === "number";
+    minInput.disabled = !isNumber;
+    maxInput.disabled = !isNumber;
+    curveSelect.disabled = !isNumber;
+    minInput.required = isNumber;
+    maxInput.required = isNumber;
+    minInput.placeholder = isNumber ? String(definition.min) : "N/A";
+    maxInput.placeholder = isNumber ? String(definition.max) : "N/A";
+    minInput.step = String(midiBindingNumberStep(definition));
+    maxInput.step = String(midiBindingNumberStep(definition));
+    minInput.min = isNumber ? String(definition.min) : "";
+    minInput.max = isNumber ? String(definition.max) : "";
+    maxInput.min = isNumber ? String(definition.min) : "";
+    maxInput.max = isNumber ? String(definition.max) : "";
+    if (!isNumber) {
+      minInput.value = "";
+      maxInput.value = "";
+      curveSelect.value = "linear";
+      return;
+    }
+    if (preserveCurrent && minInput.value !== "" && maxInput.value !== "") return;
+    const range = existing
+      && existing.targetType === parseMidiElementValue(elementSelect.value).targetType
+      && existing.targetId === parseMidiElementValue(elementSelect.value).targetId
+      && existing.parameter === parameterSelect.value
+      ? midiBindingRange(existing, definition)
+      : { min: definition.min, max: definition.max };
+    minInput.value = String(range.min);
+    maxInput.value = String(range.max);
+    curveSelect.value = existing
+      && existing.targetType === parseMidiElementValue(elementSelect.value).targetType
+      && existing.targetId === parseMidiElementValue(elementSelect.value).targetId
+      && existing.parameter === parameterSelect.value
+      && MIDI_CC_CURVES.includes(existing.curve)
+      ? existing.curve
+      : "linear";
   };
   const syncParameterOptions = (preferredParameter = "") => {
     const { targetType, targetId } = parseMidiElementValue(elementSelect.value);
     parameterSelect.innerHTML = renderMidiParameterOptions(targetType, targetId, preferredParameter);
+    syncRangeInputs();
   };
 
   syncParameterOptions(defaultTarget.parameter);
   if (!parameterSelect.value) syncParameterOptions();
   elementSelect.addEventListener("change", () => syncParameterOptions());
+  parameterSelect.addEventListener("change", () => syncRangeInputs());
   overlay.querySelector("#cancelMidiBindingButton").addEventListener("click", close);
   overlay.querySelector("#removeMidiBindingButton")?.addEventListener("click", () => {
     state.midiBindings = state.midiBindings.filter((binding) => binding.id !== existing.id);
@@ -2488,16 +2935,33 @@ function openMidiBindingModal(bindingId = null, preset = null) {
     const { targetType, targetId } = parseMidiElementValue(elementSelect.value);
     const parameter = parameterSelect.value;
     const cc = clamp(Math.round(Number(ccInput.value)), 0, 127);
+    const definition = midiParameterDefinitions(targetType, targetId)
+      .find((item) => item.id === parameter);
+    const minValue = Number(minInput.value);
+    const maxValue = Number(maxInput.value);
+    const range = definition?.type === "number"
+      ? {
+          min: Number.isFinite(minValue) ? clamp(minValue, definition.min, definition.max) : definition.min,
+          max: Number.isFinite(maxValue) ? clamp(maxValue, definition.min, definition.max) : definition.max,
+          curve: MIDI_CC_CURVES.includes(curveSelect.value) ? curveSelect.value : "linear",
+        }
+      : {};
     const binding = {
       id: existing?.id || midiBindingUid(),
       targetType,
       targetId,
       parameter,
       cc: Number.isFinite(cc) ? cc : 0,
+      ...range,
     };
 
     if (existing) {
       Object.assign(existing, binding);
+      if (definition?.type !== "number") {
+        delete existing.min;
+        delete existing.max;
+        delete existing.curve;
+      }
     } else {
       state.midiBindings.push(binding);
     }
@@ -2867,10 +3331,17 @@ addNodeButton.addEventListener("click", () => {
 
 recordButton.addEventListener("click", toggleRecording);
 
+audioStatus.addEventListener("click", () => {
+  if (audioStatus.disabled || !audioContext || !synthNode) return;
+  audioMuted = !audioMuted;
+  syncOutputMute();
+  updateAudioReadyButton();
+});
+
 stage.addEventListener("pointerdown", onStagePointerDown);
 
 stage.addEventListener("dblclick", (event) => {
-  if (event.target.closest?.(".node, .audio-out, .wire-hit, .link-anchor")) return;
+  if (!isEmptyCanvasTarget(event.target)) return;
   ensureAudio();
   addNode(stagePoint(event.clientX, event.clientY));
 });

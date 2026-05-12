@@ -142,8 +142,28 @@ select {
   backdrop-filter: blur(14px);
 }
 
+.audio-status {
+  appearance: none;
+  cursor: default;
+  font: inherit;
+  opacity: 1;
+}
+
+.audio-status:not(:disabled) {
+  cursor: pointer;
+}
+
+.audio-status:not(:disabled):hover {
+  border-color: rgba(117, 208, 164, 0.34);
+  color: rgba(241, 244, 242, 0.86);
+}
+
 .status-pill.ready {
   color: var(--green);
+}
+
+.status-pill.muted {
+  color: #f0a8b4;
 }
 
 .icon-button {
@@ -235,6 +255,7 @@ select {
   stroke: var(--line);
   stroke-width: 3;
   stroke-linecap: round;
+  transition: filter 220ms ease, stroke 220ms ease;
 }
 
 .wire.output {
@@ -267,6 +288,26 @@ select {
 .wire.feedback.selected {
   stroke: #8f75d8;
   filter: drop-shadow(0 0 10px rgba(143, 117, 216, 0.78)) drop-shadow(0 0 18px rgba(143, 117, 216, 0.34));
+}
+
+.wire.midi-active:not(.selected) {
+  stroke: #9b84e0;
+  filter: drop-shadow(0 0 5px rgba(143, 117, 216, 0.48)) drop-shadow(0 0 10px rgba(143, 117, 216, 0.18));
+}
+
+.wire.output.midi-active:not(.selected) {
+  stroke: #f0bc59;
+  filter: drop-shadow(0 0 5px rgba(224, 164, 63, 0.5)) drop-shadow(0 0 10px rgba(224, 164, 63, 0.2));
+}
+
+.wire.link-mod.midi-active:not(.selected) {
+  stroke: #82b7f5;
+  filter: drop-shadow(0 0 5px rgba(111, 165, 232, 0.5)) drop-shadow(0 0 10px rgba(111, 165, 232, 0.2));
+}
+
+.wire.feedback.midi-active:not(.selected) {
+  stroke: #9b84e0;
+  filter: drop-shadow(0 0 5px rgba(143, 117, 216, 0.48)) drop-shadow(0 0 10px rgba(143, 117, 216, 0.18));
 }
 
 .wire-hit {
@@ -331,6 +372,7 @@ select {
   cursor: grab;
   pointer-events: auto;
   user-select: none;
+  transition: border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .node:active {
@@ -343,6 +385,14 @@ select {
     0 0 0 1px rgba(117, 208, 164, 0.85),
     0 0 18px rgba(117, 208, 164, 0.42),
     0 0 42px rgba(117, 208, 164, 0.18),
+    var(--shadow);
+}
+
+.node.midi-active:not(.selected) {
+  border-color: rgba(117, 208, 164, 0.44);
+  box-shadow:
+    0 0 0 1px rgba(117, 208, 164, 0.34),
+    0 0 16px rgba(117, 208, 164, 0.24),
     var(--shadow);
 }
 
@@ -430,11 +480,20 @@ select {
   box-shadow: var(--shadow);
   transform: translateX(-50%);
   cursor: pointer;
+  transition: border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .audio-out.selected {
   border-color: var(--green);
   box-shadow: 0 0 0 1px rgba(117, 208, 164, 0.45), var(--shadow);
+}
+
+.audio-out.midi-active:not(.selected) {
+  border-color: rgba(117, 208, 164, 0.42);
+  box-shadow:
+    0 0 0 1px rgba(117, 208, 164, 0.24),
+    0 0 14px rgba(117, 208, 164, 0.18),
+    var(--shadow);
 }
 
 .audio-anchor {
@@ -576,6 +635,13 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
+  transition: background 500ms ease, border-color 500ms ease, box-shadow 500ms ease;
+}
+
+.midi-binding-item.active {
+  border-color: rgba(117, 208, 164, 0.54);
+  background: rgba(117, 208, 164, 0.13);
+  box-shadow: 0 0 0 1px rgba(117, 208, 164, 0.08);
 }
 
 .midi-binding-copy {
@@ -594,6 +660,29 @@ select {
 .midi-binding-copy strong {
   color: var(--text);
   font-size: 13px;
+}
+
+.midi-target-link {
+  justify-self: start;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 760;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.midi-target-link:hover {
+  color: var(--green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .midi-binding-copy span {
@@ -675,6 +764,16 @@ select {
   box-shadow: var(--shadow);
 }
 
+.modal-stack {
+  display: grid;
+  width: min(380px, 100%);
+  gap: 8px;
+}
+
+.modal-stack .modal {
+  width: 100%;
+}
+
 .modal h2 {
   margin: 0 0 18px;
   font-size: 18px;
@@ -685,6 +784,31 @@ select {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 10px;
+}
+
+.midi-range-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.recent-midi-cc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding: 0 4px;
+  color: rgba(167, 176, 178, 0.48);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.recent-midi-empty {
+  color: rgba(167, 176, 178, 0.34);
+}
+
+.recent-midi-item {
+  display: inline-flex;
+  gap: 4px;
 }
 
 .adsr-view {
