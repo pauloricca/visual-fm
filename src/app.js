@@ -11,10 +11,25 @@ const selectionRect = document.querySelector("#selectionRect");
 
 const STORAGE_KEY = "visual-fm.patch.v1";
 const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
-const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "noise", "audio-input"];
+const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"];
+const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
+const SPEED_WAVE_TYPES = new Set(["perlin"]);
 const FREQUENCY_MODES = ["ratio", "fixed"];
 const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
-const LINK_MODULATION_TARGETS = ["filterCutoff", "filterResonance", "amplitude", "delay", "noise", "pan"];
+const LINK_MODULATION_TARGETS = [
+  "amplitude",
+  "pan",
+  "noise",
+  "delay",
+  "envelopeTrigger",
+  "envelope.delay",
+  "envelope.attack",
+  "envelope.decay",
+  "envelope.sustain",
+  "envelope.release",
+  "filterCutoff",
+  "filterResonance",
+];
 const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
 const MASTER_EFFECTS = {
   chorus: {
@@ -54,7 +69,7 @@ const MIDI_CC_MAX_SMOOTH_DT = 1 / 60;
 const RECENT_MIDI_CC_WINDOW_MS = 2000;
 const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
 const LINK_INPUT_T = 0.45;
-const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency"]);
+const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed"]);
 const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
   "amount",
@@ -85,8 +100,8 @@ const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440 },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880 },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8 },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8 },
   ],
   links: [
     {
@@ -284,7 +299,7 @@ function normalizeModulationTarget(target, to, targetLink = null) {
     const targets = linkHasPan(targetLink)
       ? LINK_MODULATION_TARGETS
       : LINK_MODULATION_TARGETS.filter((item) => item !== "pan");
-    return targets.includes(target) ? target : "filterCutoff";
+    return targets.includes(target) ? target : "amplitude";
   }
   return NODE_MODULATION_TARGETS.includes(target) ? target : "phase";
 }
@@ -295,6 +310,14 @@ function normalizeFrequencyMode(mode) {
 
 function patchUsesAudioInput() {
   return state.nodes.some((node) => node.wave === "audio-input");
+}
+
+function isPitchedWave(wave) {
+  return PITCHED_WAVE_TYPES.has(wave);
+}
+
+function isSpeedWave(wave) {
+  return SPEED_WAVE_TYPES.has(wave);
 }
 
 function normalizeMidiBindings(bindings, nodes, links) {
@@ -359,6 +382,7 @@ function normalizePatch(patch) {
     frequencyMode: normalizeFrequencyMode(node.frequencyMode),
     ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
     frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
+    speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
   }));
   const nodeIds = new Set(nodes.map((node) => node.id));
   const sourceLinkIds = new Set(source.links.map((link, index) => (
@@ -484,7 +508,7 @@ function linkById(id) {
 }
 
 function nodeParameterDefinitions(node) {
-  return [
+  const definitions = [
     {
       id: "wave",
       label: "Wave type",
@@ -500,7 +524,7 @@ function nodeParameterDefinitions(node) {
         }
       },
     },
-    {
+    ...(isPitchedWave(node.wave) ? [{
       id: "frequencyMode",
       label: "Tuning",
       type: "choice",
@@ -534,8 +558,21 @@ function nodeParameterDefinitions(node) {
       set: (value) => {
         node.frequency = value;
       },
-    },
+    }] : []),
+    ...(isSpeedWave(node.wave) ? [{
+      id: "speed",
+      label: "Speed",
+      type: "number",
+      min: 0.01,
+      max: 60,
+      get: () => node.speed,
+      set: (value) => {
+        node.speed = value;
+      },
+    }] : []),
   ];
+
+  return definitions;
 }
 
 function linkParameterDefinitions(link) {
@@ -924,6 +961,9 @@ function updatePanelForMidiNumber(smoothing, value) {
     ) {
       setPanelNumberPair("frequencyValue", "frequencyValueRange", value);
     }
+    if (node && smoothing.parameter === "speed") {
+      setPanelNumberPair("speed", "speedRange", value);
+    }
     return;
   }
 
@@ -1241,12 +1281,13 @@ function linkGeometry(link, visited = new Set()) {
 
 function graphPayload() {
   return {
-    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency }) => ({
+    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed }) => ({
       id,
       wave,
       frequencyMode,
       ratio,
       frequency,
+      speed,
     })),
     links: state.links.map((link) => ({
       id: link.id,
@@ -1800,11 +1841,14 @@ function renderPanel() {
   if (selection.type === "node") {
     const node = nodeById(selection.id);
     if (!node) return renderEmptyPanel();
+    const usesPitchControls = isPitchedWave(node.wave);
+    const usesSpeedControl = isSpeedWave(node.wave);
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
     const frequencyMax = isFixedFrequency ? 12000 : 16;
     const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
+    const speedValue = Number.isFinite(Number(node.speed)) ? node.speed : 8;
 
     panel.innerHTML = `
       <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
@@ -1819,20 +1863,31 @@ function renderPanel() {
           ${WAVE_TYPES.map((wave) => `<option value="${wave}" ${node.wave === wave ? "selected" : ""}>${waveTypeLabel(wave)}</option>`).join("")}
         </select>
       </div>
-      <div class="field">
-        ${parameterLabel("frequencyMode", "Tuning", "node", node.id, "frequencyMode")}
-        <select id="frequencyMode">
-          <option value="ratio" ${node.frequencyMode === "ratio" ? "selected" : ""}>Ratio</option>
-          <option value="fixed" ${node.frequencyMode === "fixed" ? "selected" : ""}>Fixed</option>
-        </select>
-      </div>
-      <div class="field">
-        ${parameterLabel("frequencyValue", isFixedFrequency ? "Frequency (Hz)" : "Ratio (x)", "node", node.id, isFixedFrequency ? "frequency" : "ratio")}
-        <div class="field-row">
-          <input id="frequencyValueRange" type="range" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
-          <input id="frequencyValue" type="number" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
+      ${usesPitchControls ? `
+        <div class="field">
+          ${parameterLabel("frequencyMode", "Tuning", "node", node.id, "frequencyMode")}
+          <select id="frequencyMode">
+            <option value="ratio" ${node.frequencyMode === "ratio" ? "selected" : ""}>Ratio</option>
+            <option value="fixed" ${node.frequencyMode === "fixed" ? "selected" : ""}>Fixed</option>
+          </select>
         </div>
-      </div>
+        <div class="field">
+          ${parameterLabel("frequencyValue", isFixedFrequency ? "Frequency (Hz)" : "Ratio (x)", "node", node.id, isFixedFrequency ? "frequency" : "ratio")}
+          <div class="field-row">
+            <input id="frequencyValueRange" type="range" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
+            <input id="frequencyValue" type="number" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
+          </div>
+        </div>
+      ` : ""}
+      ${usesSpeedControl ? `
+        <div class="field">
+          ${parameterLabel("speed", "Speed", "node", node.id, "speed")}
+          <div class="field-row">
+            <input id="speedRange" type="range" min="0.01" max="60" step="0.001" value="${speedValue}">
+            <input id="speed" type="number" min="0.01" max="60" step="0.001" value="${speedValue}">
+          </div>
+        </div>
+      ` : ""}
     `;
 
     panel.querySelector("#nodeName").addEventListener("input", (event) => {
@@ -1853,26 +1908,38 @@ function renderPanel() {
           setAudioStatusLabel("Audio input blocked");
         });
       }
+      pruneMidiBindings();
+      renderPanel();
       renderNodes();
       sendGraph();
       savePatch();
     });
-    panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
-      node.frequencyMode = event.target.value;
-      render();
-      sendGraph();
-      savePatch();
-    });
-    bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
-      if (node.frequencyMode === "fixed") {
-        node.frequency = value;
-      } else {
-        node.ratio = value;
-      }
-      renderNodes();
-      sendGraph();
-      savePatch();
-    });
+    if (usesPitchControls) {
+      panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
+        node.frequencyMode = event.target.value;
+        render();
+        sendGraph();
+        savePatch();
+      });
+      bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
+        if (node.frequencyMode === "fixed") {
+          node.frequency = value;
+        } else {
+          node.ratio = value;
+        }
+        renderNodes();
+        sendGraph();
+        savePatch();
+      });
+    }
+    if (usesSpeedControl) {
+      bindNumberPair("speed", "speedRange", 0.01, 60, (value) => {
+        node.speed = value;
+        renderNodes();
+        sendGraph();
+        savePatch();
+      });
+    }
     attachParameterMidiButtons();
     return;
   }
@@ -1890,6 +1957,7 @@ function renderPanel() {
     const targetKind = linkTargetKind(link);
     const modulationTargets = modulationTargetsForLink(link);
     const amountMax = link.modulationTarget === "mix" ? 1 : 8;
+    const usesEnvelopeControls = !link.drone;
     const filterControls = link.filter.type === "none" ? "" : `
       <div class="field">
         ${parameterLabel("filterCutoff", "Cutoff (Hz)", "link", link.id, "filter.cutoff")}
@@ -1911,7 +1979,7 @@ function renderPanel() {
       sendGraph();
       savePatch();
     }
-    const envelopeControls = link.drone ? "" : `
+    const envelopeControls = usesEnvelopeControls ? `
       <section class="effect-section">
         <div class="section-title">Envelope</div>
         ${drawAdsr(link.envelope)}
@@ -1923,7 +1991,7 @@ function renderPanel() {
           ${adsrField("release", "R", "Release", link.envelope.release, 0.001, 6, link.id)}
         </div>
       </section>
-    `;
+    ` : "";
 
     panel.innerHTML = `
       <h1>${link.to === "audio" ? "Output envelope" : targetKind === "link" ? "Link modulation" : "Modulation"}</h1>
@@ -2064,7 +2132,7 @@ function renderPanel() {
       });
     }
 
-    if (!link.drone) {
+    if (usesEnvelopeControls) {
       for (const name of ["delay", "attack", "decay", "sustain", "release"]) {
         const max = name === "sustain" ? 1 : name === "release" ? 6 : 4;
         const min = name === "delay" || name === "sustain" ? 0 : 0.001;
@@ -2366,6 +2434,7 @@ function filterTypeLabel(type) {
 
 function waveTypeLabel(type) {
   const labels = {
+    "sample-hold": "sample & hold",
     "audio-input": "audio input",
   };
   return labels[type] || type;
@@ -2373,6 +2442,12 @@ function waveTypeLabel(type) {
 
 function nodeFrequencyLabel(node) {
   if (node.wave === "audio-input") return "line in";
+  if (node.wave === "noise") return "random";
+  if (isSpeedWave(node.wave)) {
+    const speed = Number(node.speed);
+    const label = speed < 10 ? speed.toFixed(2) : speed < 100 ? speed.toFixed(1) : String(Math.round(speed));
+    return `${label} Hz`;
+  }
   if (node.frequencyMode === "fixed") {
     const frequency = Number(node.frequency);
     const label = frequency < 10 ? frequency.toFixed(2) : frequency < 100 ? frequency.toFixed(1) : String(Math.round(frequency));
@@ -2389,11 +2464,17 @@ function modulationTargetLabel(target, destination = "") {
     fold: "Fold",
     mix: "Mix",
     filterCutoff: "Filter cutoff",
-    filterResonance: "Resonance",
+    filterResonance: "Filter resonance",
     amplitude: "Amplitude",
-    delay: "Delay",
+    delay: "Delay buffer",
     noise: "Noise",
     pan: "Pan",
+    envelopeTrigger: "Envelope trigger",
+    "envelope.delay": "Envelope delay",
+    "envelope.attack": "Envelope attack",
+    "envelope.decay": "Envelope decay",
+    "envelope.sustain": "Envelope sustain",
+    "envelope.release": "Envelope release",
   };
   return labels[target] || target;
 }
@@ -3087,6 +3168,7 @@ function addNode(position = null) {
     frequencyMode: "ratio",
     ratio: 1,
     frequency: 440,
+    speed: 8,
   };
   state.nodes.push(node);
   select("node", node.id);
@@ -3151,7 +3233,7 @@ function upsertLink(from, to) {
     noise: 0,
     pan: 0,
     velocitySensitivity: to === "audio" ? 1 : 0,
-    modulationTarget: to === "audio" ? "amplitude" : targetLink ? "filterCutoff" : "phase",
+    modulationTarget: to === "audio" ? "amplitude" : targetLink ? "amplitude" : "phase",
     drone: false,
     filter: { ...DEFAULT_LINK_FILTER },
     envelope: to === "audio"
