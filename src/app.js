@@ -1,3 +1,45 @@
+import {
+  DEFAULT_LINK_FILTER,
+  FREQUENCY_MODES,
+  LINK_FILTER_TYPES,
+  LINK_INPUT_T,
+  LINK_MODULATION_TARGETS,
+  MASTER_EFFECTS,
+  MASTER_EFFECT_IDS,
+  MAX_MAX_VOICES,
+  MIDI_CC_CURVES,
+  MIDI_CC_MAX_SMOOTH_DT,
+  MIDI_CC_SETTLE_RATIO,
+  MIDI_CC_SMOOTH_SECONDS,
+  MIN_MAX_VOICES,
+  NODE_MODULATION_TARGETS,
+  RECENT_MIDI_CC_WINDOW_MS,
+  STORAGE_KEY,
+  VELOCITY_SENSITIVITY_MAX,
+  VELOCITY_SENSITIVITY_MIN,
+  WAVE_TYPES,
+  keyMap,
+} from "./constants.js";
+import { downloadPatchFile, parsePatchFile } from "./patch-format.js";
+import {
+  linkHasPan,
+  normalizeDefaultPatch,
+  normalizeFrequencyMode,
+  normalizePatch,
+} from "./patch-normalize.js";
+import { audioBufferToWav, mediaRecorderOptions } from "./recording.js";
+import {
+  alphaName,
+  clamp,
+  clonePatch,
+  downloadBlob,
+  escapeHtml,
+  isPitchedWave,
+  isSpeedWave,
+  slugifyPatchName,
+  timestampForFile,
+} from "./utils.js";
+
 const stage = document.querySelector("#stage");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
@@ -8,152 +50,15 @@ const audioOut = document.querySelector("#audioOut");
 const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
-
-const STORAGE_KEY = "visual-fm.patch.v1";
-const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
-const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"];
-const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
-const SPEED_WAVE_TYPES = new Set(["perlin"]);
-const FREQUENCY_MODES = ["ratio", "fixed"];
-const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
-const LINK_MODULATION_TARGETS = [
-  "amplitude",
-  "pan",
-  "noise",
-  "delay",
-  "envelopeTrigger",
-  "envelope.delay",
-  "envelope.attack",
-  "envelope.decay",
-  "envelope.sustain",
-  "envelope.release",
-  "filterCutoff",
-  "filterResonance",
-];
-const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
-const MASTER_EFFECTS = {
-  chorus: {
-    label: "Chorus",
-    params: [
-      ["rate", "Rate", 0.05, 6, "Hz"],
-      ["depth", "Depth", 0.001, 0.04, "s"],
-      ["mix", "Mix", 0, 1, ""],
-    ],
-  },
-  delay: {
-    label: "Delay",
-    params: [
-      ["time", "Time", 0.02, 1.5, "s"],
-      ["feedback", "Feedback", 0, 0.92, ""],
-      ["mix", "Mix", 0, 1, ""],
-    ],
-  },
-  reverb: {
-    label: "Reverb",
-    params: [
-      ["size", "Size", 0.1, 1, ""],
-      ["decay", "Decay", 0, 0.94, ""],
-      ["mix", "Mix", 0, 1, ""],
-    ],
-  },
-};
-const MASTER_EFFECT_IDS = Object.keys(MASTER_EFFECTS);
-const VELOCITY_SENSITIVITY_MIN = -8;
-const VELOCITY_SENSITIVITY_MAX = 8;
-const DEFAULT_MAX_VOICES = 5;
-const MIN_MAX_VOICES = 1;
-const MAX_MAX_VOICES = 16;
-const MIDI_CC_SMOOTH_SECONDS = 0.09;
-const MIDI_CC_SETTLE_RATIO = 0.00025;
-const MIDI_CC_MAX_SMOOTH_DT = 1 / 60;
-const RECENT_MIDI_CC_WINDOW_MS = 2000;
-const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
-const LINK_INPUT_T = 0.45;
-const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed"]);
-const LINK_MIDI_PARAMETERS = new Set([
-  "modulationTarget",
-  "amount",
-  "pan",
-  "velocitySensitivity",
-  "noise",
-  "delay",
-  "drone",
-  "filter.type",
-  "filter.cutoff",
-  "filter.resonance",
-  "envelope.delay",
-  "envelope.attack",
-  "envelope.decay",
-  "envelope.sustain",
-  "envelope.release",
-]);
-
-const defaultPatch = {
-  patchName: "Visual FM Patch",
-  maxVoices: DEFAULT_MAX_VOICES,
-  midiChannel: "all",
-  midiInputId: "all",
-  midiBindings: [],
-  masterEffects: {
-    chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },
-    delay: { enabled: false, time: 0.28, feedback: 0.35, mix: 0.25 },
-    reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
-  },
-  nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8 },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8 },
-  ],
-  links: [
-    {
-      id: "link-1",
-      from: "op-2",
-      to: "op-1",
-      amount: 0,
-      delay: 0,
-      noise: 0,
-      velocitySensitivity: 0,
-      modulationTarget: "phase",
-      drone: false,
-      filter: { ...DEFAULT_LINK_FILTER },
-      envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
-    },
-    {
-      id: "link-2",
-      from: "op-1",
-      to: "audio",
-      amount: 0,
-      delay: 0,
-      noise: 0,
-      pan: 0,
-      velocitySensitivity: 1,
-      modulationTarget: "amplitude",
-      drone: false,
-      filter: { ...DEFAULT_LINK_FILTER },
-      envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },
-    },
-  ],
-};
+const fineSliderButton = document.querySelector("#fineSliderButton");
+const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=envelope-retrigger-continuity-1";
+const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
+const FINE_SLIDER_SCALE = 0.1;
 
 const state = {
   ...loadPatch(),
   selected: { type: "node", id: "op-1" },
 };
-
-const keyMap = new Map([
-  ["z", 48],
-  ["s", 49],
-  ["x", 50],
-  ["d", 51],
-  ["c", 52],
-  ["v", 53],
-  ["g", 54],
-  ["b", 55],
-  ["h", 56],
-  ["n", 57],
-  ["j", 58],
-  ["m", 59],
-  [",", 60],
-]);
 
 let audioContext = null;
 let synthNode = null;
@@ -161,9 +66,11 @@ let outputGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
 let recorderDestination = null;
+let audioReadyPromise = null;
 let mediaRecorder = null;
 let recordingChunks = [];
 let recordingStartedAt = null;
+let recordingStarting = false;
 let audioMuted = false;
 let nodeCounter = 3;
 let linkCounter = 3;
@@ -175,6 +82,7 @@ let pressedKeys = new Set();
 let midiAccess = null;
 let pendingPatchSave = null;
 let pendingGraphFrame = null;
+let pendingLinkParamGraphSync = null;
 let pendingNodesAndWiresFrame = null;
 let pendingWiresFrame = null;
 let pendingMidiCcLearn = null;
@@ -185,6 +93,8 @@ const recentMidiCcListeners = new Set();
 const midiBindingFlashTimers = new Map();
 const midiTargetFlashTimers = new Map();
 let suppressNextStageClick = false;
+let touchFineSliderPointerId = null;
+let keyboardFineSliderActive = false;
 
 syncCounters();
 pruneMidiBindings();
@@ -199,28 +109,6 @@ function uid(prefix) {
 
 function midiBindingUid() {
   return `midi-binding-${midiBindingCounter++}`;
-}
-
-function alphaName(index) {
-  let name = "";
-  let value = index + 1;
-
-  while (value > 0) {
-    value -= 1;
-    name = String.fromCharCode(65 + (value % 26)) + name;
-    value = Math.floor(value / 26);
-  }
-
-  return name;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }
 
 function nodeName(node) {
@@ -249,210 +137,16 @@ function linkName(link, seen = new Set()) {
   return name;
 }
 
-function clonePatch(patch) {
-  return JSON.parse(JSON.stringify(patch));
-}
-
-function normalizeMasterEffects(effects = {}) {
-  return {
-    chorus: {
-      enabled: Boolean(effects.chorus?.enabled),
-      rate: clamp(Number(effects.chorus?.rate) || 0.8, 0.05, 6),
-      depth: clamp(Number(effects.chorus?.depth) || 0.012, 0.001, 0.04),
-      mix: clamp(Number(effects.chorus?.mix) || 0.25, 0, 1),
-    },
-    delay: {
-      enabled: Boolean(effects.delay?.enabled),
-      time: clamp(Number(effects.delay?.time) || 0.28, 0.02, 1.5),
-      feedback: clamp(Number(effects.delay?.feedback) || 0.35, 0, 0.92),
-      mix: clamp(Number(effects.delay?.mix) || 0.25, 0, 1),
-    },
-    reverb: {
-      enabled: Boolean(effects.reverb?.enabled),
-      size: clamp(Number(effects.reverb?.size) || 0.55, 0.1, 1),
-      decay: clamp(Number(effects.reverb?.decay) || 0.45, 0, 0.94),
-      mix: clamp(Number(effects.reverb?.mix) || 0.25, 0, 1),
-    },
-  };
-}
-
-function normalizeLinkFilter(filter = {}) {
-  const type = LINK_FILTER_TYPES.includes(filter.type) ? filter.type : DEFAULT_LINK_FILTER.type;
-  return {
-    type,
-    cutoff: Number.isFinite(Number(filter.cutoff))
-      ? clamp(Number(filter.cutoff), 20, 12000)
-      : DEFAULT_LINK_FILTER.cutoff,
-    resonance: Number.isFinite(Number(filter.resonance))
-      ? clamp(Number(filter.resonance), 0.1, 12)
-      : DEFAULT_LINK_FILTER.resonance,
-  };
-}
-
-function linkHasPan(link) {
-  return link?.to === "audio";
-}
-
-function normalizeModulationTarget(target, to, targetLink = null) {
-  if (to === "audio") return "amplitude";
-  if (targetLink) {
-    const targets = linkHasPan(targetLink)
-      ? LINK_MODULATION_TARGETS
-      : LINK_MODULATION_TARGETS.filter((item) => item !== "pan");
-    return targets.includes(target) ? target : "amplitude";
-  }
-  return NODE_MODULATION_TARGETS.includes(target) ? target : "phase";
-}
-
-function normalizeFrequencyMode(mode) {
-  return FREQUENCY_MODES.includes(mode) ? mode : "ratio";
-}
-
 function patchUsesAudioInput() {
   return state.nodes.some((node) => node.wave === "audio-input");
-}
-
-function isPitchedWave(wave) {
-  return PITCHED_WAVE_TYPES.has(wave);
-}
-
-function isSpeedWave(wave) {
-  return SPEED_WAVE_TYPES.has(wave);
-}
-
-function normalizeMidiBindings(bindings, nodes, links) {
-  if (!Array.isArray(bindings)) return [];
-
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const linkIds = new Set(links.map((link) => link.id));
-  const targetTypes = new Set(["node", "link", "effect"]);
-  return bindings
-    .map((binding, index) => {
-      const targetType = targetTypes.has(binding.targetType) ? binding.targetType : "node";
-      const targetId = typeof binding.targetId === "string" ? binding.targetId : "";
-      const parameter = typeof binding.parameter === "string" ? binding.parameter : "";
-      const cc = Number(binding.cc);
-      const normalized = {
-        id: typeof binding.id === "string" && binding.id.trim()
-          ? binding.id
-          : `midi-binding-${index + 1}`,
-        targetType,
-        targetId,
-        parameter,
-        cc: Number.isFinite(cc) ? clamp(Math.round(cc), 0, 127) : 0,
-      };
-      if (Number.isFinite(Number(binding.min))) normalized.min = Number(binding.min);
-      if (Number.isFinite(Number(binding.max))) normalized.max = Number(binding.max);
-      if (MIDI_CC_CURVES.includes(binding.curve)) normalized.curve = binding.curve;
-      return normalized;
-    })
-    .filter((binding) => {
-      if (binding.targetType === "node") {
-        return nodeIds.has(binding.targetId) && NODE_MIDI_PARAMETERS.has(binding.parameter);
-      }
-      if (binding.targetType === "link") {
-        return linkIds.has(binding.targetId) && LINK_MIDI_PARAMETERS.has(binding.parameter);
-      }
-      return MASTER_EFFECT_IDS.includes(binding.targetId)
-        && hasEffectMidiParameter(binding.targetId, binding.parameter);
-    });
-}
-
-function normalizePatch(patch) {
-  const source = patch && Array.isArray(patch.nodes) && Array.isArray(patch.links) ? patch : defaultPatch;
-  const patchName = typeof source.patchName === "string" && source.patchName.trim()
-    ? source.patchName.trim()
-    : "Visual FM Patch";
-  const maxVoices = Number.isFinite(Number(source.maxVoices))
-    ? clamp(Math.round(Number(source.maxVoices)), MIN_MAX_VOICES, MAX_MAX_VOICES)
-    : DEFAULT_MAX_VOICES;
-  const sourceMidiChannel = String(source.midiChannel || "all");
-  const midiChannel = sourceMidiChannel === "all" || (Number(sourceMidiChannel) >= 1 && Number(sourceMidiChannel) <= 16)
-    ? sourceMidiChannel
-    : "all";
-  const midiInputId = typeof source.midiInputId === "string" && source.midiInputId.trim()
-    ? source.midiInputId
-    : "all";
-  const nodes = source.nodes.map((node, index) => ({
-    id: typeof node.id === "string" ? node.id : `op-${index + 1}`,
-    name: typeof node.name === "string" && node.name.trim() ? node.name : alphaName(index),
-    x: Number.isFinite(node.x) ? node.x : 220 + index * 210,
-    y: Number.isFinite(node.y) ? node.y : 220,
-    wave: WAVE_TYPES.includes(node.wave) ? node.wave : "sine",
-    frequencyMode: normalizeFrequencyMode(node.frequencyMode),
-    ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
-    frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
-    speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
-  }));
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const sourceLinkIds = new Set(source.links.map((link, index) => (
-    typeof link.id === "string" ? link.id : `link-${index + 1}`
-  )));
-  const sourceLinksById = new Map(source.links.map((link, index) => [
-    typeof link.id === "string" ? link.id : `link-${index + 1}`,
-    link,
-  ]));
-  let links = source.links
-    .filter((link, index) => {
-      const id = typeof link.id === "string" ? link.id : `link-${index + 1}`;
-      return nodeIds.has(link.from)
-        && (nodeIds.has(link.to) || link.to === "audio" || (sourceLinkIds.has(link.to) && link.to !== id));
-    })
-    .map((link, index) => ({
-      id: typeof link.id === "string" ? link.id : `link-${index + 1}`,
-      from: link.from,
-      to: link.to,
-      amount: Number.isFinite(Number(link.amount)) ? Number(link.amount) : 0,
-      delay: Number.isFinite(Number(link.delay)) ? clamp(Number(link.delay), 0, 3) : 0,
-      noise: Number.isFinite(Number(link.noise)) ? clamp(Number(link.noise), 0, 1) : 0,
-      pan: Number.isFinite(Number(link.pan)) ? clamp(Number(link.pan), -1, 1) : 0,
-      velocitySensitivity: Number.isFinite(Number(link.velocitySensitivity))
-        ? clamp(Number(link.velocitySensitivity), VELOCITY_SENSITIVITY_MIN, VELOCITY_SENSITIVITY_MAX)
-        : link.to === "audio" ? 1 : 0,
-      modulationTarget: normalizeModulationTarget(
-        link.modulationTarget,
-        link.to,
-        sourceLinkIds.has(link.to) ? sourceLinksById.get(link.to) : null,
-      ),
-      drone: Boolean(link.drone),
-      filter: normalizeLinkFilter(link.filter),
-      envelope: {
-        delay: Number.isFinite(Number(link.envelope?.delay)) ? Number(link.envelope.delay) : 0,
-        attack: Number.isFinite(Number(link.envelope?.attack)) ? Number(link.envelope.attack) : 0.03,
-        decay: Number.isFinite(Number(link.envelope?.decay)) ? Number(link.envelope.decay) : 0.16,
-        sustain: Number.isFinite(Number(link.envelope?.sustain)) ? Number(link.envelope.sustain) : 0.65,
-        release: Number.isFinite(Number(link.envelope?.release)) ? Number(link.envelope.release) : 0.26,
-      },
-    }));
-  let linksChanged = true;
-  while (linksChanged) {
-    const linkIds = new Set(links.map((link) => link.id));
-    const nextLinks = links.filter((link) => (
-      nodeIds.has(link.from)
-        && (nodeIds.has(link.to) || link.to === "audio" || (linkIds.has(link.to) && link.to !== link.id))
-    ));
-    linksChanged = nextLinks.length !== links.length;
-    links = nextLinks;
-  }
-
-  return {
-    patchName,
-    maxVoices,
-    midiChannel,
-    midiInputId,
-    midiBindings: normalizeMidiBindings(source.midiBindings, nodes, links),
-    masterEffects: normalizeMasterEffects(source.masterEffects),
-    nodes,
-    links,
-  };
 }
 
 function loadPatch() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return normalizePatch(saved ? JSON.parse(saved) : clonePatch(defaultPatch));
+    return saved ? normalizePatch(JSON.parse(saved)) : normalizeDefaultPatch();
   } catch {
-    return normalizePatch(clonePatch(defaultPatch));
+    return normalizeDefaultPatch();
   }
 }
 
@@ -495,10 +189,6 @@ function syncCounters() {
   midiBindingCounter = maxMidiBindingId + 1;
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
 function nodeById(id) {
   return state.nodes.find((node) => node.id === id);
 }
@@ -521,6 +211,8 @@ function nodeParameterDefinitions(node) {
           ensureAudio().catch(() => {
             setAudioStatusLabel("Audio input blocked");
           });
+        } else {
+          reconcileAudioInput();
         }
       },
     },
@@ -1335,6 +1027,22 @@ function sendGraph({ immediate = false } = {}) {
   });
 }
 
+function scheduleLinkParamGraphSync() {
+  clearTimeout(pendingLinkParamGraphSync);
+  pendingLinkParamGraphSync = setTimeout(() => {
+    pendingLinkParamGraphSync = null;
+    sendGraph({ immediate: true });
+  }, LINK_PARAM_GRAPH_SYNC_DELAY_MS);
+}
+
+function sendLinkParam(id, parameter, value) {
+  synthNode?.port.postMessage({
+    type: "linkParam",
+    payload: { id, parameter, value },
+  });
+  scheduleLinkParamGraphSync();
+}
+
 function syncOutputMute() {
   if (!outputGainNode) return;
   const value = audioMuted ? 0 : 1;
@@ -1389,9 +1097,21 @@ function scheduleWiresRender() {
 }
 
 async function ensureAudio() {
+  if (!audioReadyPromise) {
+    audioReadyPromise = setupAudio().finally(() => {
+      audioReadyPromise = null;
+    });
+  }
+  return audioReadyPromise;
+}
+
+async function setupAudio() {
   if (!audioContext) {
     audioContext = new AudioContext();
-    await audioContext.audioWorklet.addModule("./src/audio-worklet.js");
+  }
+
+  if (!synthNode) {
+    await audioContext.audioWorklet.addModule(AUDIO_WORKLET_MODULE_URL);
     synthNode = new AudioWorkletNode(audioContext, "visual-fm-engine", {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -1420,6 +1140,8 @@ async function ensureAudio() {
     } catch {
       inputBlocked = true;
     }
+  } else {
+    stopAudioInput();
   }
   updateAudioStatus({ inputBlocked });
 }
@@ -1440,6 +1162,30 @@ async function ensureAudioInput() {
   });
   audioInputSource = audioContext.createMediaStreamSource(audioInputStream);
   audioInputSource.connect(synthNode);
+}
+
+function stopAudioInput() {
+  audioInputSource?.disconnect();
+  audioInputStream?.getTracks().forEach((track) => track.stop());
+  audioInputSource = null;
+  audioInputStream = null;
+}
+
+async function reconcileAudioInput() {
+  if (!patchUsesAudioInput()) {
+    stopAudioInput();
+    updateAudioStatus();
+    return;
+  }
+
+  if (!audioContext || !synthNode) return;
+
+  try {
+    await ensureAudioInput();
+    updateAudioStatus();
+  } catch {
+    updateAudioStatus({ inputBlocked: true });
+  }
 }
 
 function showAudioEnableModal() {
@@ -1468,83 +1214,14 @@ function showAudioEnableModal() {
   });
 }
 
-function mediaRecorderOptions() {
-  if (!window.MediaRecorder) return null;
-  const preferredTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-  const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
-  return mimeType ? { mimeType } : {};
-}
-
 function setRecordingButtonState(isRecording) {
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-label", isRecording ? "Stop recording" : "Start recording");
   recordButton.title = isRecording ? "Stop recording" : "Start recording";
 }
 
-function timestampForFile(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return [
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`,
-  ].join("_");
-}
-
 function recordingFileName(date = new Date()) {
   return `${slugifyPatchName(state.patchName || "visual-fm-patch")}-${timestampForFile(date)}.wav`;
-}
-
-function downloadBlob(blob, fileName) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function writeString(view, offset, value) {
-  for (let index = 0; index < value.length; index += 1) {
-    view.setUint8(offset + index, value.charCodeAt(index));
-  }
-}
-
-function audioBufferToWav(audioBuffer) {
-  const channelCount = audioBuffer.numberOfChannels;
-  const sampleRateValue = audioBuffer.sampleRate;
-  const length = audioBuffer.length;
-  const bytesPerSample = 2;
-  const blockAlign = channelCount * bytesPerSample;
-  const dataSize = length * blockAlign;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  const channels = Array.from({ length: channelCount }, (_, index) => audioBuffer.getChannelData(index));
-  let offset = 44;
-
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channelCount, true);
-  view.setUint32(24, sampleRateValue, true);
-  view.setUint32(28, sampleRateValue * blockAlign, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, 16, true);
-  writeString(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  for (let sampleIndex = 0; sampleIndex < length; sampleIndex += 1) {
-    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
-      const sample = clamp(channels[channelIndex][sampleIndex], -1, 1);
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-      offset += bytesPerSample;
-    }
-  }
-
-  return new Blob([buffer], { type: "audio/wav" });
 }
 
 async function exportRecording() {
@@ -1557,13 +1234,22 @@ async function exportRecording() {
 }
 
 async function startRecording() {
+  if (recordingStarting || mediaRecorder?.state === "recording") return;
+
   const options = mediaRecorderOptions();
   if (options === null) {
     alert("Recording is not supported in this browser.");
     return;
   }
 
-  await ensureAudio();
+  recordingStarting = true;
+  recordButton.disabled = true;
+  try {
+    await ensureAudio();
+  } finally {
+    recordingStarting = false;
+    recordButton.disabled = false;
+  }
   recordingChunks = [];
   recordingStartedAt = new Date();
   mediaRecorder = new MediaRecorder(recorderDestination.stream, options);
@@ -1595,10 +1281,13 @@ function stopRecording() {
 }
 
 function toggleRecording() {
+  if (recordingStarting) return;
   if (mediaRecorder?.state === "recording") {
     stopRecording();
   } else {
-    startRecording();
+    startRecording().catch((error) => {
+      alert(`Could not start recording: ${error.message}`);
+    });
   }
 }
 
@@ -1692,10 +1381,10 @@ function renderNodes() {
     element.style.top = `${node.y}px`;
     element.dataset.nodeId = node.id;
     element.innerHTML = `
-      <span class="anchor input" data-anchor="input" data-node-id="${node.id}" title="Input"></span>
+      <span class="anchor input" data-anchor="input" data-node-id="${escapeHtml(node.id)}" title="Input"></span>
       <div class="node-title">${escapeHtml(nodeName(node))}</div>
       <div class="node-meta"><span>${waveTypeLabel(node.wave)}</span><span>${nodeFrequencyLabel(node)}</span></div>
-      <span class="anchor output" data-anchor="output" data-node-id="${node.id}" title="Output"></span>
+      <span class="anchor output" data-anchor="output" data-node-id="${escapeHtml(node.id)}" title="Output"></span>
     `;
 
     element.addEventListener("pointerdown", onNodePointerDown);
@@ -1907,6 +1596,8 @@ function renderPanel() {
         ensureAudio().catch(() => {
           setAudioStatusLabel("Audio input blocked");
         });
+      } else {
+        reconcileAudioInput();
       }
       pruneMidiBindings();
       renderPanel();
@@ -2063,34 +1754,34 @@ function renderPanel() {
 
     bindNumberPair("amount", "amountRange", 0, amountMax, (value) => {
       link.amount = value;
-      sendGraph();
-      savePatch();
+      sendLinkParam(link.id, "amount", value);
+      schedulePatchSave();
     });
 
     if (link.to === "audio") {
       bindNumberPair("pan", "panRange", -1, 1, (value) => {
         link.pan = value;
-        sendGraph();
-        savePatch();
+        sendLinkParam(link.id, "pan", value);
+        schedulePatchSave();
       });
     }
 
     bindNumberPair("velocitySensitivity", "velocitySensitivityRange", VELOCITY_SENSITIVITY_MIN, VELOCITY_SENSITIVITY_MAX, (value) => {
       link.velocitySensitivity = value;
-      sendGraph();
-      savePatch();
+      sendLinkParam(link.id, "velocitySensitivity", value);
+      schedulePatchSave();
     });
 
     bindNumberPair("noise", "noiseRange", 0, 1, (value) => {
       link.noise = value;
-      sendGraph();
-      savePatch();
+      sendLinkParam(link.id, "noise", value);
+      schedulePatchSave();
     });
 
     bindNumberPair("linkDelay", "linkDelayRange", 0, 3, (value) => {
       link.delay = value;
-      sendGraph();
-      savePatch();
+      sendLinkParam(link.id, "delay", value);
+      schedulePatchSave();
     });
 
     panel.querySelector("#drone").addEventListener("change", (event) => {
@@ -2121,14 +1812,14 @@ function renderPanel() {
     if (link.filter.type !== "none") {
       bindNumberPair("filterCutoff", "filterCutoffRange", 20, 12000, (value) => {
         link.filter.cutoff = value;
-        sendGraph();
-        savePatch();
+        sendLinkParam(link.id, "filter.cutoff", value);
+        schedulePatchSave();
       });
 
       bindNumberPair("filterResonance", "filterResonanceRange", 0.1, 12, (value) => {
         link.filter.resonance = value;
-        sendGraph();
-        savePatch();
+        sendLinkParam(link.id, "filter.resonance", value);
+        schedulePatchSave();
       });
     }
 
@@ -2183,23 +1874,8 @@ function renderMasterEffectsPanel() {
   attachParameterMidiButtons();
 }
 
-function patchFileName() {
-  const name = slugifyPatchName(state.patchName || "visual-fm-patch");
-  return `${name}-${timestampForFile(new Date())}.yaml`;
-}
-
 function downloadPatch() {
-  const patch = currentPatchData();
-  const yaml = `# Visual FM patch\n# visual-fm-json: ${encodePatchJson(patch)}\n${toYaml(patch)}\n`;
-  const blob = new Blob([yaml], { type: "application/x-yaml" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = patchFileName();
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+  downloadPatchFile(currentPatchData());
 }
 
 async function loadPatchFile(file) {
@@ -2234,6 +1910,7 @@ function applyPatchData(patch) {
   updateMidiStatus();
   render();
   sendGraph();
+  reconcileAudioInput();
   savePatch();
 }
 
@@ -2244,7 +1921,7 @@ function newPatch() {
 
   const midiChannel = state.midiChannel;
   const midiInputId = state.midiInputId;
-  const normalized = normalizePatch(clonePatch(defaultPatch));
+  const normalized = normalizeDefaultPatch();
   state.patchName = "Untitled Patch";
   state.maxVoices = normalized.maxVoices;
   state.midiChannel = midiChannel;
@@ -2260,137 +1937,8 @@ function newPatch() {
   updateMidiStatus();
   render();
   sendGraph();
+  reconcileAudioInput();
   savePatch();
-}
-
-function slugifyPatchName(name) {
-  const slug = String(name)
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "visual-fm-patch";
-}
-
-function parsePatchFile(text) {
-  const encoded = /^# visual-fm-json: (.+)$/m.exec(text)?.[1];
-  if (encoded) {
-    return JSON.parse(decodePatchJson(encoded.trim()));
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return parseSimpleYaml(text);
-  }
-}
-
-function encodePatchJson(patch) {
-  const bytes = new TextEncoder().encode(JSON.stringify(patch));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function decodePatchJson(encoded) {
-  const binary = atob(encoded);
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function toYaml(value, indent = 0) {
-  const space = " ".repeat(indent);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return `${space}[]`;
-    return value.map((item) => `${space}-\n${toYaml(item, indent + 2)}`).join("\n");
-  }
-
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value);
-    if (entries.length === 0) return `${space}{}`;
-    return entries.map(([key, item]) => {
-      if (Array.isArray(item) && item.length === 0) return `${space}${key}: []`;
-      if (item && typeof item === "object" && Object.keys(item).length === 0) return `${space}${key}: {}`;
-      if (item && typeof item === "object") {
-        return `${space}${key}:\n${toYaml(item, indent + 2)}`;
-      }
-      return `${space}${key}: ${yamlScalar(item)}`;
-    }).join("\n");
-  }
-
-  return `${space}${yamlScalar(value)}`;
-}
-
-function yamlScalar(value) {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (value === null) return "null";
-  return JSON.stringify(value);
-}
-
-function parseSimpleYaml(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((raw) => ({ indent: raw.match(/^ */)?.[0].length || 0, text: raw.trim() }))
-    .filter((line) => line.text && !line.text.startsWith("#"));
-
-  const [value, index] = parseYamlBlock(lines, 0, 0);
-  if (index < lines.length) throw new Error("Unsupported YAML structure");
-  return value;
-}
-
-function parseYamlBlock(lines, index, indent) {
-  if (!lines[index]) return [{}, index];
-  if (lines[index].indent < indent) return [{}, index];
-  return lines[index].text.startsWith("-")
-    ? parseYamlArray(lines, index, indent)
-    : parseYamlObject(lines, index, indent);
-}
-
-function parseYamlArray(lines, index, indent) {
-  const array = [];
-  while (lines[index] && lines[index].indent === indent && lines[index].text.startsWith("-")) {
-    const inline = lines[index].text.slice(1).trim();
-    index += 1;
-    if (inline) {
-      array.push(parseYamlScalar(inline));
-    } else {
-      const [item, nextIndex] = parseYamlBlock(lines, index, indent + 2);
-      array.push(item);
-      index = nextIndex;
-    }
-  }
-  return [array, index];
-}
-
-function parseYamlObject(lines, index, indent) {
-  const object = {};
-  while (lines[index] && lines[index].indent === indent && !lines[index].text.startsWith("-")) {
-    const separator = lines[index].text.indexOf(":");
-    if (separator === -1) throw new Error("Invalid YAML line");
-    const key = lines[index].text.slice(0, separator).trim();
-    const inline = lines[index].text.slice(separator + 1).trim();
-    index += 1;
-    if (inline) {
-      object[key] = parseYamlScalar(inline);
-    } else {
-      const [item, nextIndex] = parseYamlBlock(lines, index, indent + 2);
-      object[key] = item;
-      index = nextIndex;
-    }
-  }
-  return [object, index];
-}
-
-function parseYamlScalar(value) {
-  if (value === "[]") return [];
-  if (value === "{}") return {};
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (value === "null") return null;
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
-  if (value.startsWith('"')) return JSON.parse(value);
-  return value;
 }
 
 function effectSection(id, title, effect, params) {
@@ -2560,6 +2108,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
       ? rect.top + (1 - normal) * rect.height
       : rect.left + normal * rect.width;
   };
+  const fineScale = (event) => (event.altKey || isFineSliderActive() ? FINE_SLIDER_SCALE : 1);
 
   range.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
@@ -2602,7 +2151,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     const axisDelta = drag.vertical
       ? (drag.lastAxis - axis) / axisSize
       : (axis - drag.lastAxis) / axisSize;
-    const value = drag.currentValue + axisDelta * precision * rangeSpan;
+    const value = drag.currentValue + axisDelta * precision * fineScale(event) * rangeSpan;
 
     drag.currentValue = clamp(value, min, max);
     drag.lastAxis = axis;
@@ -2617,6 +2166,28 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
 
   range.addEventListener("pointerup", endDrag);
   range.addEventListener("pointercancel", endDrag);
+}
+
+function isFineSliderActive() {
+  return touchFineSliderPointerId !== null || keyboardFineSliderActive;
+}
+
+function syncFineSliderButton() {
+  const active = isFineSliderActive();
+  fineSliderButton?.classList.toggle("is-active", active);
+  fineSliderButton?.setAttribute("aria-pressed", String(active));
+}
+
+function setKeyboardFineSliderActive(active) {
+  keyboardFineSliderActive = active;
+  syncFineSliderButton();
+}
+
+function releaseTouchFineSlider(pointerId = touchFineSliderPointerId) {
+  if (touchFineSliderPointerId !== pointerId) return;
+  fineSliderButton?.releasePointerCapture?.(pointerId);
+  touchFineSliderPointerId = null;
+  syncFineSliderButton();
 }
 
 function refreshAdsrView(envelope) {
@@ -3203,6 +2774,7 @@ function removeNodes(ids) {
   state.selected = { type: null, id: null };
   render();
   sendGraph();
+  reconcileAudioInput();
   savePatch();
 }
 
@@ -3412,6 +2984,51 @@ addNodeButton.addEventListener("click", () => {
 });
 
 recordButton.addEventListener("click", toggleRecording);
+
+fineSliderButton?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || touchFineSliderPointerId !== null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  touchFineSliderPointerId = event.pointerId;
+  fineSliderButton.setPointerCapture?.(event.pointerId);
+  syncFineSliderButton();
+});
+
+fineSliderButton?.addEventListener("pointerup", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  releaseTouchFineSlider(event.pointerId);
+});
+
+fineSliderButton?.addEventListener("pointercancel", (event) => {
+  event.stopPropagation();
+  releaseTouchFineSlider(event.pointerId);
+});
+
+fineSliderButton?.addEventListener("lostpointercapture", () => {
+  touchFineSliderPointerId = null;
+  syncFineSliderButton();
+});
+
+fineSliderButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+});
+
+fineSliderButton?.addEventListener("keydown", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  setKeyboardFineSliderActive(true);
+});
+
+fineSliderButton?.addEventListener("keyup", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  setKeyboardFineSliderActive(false);
+});
+
+fineSliderButton?.addEventListener("blur", () => {
+  setKeyboardFineSliderActive(false);
+});
 
 audioStatus.addEventListener("click", () => {
   if (audioStatus.disabled || !audioContext || !synthNode) return;

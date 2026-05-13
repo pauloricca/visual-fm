@@ -1,0 +1,146 @@
+export const STORAGE_KEY = "visual-fm.patch.v1";
+
+export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
+export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"];
+export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
+export const SPEED_WAVE_TYPES = new Set(["perlin"]);
+export const FREQUENCY_MODES = ["ratio", "fixed"];
+export const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
+export const LINK_MODULATION_TARGETS = [
+  "amplitude",
+  "pan",
+  "noise",
+  "delay",
+  "envelopeTrigger",
+  "envelope.delay",
+  "envelope.attack",
+  "envelope.decay",
+  "envelope.sustain",
+  "envelope.release",
+  "filterCutoff",
+  "filterResonance",
+];
+
+export const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
+
+export const MASTER_EFFECTS = {
+  chorus: {
+    label: "Chorus",
+    params: [
+      ["rate", "Rate", 0.05, 6, "Hz"],
+      ["depth", "Depth", 0.001, 0.04, "s"],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+  delay: {
+    label: "Delay",
+    params: [
+      ["time", "Time", 0.02, 1.5, "s"],
+      ["feedback", "Feedback", 0, 0.92, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+  reverb: {
+    label: "Reverb",
+    params: [
+      ["size", "Size", 0.1, 1, ""],
+      ["decay", "Decay", 0, 0.94, ""],
+      ["mix", "Mix", 0, 1, ""],
+    ],
+  },
+};
+export const MASTER_EFFECT_IDS = Object.keys(MASTER_EFFECTS);
+
+export const VELOCITY_SENSITIVITY_MIN = -8;
+export const VELOCITY_SENSITIVITY_MAX = 8;
+export const DEFAULT_MAX_VOICES = 5;
+export const MIN_MAX_VOICES = 1;
+export const MAX_MAX_VOICES = 16;
+
+export const MIDI_CC_SMOOTH_SECONDS = 0.09;
+export const MIDI_CC_SETTLE_RATIO = 0.00025;
+export const MIDI_CC_MAX_SMOOTH_DT = 1 / 60;
+export const RECENT_MIDI_CC_WINDOW_MS = 2000;
+export const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
+
+export const LINK_INPUT_T = 0.45;
+export const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed"]);
+export const LINK_MIDI_PARAMETERS = new Set([
+  "modulationTarget",
+  "amount",
+  "pan",
+  "velocitySensitivity",
+  "noise",
+  "delay",
+  "drone",
+  "filter.type",
+  "filter.cutoff",
+  "filter.resonance",
+  "envelope.delay",
+  "envelope.attack",
+  "envelope.decay",
+  "envelope.sustain",
+  "envelope.release",
+]);
+
+export const defaultPatch = {
+  patchName: "Visual FM Patch",
+  maxVoices: DEFAULT_MAX_VOICES,
+  midiChannel: "all",
+  midiInputId: "all",
+  midiBindings: [],
+  masterEffects: {
+    chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },
+    delay: { enabled: false, time: 0.28, feedback: 0.35, mix: 0.25 },
+    reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
+  },
+  nodes: [
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8 },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8 },
+  ],
+  links: [
+    {
+      id: "link-1",
+      from: "op-2",
+      to: "op-1",
+      amount: 0,
+      delay: 0,
+      noise: 0,
+      velocitySensitivity: 0,
+      modulationTarget: "phase",
+      drone: false,
+      filter: { ...DEFAULT_LINK_FILTER },
+      envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
+    },
+    {
+      id: "link-2",
+      from: "op-1",
+      to: "audio",
+      amount: 0,
+      delay: 0,
+      noise: 0,
+      pan: 0,
+      velocitySensitivity: 1,
+      modulationTarget: "amplitude",
+      drone: false,
+      filter: { ...DEFAULT_LINK_FILTER },
+      envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },
+    },
+  ],
+};
+
+export const keyMap = new Map([
+  ["z", 48],
+  ["s", 49],
+  ["x", 50],
+  ["d", 51],
+  ["c", 52],
+  ["v", 53],
+  ["g", 54],
+  ["b", 55],
+  ["h", 56],
+  ["n", 57],
+  ["j", 58],
+  ["m", 59],
+  [",", 60],
+]);

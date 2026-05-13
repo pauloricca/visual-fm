@@ -221,7 +221,8 @@ select {
 
 .icon-button:hover,
 .text-button:hover,
-.audio-out:hover {
+.audio-out:hover,
+.fine-slider-button:hover {
   filter: brightness(1.08);
 }
 
@@ -499,6 +500,36 @@ select {
 .audio-anchor {
   top: 0;
   background: var(--amber);
+}
+
+.fine-slider-button {
+  position: absolute;
+  z-index: 6;
+  left: 18px;
+  bottom: 18px;
+  display: inline-grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  background: rgba(20, 22, 26, 0.56);
+  color: rgba(241, 244, 242, 0.64);
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-align: center;
+  cursor: pointer;
+  touch-action: none;
+  backdrop-filter: blur(12px);
+}
+
+.fine-slider-button.is-active {
+  border-color: rgba(117, 208, 164, 0.42);
+  background: rgba(117, 208, 164, 0.16);
+  color: var(--text);
 }
 
 .panel {
