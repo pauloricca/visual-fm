@@ -58,6 +58,7 @@ const fineSliderButton = document.querySelector("#fineSliderButton");
 const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=link-signal-follower-meter-6";
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const FINE_SLIDER_SCALE = 0.1;
+const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 
 const state = {
   ...loadPatch(),
@@ -102,6 +103,7 @@ const midiTargetFlashTimers = new Map();
 const linkMeterLevels = new Map();
 let pendingLinkMeterFrame = null;
 let suppressNextStageClick = false;
+let preserveSelectionAfterValueEditClick = false;
 let touchFineSliderPointerId = null;
 let keyboardFineSliderActive = false;
 let availableAudioDevices = { inputs: [], outputs: [] };
@@ -694,8 +696,11 @@ function queueMidiCcSmoothing(binding, definition, targetValue) {
 function setPanelNumberPair(inputId, rangeId, value) {
   const input = panel.querySelector(`#${inputId}`);
   const range = panel.querySelector(`#${rangeId}`);
-  if (input) input.value = String(value);
-  if (range) range.value = String(value);
+  if (input) syncValueSliderNumber(input, range, value);
+  if (range) {
+    range.value = String(value);
+    syncValueSliderProgress(range, Number(range.min), Number(range.max));
+  }
 }
 
 function updatePanelForMidiNumber(smoothing, value) {
@@ -2442,7 +2447,7 @@ function adsrField(name, letter, label, value, min, max, linkId) {
   return `
     <div class="adsr-slider-field">
       <div class="adsr-slider-label">
-        <label for="${name}Range" title="${escapeHtml(label)}">${escapeHtml(letter)}</label>
+        <label for="${name}" title="${escapeHtml(label)}">${escapeHtml(letter)}</label>
         ${midiCcButton("link", linkId, `envelope.${name}`)}
       </div>
       <input class="adsr-slider" id="${name}Range" type="range" min="${min}" max="${max}" step="0.001" value="${value}" aria-label="${escapeHtml(label)}">
@@ -2454,6 +2459,7 @@ function adsrField(name, letter, label, value, min, max, linkId) {
 function bindNumberPair(numberId, rangeId, min, max, onValue) {
   const number = panel.querySelector(`#${numberId}`);
   const range = panel.querySelector(`#${rangeId}`);
+  const step = valueSliderStep(number, range);
 
   const commitValue = (rawValue, { updateNumber = true } = {}) => {
     if (rawValue === "" || rawValue === "." || rawValue === "-") return;
@@ -2461,14 +2467,16 @@ function bindNumberPair(numberId, rangeId, min, max, onValue) {
     const parsed = Number(rawValue);
     if (!Number.isFinite(parsed)) return;
 
-    const value = clamp(parsed, min, max);
+    const value = snapValueSliderValue(parsed, min, max, step);
     if (updateNumber) {
-      number.value = String(value);
+      syncValueSliderNumber(number, range, value);
     }
     range.value = String(value);
+    syncValueSliderProgress(range, min, max);
     onValue(value);
   };
 
+  enhanceValueSlider(number, range, min, max, step);
   number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false }));
   number.addEventListener("focus", (event) => event.target.select());
   number.addEventListener("pointerup", (event) => {
@@ -2486,66 +2494,170 @@ function bindNumberPair(numberId, rangeId, min, max, onValue) {
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }
 
+function enhanceValueSlider(number, range, min, max, step) {
+  if (!number || !range || range.dataset.valueSliderEnhanced) return;
+
+  const control = document.createElement("div");
+  const vertical = range.classList.contains("adsr-slider");
+  control.className = `value-slider ${vertical ? "value-slider--vertical" : "value-slider--horizontal"}`;
+  control.dataset.valueSlider = "";
+
+  const parent = range.parentElement;
+  if (parent?.classList.contains("field-row")) {
+    parent.classList.add("value-slider-row");
+  }
+
+  range.before(control);
+  control.append(range, number);
+
+  range.dataset.valueSliderEnhanced = "true";
+  range.classList.add("value-slider-range");
+  range.tabIndex = -1;
+  range.setAttribute("aria-hidden", "true");
+
+  number.classList.add("value-slider-input");
+  number.readOnly = true;
+  number.setAttribute("inputmode", "decimal");
+
+  number.addEventListener("focus", () => {
+    control.classList.add("is-editing");
+    number.readOnly = false;
+    number.value = formatEditableValue(Number(range.value), step);
+  });
+  number.addEventListener("blur", () => {
+    control.classList.remove("is-editing");
+    number.readOnly = true;
+    syncValueSliderNumber(number, range, Number(range.value));
+  });
+
+  syncValueSliderProgress(range, min, max);
+  syncValueSliderNumber(number, range, Number(range.value));
+}
+
+function syncValueSliderProgress(range, min, max) {
+  const control = range?.closest(".value-slider");
+  const rangeSpan = max - min;
+  if (!control || !Number.isFinite(rangeSpan) || rangeSpan <= 0) return;
+
+  const value = clamp(Number(range.value), min, max);
+  const ratio = clamp((value - min) / rangeSpan, 0, 1);
+  control.style.setProperty("--value-percent", `${ratio * 100}%`);
+}
+
+function syncValueSliderNumber(number, range, value) {
+  if (!number) return;
+
+  const step = valueSliderStep(number, range);
+  const editing = !number.readOnly;
+  number.value = editing
+    ? formatEditableValue(value, step)
+    : formatDisplayValue(value, step);
+}
+
+function valueSliderStep(number, range) {
+  const step = Number(number?.step || range?.step);
+  return Number.isFinite(step) && step > 0 ? step : 0;
+}
+
+function snapValueSliderValue(value, min, max, step) {
+  if (!Number.isFinite(step) || step <= 0) return clamp(value, min, max);
+
+  const decimals = decimalPlaces(step);
+  const snapped = min + Math.round((value - min) / step) * step;
+  return clamp(Number(snapped.toFixed(Math.min(decimals + 2, 10))), min, max);
+}
+
+function decimalPlaces(value) {
+  const text = String(value);
+  if (text.includes("e-")) return Number(text.split("e-")[1]) || 0;
+  const [, decimals = ""] = text.split(".");
+  return decimals.length;
+}
+
+function formatEditableValue(value, step) {
+  if (!Number.isFinite(value)) return "";
+
+  const decimals = Math.min(decimalPlaces(step), 6);
+  return trimNumberString(decimals > 0 ? value.toFixed(decimals) : String(Math.round(value)));
+}
+
+function formatDisplayValue(value, step) {
+  if (!Number.isFinite(value)) return "";
+  if (value === 0) return "0";
+
+  const abs = Math.abs(value);
+  const stepDecimals = Number.isFinite(step) && step > 0 ? decimalPlaces(step) : 3;
+  const magnitudeDecimals = abs >= 100
+    ? 0
+    : abs >= 10
+      ? 1
+      : abs >= 1
+        ? 2
+        : abs >= 0.01
+          ? 3
+          : 4;
+  const decimals = Math.min(Math.max(0, stepDecimals), magnitudeDecimals);
+  return trimNumberString(value.toFixed(decimals));
+}
+
+function trimNumberString(value) {
+  return value.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+function focusValueSliderNumber(number) {
+  number.readOnly = false;
+  number.focus({ preventScroll: true });
+  number.select();
+}
+
 function bindPrecisionRangeDrag(range, min, max, commitValue) {
   const rangeSpan = max - min;
   if (!range || rangeSpan <= 0) return;
 
   let drag = null;
-  const valueFromPointer = (event, rect) => {
-    const vertical = rect.height > rect.width;
-    const axisSize = vertical ? rect.height : rect.width;
-    if (axisSize <= 0) return Number(range.value);
-
-    const normal = vertical
-      ? 1 - (event.clientY - rect.top) / axisSize
-      : (event.clientX - rect.left) / axisSize;
-    return min + clamp(normal, 0, 1) * rangeSpan;
-  };
-  const thumbAxisPosition = (value, rect, vertical) => {
-    const normal = clamp((value - min) / rangeSpan, 0, 1);
-    return vertical
-      ? rect.top + (1 - normal) * rect.height
-      : rect.left + normal * rect.width;
-  };
+  const control = range.closest(".value-slider") || range;
+  const number = control.querySelector?.(".value-slider-input");
   const fineScale = (event) => (event.altKey || isFineSliderActive() ? FINE_SLIDER_SCALE : 1);
 
-  range.addEventListener("pointerdown", (event) => {
+  control.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    if (control.classList?.contains("is-editing")) return;
     event.preventDefault();
 
-    const rect = range.getBoundingClientRect();
+    const rect = control.getBoundingClientRect();
     const vertical = rect.height > rect.width;
     const currentValue = clamp(Number(range.value), min, max);
     const pointerAxis = vertical ? event.clientY : event.clientX;
-    const thumbAxis = thumbAxisPosition(currentValue, rect, vertical);
-    const thumbRadius = Math.max(14, (vertical ? rect.width : rect.height) * 0.5);
-    const grabbedThumb = Math.abs(pointerAxis - thumbAxis) <= thumbRadius;
-    const startValue = grabbedThumb ? currentValue : valueFromPointer(event, rect);
     drag = {
       pointerId: event.pointerId,
       rect,
       vertical,
-      currentValue: startValue,
+      currentValue,
+      started: false,
+      startX: event.clientX,
+      startY: event.clientY,
       lastAxis: pointerAxis,
     };
 
-    range.setPointerCapture?.(event.pointerId);
-    if (!grabbedThumb) {
-      commitValue(startValue);
-    }
+    control.setPointerCapture?.(event.pointerId);
   });
 
-  range.addEventListener("pointermove", (event) => {
+  control.addEventListener("pointermove", (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
     event.preventDefault();
 
     const axisSize = drag.vertical ? drag.rect.height : drag.rect.width;
     if (axisSize <= 0) return;
 
+    const totalDelta = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (!drag.started && totalDelta < VALUE_SLIDER_DRAG_THRESHOLD_PX) return;
+    drag.started = true;
+    control.classList?.add("is-dragging");
+
     const axis = drag.vertical ? event.clientY : event.clientX;
     const perpendicular = drag.vertical
-      ? Math.abs(event.clientX - (drag.rect.left + drag.rect.width * 0.5))
-      : Math.abs(event.clientY - (drag.rect.top + drag.rect.height * 0.5));
+      ? Math.abs(event.clientX - drag.startX)
+      : Math.abs(event.clientY - drag.startY);
     const precision = 1 / (1 + Math.pow(perpendicular / 90, 1.35));
     const axisDelta = drag.vertical
       ? (drag.lastAxis - axis) / axisSize
@@ -2559,12 +2671,16 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
 
   const endDrag = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    range.releasePointerCapture?.(event.pointerId);
+    control.releasePointerCapture?.(event.pointerId);
+    if (event.type === "pointerup" && !drag.started && number) {
+      focusValueSliderNumber(number);
+    }
+    control.classList?.remove("is-dragging");
     drag = null;
   };
 
-  range.addEventListener("pointerup", endDrag);
-  range.addEventListener("pointercancel", endDrag);
+  control.addEventListener("pointerup", endDrag);
+  control.addEventListener("pointercancel", endDrag);
 }
 
 function isFineSliderActive() {
@@ -3379,8 +3495,21 @@ function isEmptyCanvasTarget(target) {
   return target === stage || target === nodeLayer || target === wireLayer;
 }
 
+function isEditingValueSliderInput(element = document.activeElement) {
+  return element?.classList?.contains("value-slider-input") && !element.readOnly;
+}
+
+function trackValueEditExitClick(event) {
+  preserveSelectionAfterValueEditClick = Boolean(
+    isEditingValueSliderInput()
+      && !event.target.closest?.(".value-slider")
+      && (state.selected.type === "node" || state.selected.type === "link"),
+  );
+}
+
 function onStagePointerDown(event) {
   if (event.button !== 0 || !isEmptyCanvasTarget(event.target)) return;
+  if (preserveSelectionAfterValueEditClick) return;
 
   const point = stagePoint(event.clientX, event.clientY);
   marqueeState = {
@@ -3490,6 +3619,11 @@ audioStatus.addEventListener("click", () => {
   updateAudioReadyButton();
 });
 
+document.addEventListener("pointerdown", trackValueEditExitClick, true);
+document.addEventListener("click", () => {
+  preserveSelectionAfterValueEditClick = false;
+});
+
 stage.addEventListener("pointerdown", onStagePointerDown);
 
 stage.addEventListener("dblclick", (event) => {
@@ -3499,6 +3633,10 @@ stage.addEventListener("dblclick", (event) => {
 });
 
 stage.addEventListener("click", (event) => {
+  if (preserveSelectionAfterValueEditClick && isEmptyCanvasTarget(event.target)) {
+    preserveSelectionAfterValueEditClick = false;
+    return;
+  }
   if (suppressNextStageClick) {
     suppressNextStageClick = false;
     return;
