@@ -382,14 +382,18 @@ select {
 }
 
 .node {
+  --node-x: 0px;
+  --node-y: 0px;
   position: absolute;
+  left: 0;
+  top: 0;
   width: 142px;
   min-height: 86px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: linear-gradient(180deg, #242932, #171a1f);
   box-shadow: var(--shadow);
-  transform: translate(-50%, -50%);
+  transform: translate3d(var(--node-x), var(--node-y), 0) translate(-50%, -50%);
   cursor: grab;
   pointer-events: auto;
   touch-action: none;
@@ -403,6 +407,7 @@ select {
 
 .node.selected {
   border-color: var(--green);
+  will-change: transform;
   box-shadow:
     0 0 0 1px rgba(117, 208, 164, 0.85),
     0 0 18px rgba(117, 208, 164, 0.42),

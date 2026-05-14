@@ -50,6 +50,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.linksById = new Map();
     this.linkModulations = new Map();
     this.linkControlSmoothers = new Map();
+    this.activeLinkControlSmoothers = new Set();
     this.voices = new Map();
     this.activeVoicesByNote = new Map();
     this.pendingVoiceStarts = [];
@@ -62,6 +63,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.linkMeterPeaks = new Map();
     this.currentInputSample = 0;
     this.masterGain = 0.18;
+    this.linkControlSmoothAlpha = 1 - Math.exp(-1 / (sampleRate * LINK_CONTROL_SMOOTH_SECONDS));
     this.masterEffects = {
       chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },
       delay: { enabled: false, time: 0.28, feedback: 0.35, mix: 0.25 },
@@ -138,7 +140,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
     });
     const linkIds = new Set(this.links.map((link) => link.id));
     for (const id of this.linkControlSmoothers.keys()) {
-      if (!linkIds.has(id)) this.linkControlSmoothers.delete(id);
+      if (!linkIds.has(id)) {
+        this.linkControlSmoothers.delete(id);
+        this.activeLinkControlSmoothers.delete(id);
+      }
     }
     this.hasActiveDroneLinks = this.links.some((link) => link.drone);
     this.masterEffects = this.normalizeEffects(graph.masterEffects);
@@ -352,19 +357,40 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
+  linkControlIsSettled(smoother) {
+    const { current, target } = smoother;
+    return current.amount === target.amount
+      && current.delay === target.delay
+      && current.noise === target.noise
+      && current.pan === target.pan
+      && current.filterCutoff === target.filterCutoff
+      && current.filterResonance === target.filterResonance;
+  }
+
+  syncActiveLinkControlSmoother(smoother) {
+    if (this.linkControlIsSettled(smoother)) {
+      this.activeLinkControlSmoothers.delete(smoother.id);
+    } else {
+      this.activeLinkControlSmoothers.add(smoother.id);
+    }
+  }
+
   syncLinkControlSmoother(link) {
     const target = this.linkControlTargets(link);
     const existing = this.linkControlSmoothers.get(link.id);
     if (existing) {
       existing.target = target;
+      this.syncActiveLinkControlSmoother(existing);
       return existing;
     }
 
     const smoother = {
+      id: link.id,
       current: { ...target },
       target,
     };
     this.linkControlSmoothers.set(link.id, smoother);
+    this.syncActiveLinkControlSmoother(smoother);
     return smoother;
   }
 
@@ -407,18 +433,26 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   advanceLinkControlSmoothers() {
-    const alpha = 1 - Math.exp(-1 / (sampleRate * LINK_CONTROL_SMOOTH_SECONDS));
-    for (const smoother of this.linkControlSmoothers.values()) {
+    if (!this.activeLinkControlSmoothers.size) return;
+
+    for (const id of this.activeLinkControlSmoothers) {
+      const smoother = this.linkControlSmoothers.get(id);
+      const link = this.linksById.get(id);
+      if (!smoother || !link) {
+        this.activeLinkControlSmoothers.delete(id);
+        continue;
+      }
+
       const { current, target } = smoother;
+      const alpha = this.linkControlSmoothAlpha;
       current.amount = this.smoothControlValue(current.amount, target.amount, alpha);
       current.delay = this.smoothControlValue(current.delay, target.delay, alpha);
       current.noise = this.smoothControlValue(current.noise, target.noise, alpha);
       current.pan = this.smoothControlValue(current.pan, target.pan, alpha);
       current.filterCutoff = this.smoothControlValue(current.filterCutoff, target.filterCutoff, alpha);
       current.filterResonance = this.smoothControlValue(current.filterResonance, target.filterResonance, alpha);
-    }
-    for (const link of this.links) {
       link.baseParams = this.createBaseLinkParams(link);
+      this.syncActiveLinkControlSmoother(smoother);
     }
   }
 
@@ -1264,12 +1298,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const input = Number.isFinite(inputSignal) ? this.clamp(Math.abs(inputSignal), 0, 1) : 0;
     const output = Number.isFinite(outputSignal) ? this.clamp(Math.abs(outputSignal), 0, 1) : 0;
     const envelope = Number.isFinite(envelopeSignal) ? this.clamp(Math.abs(envelopeSignal), 0, 1) : 0;
-    const previous = this.linkMeterPeaks.get(link.id) || { input: 0, output: 0, envelope: 0 };
-    this.linkMeterPeaks.set(link.id, {
-      input: Math.max(previous.input, input),
-      output: Math.max(previous.output, output),
-      envelope: Math.max(previous.envelope, envelope),
-    });
+    let peak = this.linkMeterPeaks.get(link.id);
+    if (!peak) {
+      peak = { input: 0, output: 0, envelope: 0 };
+      this.linkMeterPeaks.set(link.id, peak);
+    }
+    if (input > peak.input) peak.input = input;
+    if (output > peak.output) peak.output = output;
+    if (envelope > peak.envelope) peak.envelope = envelope;
   }
 
   flushLinkMeters() {

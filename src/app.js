@@ -55,7 +55,7 @@ const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
-const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=link-signal-follower-meter-6";
+const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=link-signal-follower-meter-7";
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
@@ -96,10 +96,12 @@ let pendingPatchSave = null;
 let pendingGraphFrame = null;
 let pendingLinkParamGraphSync = null;
 let pendingNodesAndWiresFrame = null;
+let pendingFullNodesRender = false;
 let pendingWiresFrame = null;
 let pendingMidiCcLearn = null;
 let pendingMidiCcSmoothingFrame = null;
 const midiCcSmoothing = new Map();
+const pendingMovedNodeIds = new Set();
 const recentMidiCc = new Map();
 const recentMidiCcListeners = new Set();
 const midiBindingFlashTimers = new Map();
@@ -960,12 +962,15 @@ function duplicateNodes(ids) {
   return { copies, idMap };
 }
 
-function stagePoint(clientX, clientY) {
-  const rect = stage.getBoundingClientRect();
+function stagePointFromRect(clientX, clientY, rect) {
   return {
     x: clientX - rect.left,
     y: clientY - rect.top,
   };
+}
+
+function stagePoint(clientX, clientY) {
+  return stagePointFromRect(clientX, clientY, stage.getBoundingClientRect());
 }
 
 function captureStagePointer(pointerId) {
@@ -1039,20 +1044,23 @@ function feedbackMidpoint(nodeId) {
   return { x: node.x + 92, y: node.y };
 }
 
-function linkEndpointPoint(to, visited = new Set()) {
-  if (to === "audio") return audioInputPoint();
+function linkEndpointPoint(to, visited = new Set(), context = null) {
+  if (to === "audio") {
+    if (context && !context.audioPoint) context.audioPoint = audioInputPoint();
+    return context?.audioPoint || audioInputPoint();
+  }
   if (nodeById(to)) return nodeInputPoint(to);
-  if (linkById(to)) return linkInputPoint(to, visited);
+  if (linkById(to)) return linkInputPoint(to, visited, context);
   return null;
 }
 
-function linkInputPoint(id, visited = new Set()) {
+function linkInputPoint(id, visited = new Set(), context = null) {
   if (visited.has(id)) return null;
   const link = linkById(id);
   if (!link || !nodeById(link.from)) return null;
 
   visited.add(id);
-  const to = linkEndpointPoint(link.to, visited);
+  const to = linkEndpointPoint(link.to, visited, context);
   visited.delete(id);
   if (!to) return null;
 
@@ -1060,11 +1068,11 @@ function linkInputPoint(id, visited = new Set()) {
   return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T);
 }
 
-function linkGeometry(link, visited = new Set()) {
+function linkGeometry(link, visited = new Set(), context = null) {
   if (!link || !nodeById(link.from) || visited.has(link.id)) return null;
   visited.add(link.id);
   const from = nodeOutputPoint(link.from);
-  const to = linkEndpointPoint(link.to, visited);
+  const to = linkEndpointPoint(link.to, visited, context);
   visited.delete(link.id);
   if (!to) return null;
 
@@ -1355,11 +1363,38 @@ function updateAudioStatus({ inputBlocked = false } = {}) {
   }
 }
 
-function scheduleNodesAndWiresRender() {
+function positionNodeElement(element, node) {
+  element.style.setProperty("--node-x", `${node.x}px`);
+  element.style.setProperty("--node-y", `${node.y}px`);
+}
+
+function updateNodeElementPositions(ids) {
+  for (const id of ids) {
+    const node = nodeById(id);
+    const escapedId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
+    const element = nodeLayer.querySelector(`[data-node-id="${escapedId}"]`);
+    if (node && element) positionNodeElement(element, node);
+  }
+}
+
+function scheduleNodesAndWiresRender(ids = null) {
+  if (ids) {
+    for (const id of ids) pendingMovedNodeIds.add(id);
+  } else {
+    pendingFullNodesRender = true;
+  }
+
   if (pendingNodesAndWiresFrame) return;
   pendingNodesAndWiresFrame = requestAnimationFrame(() => {
     pendingNodesAndWiresFrame = null;
-    renderNodes();
+    const movedIds = [...pendingMovedNodeIds];
+    pendingMovedNodeIds.clear();
+    if (pendingFullNodesRender) {
+      renderNodes();
+    } else {
+      updateNodeElementPositions(movedIds);
+    }
+    pendingFullNodesRender = false;
     renderWires();
   });
 }
@@ -1716,8 +1751,7 @@ function renderNodes() {
   for (const node of state.nodes) {
     const element = document.createElement("div");
     element.className = `node ${isNodeSelected(node.id) ? "selected" : ""}`;
-    element.style.left = `${node.x}px`;
-    element.style.top = `${node.y}px`;
+    positionNodeElement(element, node);
     element.dataset.nodeId = node.id;
     element.innerHTML = `
       <span class="anchor input" data-anchor="input" data-node-id="${escapeHtml(node.id)}" title="Input"></span>
@@ -1744,9 +1778,10 @@ function renderAudioOut() {
 function renderWires() {
   stage.classList.toggle("link-dragging", Boolean(linkDrag));
   wireLayer.innerHTML = "";
+  const geometryContext = {};
 
   for (const link of state.links) {
-    const geometry = linkGeometry(link);
+    const geometry = linkGeometry(link, new Set(), geometryContext);
     if (!geometry) continue;
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -1762,10 +1797,7 @@ function renderWires() {
 
     hit.setAttribute("d", geometry.path);
     hit.setAttribute("class", "wire-hit");
-    hit.addEventListener("click", (event) => {
-      event.stopPropagation();
-      select("link", link.id);
-    });
+    hit.dataset.linkId = link.id;
 
     anchor.setAttribute("class", `link-anchor input ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
     anchor.dataset.linkId = link.id;
@@ -1779,10 +1811,6 @@ function renderWires() {
     anchorDot.setAttribute("cy", geometry.midpoint.y);
     anchorDot.setAttribute("r", "10");
     anchorDot.setAttribute("class", "link-anchor-dot");
-    anchor.addEventListener("click", (event) => {
-      event.stopPropagation();
-      select("link", link.id);
-    });
     anchor.append(anchorHit, anchorDot);
 
     group.append(visible, hit, anchor);
@@ -3530,10 +3558,12 @@ function onNodePointerDown(event) {
 
   if (anchor?.dataset.anchor === "output") {
     event.stopPropagation();
+    const stageRect = stage.getBoundingClientRect();
     linkDrag = {
       pointerId: event.pointerId,
       from: nodeId,
-      to: stagePoint(event.clientX, event.clientY),
+      stageRect,
+      to: stagePointFromRect(event.clientX, event.clientY, stageRect),
     };
     captureStagePointer(event.pointerId);
     window.addEventListener("pointermove", onLinkPointerMove);
@@ -3554,11 +3584,13 @@ function onNodePointerDown(event) {
     return;
   }
 
-  const start = stagePoint(event.clientX, event.clientY);
+  const stageRect = stage.getBoundingClientRect();
+  const start = stagePointFromRect(event.clientX, event.clientY, stageRect);
   const sourceIds = isNodeSelected(nodeId) ? selectedNodeIds() : [nodeId];
   const ids = event.altKey ? duplicateNodes(sourceIds).copies.map((node) => node.id) : sourceIds;
   dragState = {
     pointerId: event.pointerId,
+    stageRect,
     nodes: ids.map((id) => {
       const node = nodeById(id);
       return {
@@ -3580,15 +3612,17 @@ function onNodePointerDown(event) {
 
 function onNodePointerMove(event) {
   if (!dragState || event.pointerId !== dragState.pointerId) return;
-  const point = stagePoint(event.clientX, event.clientY);
-  const rect = stage.getBoundingClientRect();
+  const rect = dragState.stageRect || stage.getBoundingClientRect();
+  const point = stagePointFromRect(event.clientX, event.clientY, rect);
+  const movedIds = [];
   for (const item of dragState.nodes) {
     const node = nodeById(item.id);
     if (!node) continue;
     node.x = clamp(point.x - item.offsetX, 90, rect.width - 90);
     node.y = clamp(point.y - item.offsetY, 96, rect.height - 126);
+    movedIds.push(item.id);
   }
-  scheduleNodesAndWiresRender();
+  scheduleNodesAndWiresRender(movedIds);
 }
 
 function onNodePointerEnd(event) {
@@ -3607,7 +3641,11 @@ function onNodePointerEnd(event) {
 
 function onLinkPointerMove(event) {
   if (!linkDrag || event.pointerId !== linkDrag.pointerId) return;
-  linkDrag.to = stagePoint(event.clientX, event.clientY);
+  linkDrag.to = stagePointFromRect(
+    event.clientX,
+    event.clientY,
+    linkDrag.stageRect || stage.getBoundingClientRect(),
+  );
   scheduleWiresRender();
 }
 
@@ -3643,6 +3681,9 @@ function onLinkPointerEnd(event) {
 }
 
 function onStageResize() {
+  if (dragState) dragState.stageRect = stage.getBoundingClientRect();
+  if (linkDrag) linkDrag.stageRect = stage.getBoundingClientRect();
+  if (marqueeState) marqueeState.stageRect = stage.getBoundingClientRect();
   scheduleWiresRender();
 }
 
@@ -3667,11 +3708,13 @@ function onStagePointerDown(event) {
   if (!isPrimaryDragPointer(event)) return;
   if (preserveSelectionAfterValueEditClick) return;
 
-  const point = stagePoint(event.clientX, event.clientY);
+  const stageRect = stage.getBoundingClientRect();
+  const point = stagePointFromRect(event.clientX, event.clientY, stageRect);
   marqueeState = {
     pointerId: event.pointerId,
     active: true,
     moved: false,
+    stageRect,
     start: point,
     current: point,
   };
@@ -3686,7 +3729,11 @@ function onStagePointerDown(event) {
 function onMarqueePointerMove(event) {
   if (!marqueeState || event.pointerId !== marqueeState.pointerId) return;
 
-  marqueeState.current = stagePoint(event.clientX, event.clientY);
+  marqueeState.current = stagePointFromRect(
+    event.clientX,
+    event.clientY,
+    marqueeState.stageRect || stage.getBoundingClientRect(),
+  );
   const bounds = selectionBounds(marqueeState.start, marqueeState.current);
   marqueeState.moved = bounds.width > 4 || bounds.height > 4;
   renderSelectionRect();
@@ -3787,6 +3834,13 @@ audioStatus.addEventListener("click", () => {
 document.addEventListener("pointerdown", trackValueEditExitClick, true);
 document.addEventListener("click", () => {
   preserveSelectionAfterValueEditClick = false;
+});
+
+wireLayer.addEventListener("click", (event) => {
+  const linkTarget = event.target.closest?.("[data-link-id]");
+  if (!linkTarget || !wireLayer.contains(linkTarget)) return;
+  event.stopPropagation();
+  select("link", linkTarget.dataset.linkId);
 });
 
 stage.addEventListener("pointerdown", onStagePointerDown);
