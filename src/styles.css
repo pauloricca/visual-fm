@@ -552,10 +552,65 @@ select {
   letter-spacing: 0;
 }
 
+.panel-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 22px;
+}
+
+.panel-heading .panel-subtitle {
+  margin-bottom: 0;
+}
+
 .panel-subtitle {
   margin: 0 0 22px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.link-meter {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 42px;
+  margin-top: 2px;
+  color: rgba(167, 176, 178, 0.82);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.link-meter-channel {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+}
+
+.link-meter-label {
+  color: rgba(167, 176, 178, 0.78);
+  text-transform: uppercase;
+}
+
+.link-meter-track {
+  position: relative;
+  width: 7px;
+  height: 28px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.link-meter-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--green);
+  transform: scaleY(0);
+  transform-origin: center bottom;
+  transition: transform 55ms linear;
 }
 
 .field {
@@ -646,6 +701,12 @@ select {
 
 .section-heading .section-title {
   margin: 0;
+}
+
+.section-heading-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .midi-empty {
@@ -743,6 +804,10 @@ select {
   justify-content: space-between;
   gap: 10px;
   margin: 0 0 14px;
+}
+
+.effect-section > .toggle-field:last-child {
+  margin-bottom: 0;
 }
 
 .toggle-row input {

@@ -1,9 +1,12 @@
 import {
+  DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_LINK_FILTER,
+  DEFAULT_LINK_FOLLOWER,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
   LINK_INPUT_T,
   LINK_MODULATION_TARGETS,
+  LINK_SIGNAL_MODES,
   MASTER_EFFECTS,
   MASTER_EFFECT_IDS,
   MAX_MAX_VOICES,
@@ -26,6 +29,7 @@ import {
   normalizeDefaultPatch,
   normalizeFrequencyMode,
   normalizePatch,
+  normalizeSignalMode,
 } from "./patch-normalize.js";
 import { audioBufferToWav, mediaRecorderOptions } from "./recording.js";
 import {
@@ -51,13 +55,13 @@ const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
-const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=envelope-retrigger-continuity-1";
+const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=link-signal-follower-meter-6";
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const FINE_SLIDER_SCALE = 0.1;
 
 const state = {
   ...loadPatch(),
-  selected: { type: "node", id: "op-1" },
+  selected: { type: null, id: null },
 };
 
 let audioContext = null;
@@ -65,6 +69,9 @@ let synthNode = null;
 let outputGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
+let audioOutputSinkDestination = null;
+let audioOutputSinkElement = null;
+let audioOutputRouteError = "";
 let recorderDestination = null;
 let audioReadyPromise = null;
 let mediaRecorder = null;
@@ -92,14 +99,17 @@ const recentMidiCc = new Map();
 const recentMidiCcListeners = new Set();
 const midiBindingFlashTimers = new Map();
 const midiTargetFlashTimers = new Map();
+const linkMeterLevels = new Map();
+let pendingLinkMeterFrame = null;
 let suppressNextStageClick = false;
 let touchFineSliderPointerId = null;
 let keyboardFineSliderActive = false;
+let availableAudioDevices = { inputs: [], outputs: [] };
 
 syncCounters();
 pruneMidiBindings();
-if (!nodeById(state.selected.id) && state.nodes[0]) {
-  state.selected = { type: "node", id: state.nodes[0].id };
+if (state.selected.id && !nodeById(state.selected.id)) {
+  state.selected = { type: null, id: null };
 }
 
 function uid(prefix) {
@@ -162,6 +172,8 @@ function currentPatchData() {
   return {
     patchName: state.patchName,
     maxVoices: state.maxVoices,
+    audioInputDeviceId: state.audioInputDeviceId,
+    audioOutputDeviceId: state.audioOutputDeviceId,
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
     midiBindings: state.midiBindings,
@@ -262,6 +274,17 @@ function nodeParameterDefinitions(node) {
         node.speed = value;
       },
     }] : []),
+    ...(node.wave === "audio-input" ? [{
+      id: "audioInputGain",
+      label: "Input gain",
+      type: "number",
+      min: 0,
+      max: 4,
+      get: () => node.audioInputGain ?? 1,
+      set: (value) => {
+        node.audioInputGain = value;
+      },
+    }] : []),
   ];
 
   return definitions;
@@ -343,7 +366,7 @@ function linkParameterDefinitions(link) {
     },
     {
       id: "drone",
-      label: "Drone",
+      label: "Envelope bypass",
       type: "boolean",
       get: () => link.drone,
       set: (value) => {
@@ -352,13 +375,56 @@ function linkParameterDefinitions(link) {
       },
     },
     {
+      id: "filter.enabled",
+      label: "Filter",
+      type: "boolean",
+      get: () => link.filter.type !== "none",
+      set: (value) => {
+        link.filter.type = value ? (link.filter.type === "none" ? "lowpass" : link.filter.type) : "none";
+      },
+    },
+    {
+      id: "signalMode",
+      label: "Signal",
+      type: "choice",
+      options: LINK_SIGNAL_MODES.map((value) => ({ value, label: signalModeLabel(value) })),
+      get: () => link.signalMode,
+      set: (value) => {
+        link.signalMode = normalizeSignalMode(value);
+      },
+    },
+    {
+      id: "follower.attack",
+      label: "Follower attack",
+      type: "number",
+      min: 0.001,
+      max: 2,
+      get: () => link.follower?.attack ?? DEFAULT_LINK_FOLLOWER.attack,
+      set: (value) => {
+        link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), attack: value };
+      },
+    },
+    {
+      id: "follower.release",
+      label: "Follower release",
+      type: "number",
+      min: 0.001,
+      max: 4,
+      get: () => link.follower?.release ?? DEFAULT_LINK_FOLLOWER.release,
+      set: (value) => {
+        link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), release: value };
+      },
+    },
+    {
       id: "filter.type",
       label: "Filter type",
       type: "choice",
-      options: LINK_FILTER_TYPES.map((value) => ({ value, label: filterTypeLabel(value) })),
+      options: LINK_FILTER_TYPES
+        .filter((value) => value !== "none")
+        .map((value) => ({ value, label: filterTypeLabel(value) })),
       get: () => link.filter.type,
       set: (value) => {
-        link.filter.type = value;
+        link.filter.type = value === "none" ? "lowpass" : value;
       },
     },
     {
@@ -656,6 +722,9 @@ function updatePanelForMidiNumber(smoothing, value) {
     if (node && smoothing.parameter === "speed") {
       setPanelNumberPair("speed", "speedRange", value);
     }
+    if (node && smoothing.parameter === "audioInputGain") {
+      setPanelNumberPair("audioInputGain", "audioInputGainRange", value);
+    }
     return;
   }
 
@@ -665,6 +734,8 @@ function updatePanelForMidiNumber(smoothing, value) {
     velocitySensitivity: "velocitySensitivity",
     noise: "noise",
     delay: "linkDelay",
+    "follower.attack": "followerAttack",
+    "follower.release": "followerRelease",
     "filter.cutoff": "filterCutoff",
     "filter.resonance": "filterResonance",
     "envelope.delay": "delay",
@@ -973,13 +1044,14 @@ function linkGeometry(link, visited = new Set()) {
 
 function graphPayload() {
   return {
-    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed }) => ({
+    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed, audioInputGain }) => ({
       id,
       wave,
       frequencyMode,
       ratio,
       frequency,
       speed,
+      audioInputGain,
     })),
     links: state.links.map((link) => ({
       id: link.id,
@@ -992,6 +1064,8 @@ function graphPayload() {
       velocitySensitivity: Number(link.velocitySensitivity) || 0,
       modulationTarget: link.modulationTarget || "phase",
       drone: Boolean(link.drone),
+      signalMode: normalizeSignalMode(link.signalMode),
+      follower: { ...(link.follower || DEFAULT_LINK_FOLLOWER) },
       filter: { ...link.filter },
       envelope: { ...link.envelope },
     })),
@@ -1035,12 +1109,181 @@ function scheduleLinkParamGraphSync() {
   }, LINK_PARAM_GRAPH_SYNC_DELAY_MS);
 }
 
+function selectedAudioDeviceId(kind) {
+  const key = kind === "output" ? "audioOutputDeviceId" : "audioInputDeviceId";
+  return state[key] || DEFAULT_AUDIO_DEVICE_ID;
+}
+
+function audioInputDevices() {
+  return availableAudioDevices.inputs;
+}
+
+function audioOutputDevices() {
+  return availableAudioDevices.outputs;
+}
+
+function audioDeviceLabel(device, fallback, index) {
+  return device.label || `${fallback} ${index + 1}`;
+}
+
+function audioDeviceOptions(devices, selectedId, defaultLabel, fallbackLabel, unavailableLabel) {
+  const realDevices = devices.filter((device) => device.deviceId && device.deviceId !== DEFAULT_AUDIO_DEVICE_ID);
+  const hasSelectedDevice = selectedId === DEFAULT_AUDIO_DEVICE_ID
+    || realDevices.some((device) => device.deviceId === selectedId);
+  return [
+    `<option value="${DEFAULT_AUDIO_DEVICE_ID}" ${selectedId === DEFAULT_AUDIO_DEVICE_ID ? "selected" : ""}>${defaultLabel}</option>`,
+    ...realDevices.map((device, index) => (
+      `<option value="${escapeHtml(device.deviceId)}" ${selectedId === device.deviceId ? "selected" : ""}>${escapeHtml(audioDeviceLabel(device, fallbackLabel, index))}</option>`
+    )),
+    ...(!hasSelectedDevice ? [`<option value="${escapeHtml(selectedId)}" selected>${unavailableLabel}</option>`] : []),
+  ].join("");
+}
+
+async function refreshAudioDevices({ renderPatchPanel = false } = {}) {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    availableAudioDevices = { inputs: [], outputs: [] };
+    return;
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    availableAudioDevices = {
+      inputs: devices.filter((device) => device.kind === "audioinput"),
+      outputs: devices.filter((device) => device.kind === "audiooutput"),
+    };
+    if (renderPatchPanel && !state.selected.type) {
+      renderPanel();
+    }
+  } catch {
+    availableAudioDevices = { inputs: [], outputs: [] };
+  }
+}
+
+function disconnectOutputRoutes() {
+  if (!outputGainNode) return;
+  try {
+    outputGainNode.disconnect();
+  } catch {
+    // Disconnect can throw if no route exists yet.
+  }
+}
+
+function connectOutputRoute(destination) {
+  if (!outputGainNode || !destination) return;
+  disconnectOutputRoutes();
+  outputGainNode.connect(destination);
+}
+
+function stopOutputSinkElement() {
+  if (!audioOutputSinkElement) return;
+  audioOutputSinkElement.pause();
+  audioOutputSinkElement.srcObject = null;
+}
+
+function ensureOutputSinkElement() {
+  if (!audioOutputSinkDestination) {
+    audioOutputSinkDestination = audioContext.createMediaStreamDestination();
+  }
+  if (!audioOutputSinkElement) {
+    audioOutputSinkElement = document.createElement("audio");
+    audioOutputSinkElement.autoplay = true;
+    audioOutputSinkElement.playsInline = true;
+  }
+  if (audioOutputSinkElement.srcObject !== audioOutputSinkDestination.stream) {
+    audioOutputSinkElement.srcObject = audioOutputSinkDestination.stream;
+  }
+}
+
+async function syncAudioOutputDevice() {
+  if (!audioContext || !outputGainNode) return true;
+
+  const deviceId = selectedAudioDeviceId("output");
+  const sinkId = deviceId === DEFAULT_AUDIO_DEVICE_ID ? "" : deviceId;
+
+  if (typeof audioContext.setSinkId === "function") {
+    try {
+      await audioContext.setSinkId(sinkId);
+      connectOutputRoute(audioContext.destination);
+      stopOutputSinkElement();
+      audioOutputRouteError = "";
+      return true;
+    } catch {
+      connectOutputRoute(audioContext.destination);
+      stopOutputSinkElement();
+      audioOutputRouteError = "Audio output blocked";
+      return false;
+    }
+  }
+
+  if (!sinkId) {
+    connectOutputRoute(audioContext.destination);
+    stopOutputSinkElement();
+    audioOutputRouteError = "";
+    return true;
+  }
+
+  if (typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype) {
+    try {
+      ensureOutputSinkElement();
+      await audioOutputSinkElement.setSinkId(sinkId);
+      connectOutputRoute(audioOutputSinkDestination);
+      await audioOutputSinkElement.play();
+      audioOutputRouteError = "";
+      return true;
+    } catch {
+      connectOutputRoute(audioContext.destination);
+      audioOutputRouteError = "Audio output blocked";
+      return false;
+    }
+  }
+
+  connectOutputRoute(audioContext.destination);
+  audioOutputRouteError = "Audio output unavailable";
+  return false;
+}
+
 function sendLinkParam(id, parameter, value) {
   synthNode?.port.postMessage({
     type: "linkParam",
     payload: { id, parameter, value },
   });
   scheduleLinkParamGraphSync();
+}
+
+function scheduleLinkMeterPaint() {
+  if (pendingLinkMeterFrame) return;
+  pendingLinkMeterFrame = requestAnimationFrame(() => {
+    pendingLinkMeterFrame = null;
+    updateSelectedLinkMeter();
+  });
+}
+
+function handleWorkletMessage(event) {
+  const { type, payload } = event.data || {};
+  if (type !== "linkMeters" || !Array.isArray(payload?.levels)) return;
+
+  for (const [id, inputLevel, outputLevel, envelopeLevel] of payload.levels) {
+    linkMeterLevels.set(id, {
+      input: clamp(Number(inputLevel) || 0, 0, 1),
+      output: clamp(Number(outputLevel) || 0, 0, 1),
+      envelope: clamp(Number(envelopeLevel) || 0, 0, 1),
+    });
+  }
+  scheduleLinkMeterPaint();
+}
+
+function updateSelectedLinkMeter() {
+  const meter = panel.querySelector("[data-link-meter]");
+  if (!meter) return;
+
+  const linkId = meter.dataset.linkMeter;
+  const levels = linkMeterLevels.get(linkId) || { input: 0, output: 0, envelope: 0 };
+  const inputFill = meter.querySelector("[data-link-meter-fill='input']");
+  const outputFill = meter.querySelector("[data-link-meter-fill='output']");
+  const envelopeFill = panel.querySelector(`[data-envelope-meter="${CSS.escape(linkId)}"] [data-link-meter-fill='envelope']`);
+  if (inputFill) inputFill.style.transform = `scaleY(${clamp(levels.input || 0, 0, 1)})`;
+  if (outputFill) outputFill.style.transform = `scaleY(${clamp(levels.output || 0, 0, 1)})`;
+  if (envelopeFill) envelopeFill.style.transform = `scaleY(${clamp(levels.envelope || 0, 0, 1)})`;
 }
 
 function syncOutputMute() {
@@ -1072,6 +1315,8 @@ function updateAudioReadyButton() {
 function updateAudioStatus({ inputBlocked = false } = {}) {
   if (inputBlocked) {
     setAudioStatusLabel("Audio input blocked");
+  } else if (audioOutputRouteError) {
+    setAudioStatusLabel(audioOutputRouteError);
   } else if (audioContext && synthNode) {
     updateAudioReadyButton();
   } else {
@@ -1121,7 +1366,7 @@ async function setupAudio() {
     outputGainNode = audioContext.createGain();
     syncOutputMute();
     synthNode.connect(outputGainNode);
-    outputGainNode.connect(audioContext.destination);
+    synthNode.port.onmessage = handleWorkletMessage;
     sendGraph({ immediate: true });
   }
 
@@ -1133,6 +1378,7 @@ async function setupAudio() {
   if (audioContext.state !== "running") {
     await audioContext.resume();
   }
+  await syncAudioOutputDevice();
   let inputBlocked = false;
   if (patchUsesAudioInput()) {
     try {
@@ -1153,15 +1399,20 @@ async function ensureAudioInput() {
     throw new Error("Audio input unavailable");
   }
 
-  audioInputStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-    },
-  });
+  const audioConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  };
+  const deviceId = selectedAudioDeviceId("input");
+  if (deviceId !== DEFAULT_AUDIO_DEVICE_ID) {
+    audioConstraints.deviceId = { exact: deviceId };
+  }
+
+  audioInputStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   audioInputSource = audioContext.createMediaStreamSource(audioInputStream);
   audioInputSource.connect(synthNode);
+  refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 }
 
 function stopAudioInput() {
@@ -1538,6 +1789,8 @@ function renderPanel() {
     const frequencyMax = isFixedFrequency ? 12000 : 16;
     const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
     const speedValue = Number.isFinite(Number(node.speed)) ? node.speed : 8;
+    const usesAudioInputGain = node.wave === "audio-input";
+    const audioInputGainValue = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
 
     panel.innerHTML = `
       <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
@@ -1577,6 +1830,15 @@ function renderPanel() {
           </div>
         </div>
       ` : ""}
+      ${usesAudioInputGain ? `
+        <div class="field">
+          ${parameterLabel("audioInputGain", "Input gain", "node", node.id, "audioInputGain")}
+          <div class="field-row">
+            <input id="audioInputGainRange" type="range" min="0" max="4" step="0.001" value="${audioInputGainValue}">
+            <input id="audioInputGain" type="number" min="0" max="4" step="0.001" value="${audioInputGainValue}">
+          </div>
+        </div>
+      ` : ""}
     `;
 
     panel.querySelector("#nodeName").addEventListener("input", (event) => {
@@ -1593,6 +1855,7 @@ function renderPanel() {
     panel.querySelector("#wave").addEventListener("change", (event) => {
       node.wave = event.target.value;
       if (node.wave === "audio-input") {
+        node.audioInputGain = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
         ensureAudio().catch(() => {
           setAudioStatusLabel("Audio input blocked");
         });
@@ -1631,6 +1894,13 @@ function renderPanel() {
         savePatch();
       });
     }
+    if (usesAudioInputGain) {
+      bindNumberPair("audioInputGain", "audioInputGainRange", 0, 4, (value) => {
+        node.audioInputGain = value;
+        sendGraph();
+        savePatch();
+      });
+    }
     attachParameterMidiButtons();
     return;
   }
@@ -1649,7 +1919,19 @@ function renderPanel() {
     const modulationTargets = modulationTargetsForLink(link);
     const amountMax = link.modulationTarget === "mix" ? 1 : 8;
     const usesEnvelopeControls = !link.drone;
-    const filterControls = link.filter.type === "none" ? "" : `
+    const signalMode = normalizeSignalMode(link.signalMode);
+    const usesFollowerControls = signalMode !== "raw";
+    const follower = link.follower || DEFAULT_LINK_FOLLOWER;
+    const usesFilterControls = link.filter.type !== "none";
+    const linkFilterTypes = LINK_FILTER_TYPES.filter((type) => type !== "none");
+    const filterType = usesFilterControls ? link.filter.type : "lowpass";
+    const filterControls = usesFilterControls ? `
+      <div class="field">
+        ${parameterLabel("filterType", "Type", "link", link.id, "filter.type")}
+        <select id="filterType">
+          ${linkFilterTypes.map((type) => `<option value="${type}" ${filterType === type ? "selected" : ""}>${filterTypeLabel(type)}</option>`).join("")}
+        </select>
+      </div>
       <div class="field">
         ${parameterLabel("filterCutoff", "Cutoff (Hz)", "link", link.id, "filter.cutoff")}
         <div class="field-row">
@@ -1664,15 +1946,25 @@ function renderPanel() {
           <input id="filterResonance" type="number" min="0.1" max="12" step="0.001" value="${link.filter.resonance}">
         </div>
       </div>
-    `;
+    ` : "";
     if (modulationTargets.length && !modulationTargets.includes(link.modulationTarget)) {
       link.modulationTarget = modulationTargets[0];
       sendGraph();
       savePatch();
     }
-    const envelopeControls = usesEnvelopeControls ? `
+    const envelopeControls = `
       <section class="effect-section">
-        <div class="section-title">Envelope</div>
+        <div class="toggle-field">
+          <label class="toggle-row" for="envelopeEnabled">
+            <input id="envelopeEnabled" type="checkbox" ${usesEnvelopeControls ? "checked" : ""}>
+            <span>Envelope</span>
+          </label>
+          <div class="section-heading-tools">
+            ${usesEnvelopeControls ? envelopeMeter(link.id) : ""}
+            ${midiCcButton("link", link.id, "drone")}
+          </div>
+        </div>
+        ${usesEnvelopeControls ? `
         ${drawAdsr(link.envelope)}
         <div class="adsr-slider-grid">
           ${adsrField("delay", "D", "Delay", link.envelope.delay, 0, 4, link.id)}
@@ -1681,12 +1973,37 @@ function renderPanel() {
           ${adsrField("sustain", "S", "Sustain", link.envelope.sustain, 0, 1, link.id)}
           ${adsrField("release", "R", "Release", link.envelope.release, 0.001, 6, link.id)}
         </div>
+        ` : ""}
+      </section>
+    `;
+    const followerControls = usesFollowerControls ? `
+      <section class="effect-section">
+        <div class="section-title">Follower</div>
+        <div class="field">
+          ${parameterLabel("followerAttack", "Attack", "link", link.id, "follower.attack")}
+          <div class="field-row">
+            <input id="followerAttackRange" type="range" min="0.001" max="2" step="0.001" value="${follower.attack}">
+            <input id="followerAttack" type="number" min="0.001" max="2" step="0.001" value="${follower.attack}">
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("followerRelease", "Release", "link", link.id, "follower.release")}
+          <div class="field-row">
+            <input id="followerReleaseRange" type="range" min="0.001" max="4" step="0.001" value="${follower.release}">
+            <input id="followerRelease" type="number" min="0.001" max="4" step="0.001" value="${follower.release}">
+          </div>
+        </div>
       </section>
     ` : "";
 
     panel.innerHTML = `
-      <h1>${link.to === "audio" ? "Output envelope" : targetKind === "link" ? "Link modulation" : "Modulation"}</h1>
-      <p class="panel-subtitle">${from} -> ${to}</p>
+      <div class="panel-heading">
+        <div>
+          <h1>${link.to === "audio" ? "Output envelope" : targetKind === "link" ? "Link modulation" : "Modulation"}</h1>
+          <p class="panel-subtitle">${from} -> ${to}</p>
+        </div>
+        ${linkMeter(link.id)}
+      </div>
       ${modulationTargets.length ? `
         <div class="field">
           ${parameterLabel("modulationTarget", "Modulates", "link", link.id, "modulationTarget")}
@@ -1695,6 +2012,13 @@ function renderPanel() {
           </select>
         </div>
       ` : ""}
+      <div class="field">
+        ${parameterLabel("signalMode", "Signal", "link", link.id, "signalMode")}
+        <select id="signalMode">
+          ${LINK_SIGNAL_MODES.map((mode) => `<option value="${mode}" ${signalMode === mode ? "selected" : ""}>${signalModeLabel(mode)}</option>`).join("")}
+        </select>
+      </div>
+      ${followerControls}
       <div class="field">
         ${parameterLabel("amount", "Amplitude", "link", link.id, "amount")}
         <div class="field-row">
@@ -1732,25 +2056,19 @@ function renderPanel() {
           <input id="linkDelay" type="number" min="0" max="3" step="0.001" value="${link.delay}">
         </div>
       </div>
-      <div class="toggle-field">
-        <label class="toggle-row" for="drone">
-          <input id="drone" type="checkbox" ${link.drone ? "checked" : ""}>
-          <span>Drone</span>
-        </label>
-        ${midiCcButton("link", link.id, "drone")}
-      </div>
       ${envelopeControls}
       <section class="effect-section">
-        <div class="section-title">Filter</div>
-        <div class="field">
-          ${parameterLabel("filterType", "Type", "link", link.id, "filter.type")}
-          <select id="filterType">
-            ${LINK_FILTER_TYPES.map((type) => `<option value="${type}" ${link.filter.type === type ? "selected" : ""}>${filterTypeLabel(type)}</option>`).join("")}
-          </select>
+        <div class="toggle-field">
+          <label class="toggle-row" for="filterEnabled">
+            <input id="filterEnabled" type="checkbox" ${usesFilterControls ? "checked" : ""}>
+            <span>Filter</span>
+          </label>
+          ${midiCcButton("link", link.id, "filter.enabled")}
         </div>
         ${filterControls}
       </section>
     `;
+    updateSelectedLinkMeter();
 
     bindNumberPair("amount", "amountRange", 0, amountMax, (value) => {
       link.amount = value;
@@ -1784,8 +2102,8 @@ function renderPanel() {
       schedulePatchSave();
     });
 
-    panel.querySelector("#drone").addEventListener("change", (event) => {
-      link.drone = event.target.checked;
+    panel.querySelector("#envelopeEnabled").addEventListener("change", (event) => {
+      link.drone = !event.target.checked;
       if (link.drone) ensureAudio();
       renderPanel();
       sendGraph();
@@ -1802,14 +2120,43 @@ function renderPanel() {
       savePatch();
     });
 
-    panel.querySelector("#filterType").addEventListener("change", (event) => {
-      link.filter.type = event.target.value;
+    panel.querySelector("#signalMode").addEventListener("change", (event) => {
+      link.signalMode = normalizeSignalMode(event.target.value);
+      link.follower = link.follower || { ...DEFAULT_LINK_FOLLOWER };
       renderPanel();
       sendGraph();
       savePatch();
     });
 
-    if (link.filter.type !== "none") {
+    if (usesFollowerControls) {
+      bindNumberPair("followerAttack", "followerAttackRange", 0.001, 2, (value) => {
+        link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), attack: value };
+        sendGraph();
+        savePatch();
+      });
+
+      bindNumberPair("followerRelease", "followerReleaseRange", 0.001, 4, (value) => {
+        link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), release: value };
+        sendGraph();
+        savePatch();
+      });
+    }
+
+    panel.querySelector("#filterEnabled").addEventListener("change", (event) => {
+      link.filter.type = event.target.checked ? (link.filter.type === "none" ? "lowpass" : link.filter.type) : "none";
+      renderPanel();
+      sendGraph();
+      savePatch();
+    });
+
+    if (usesFilterControls) {
+      panel.querySelector("#filterType").addEventListener("change", (event) => {
+        link.filter.type = event.target.value;
+        renderPanel();
+        sendGraph();
+        savePatch();
+      });
+
       bindNumberPair("filterCutoff", "filterCutoffRange", 20, 12000, (value) => {
         link.filter.cutoff = value;
         sendLinkParam(link.id, "filter.cutoff", value);
@@ -1857,6 +2204,7 @@ function renderMasterEffectsPanel() {
     const toggle = panel.querySelector(`#${effectName}Enabled`);
     toggle.addEventListener("change", (event) => {
       effect.enabled = event.target.checked;
+      renderMasterEffectsPanel();
       sendGraph();
       savePatch();
     });
@@ -1897,20 +2245,25 @@ function applyPatchData(patch) {
   const normalized = normalizePatch(patch);
   state.patchName = normalized.patchName;
   state.maxVoices = normalized.maxVoices;
+  state.audioInputDeviceId = normalized.audioInputDeviceId;
+  state.audioOutputDeviceId = normalized.audioOutputDeviceId;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
   state.links = normalized.links;
-  state.selected = state.nodes[0] ? { type: "node", id: state.nodes[0].id } : { type: null, id: null };
+  state.selected = { type: null, id: null };
   syncCounters();
   synthNode?.port.postMessage({ type: "panic" });
   pressedKeys.clear();
   updateMidiStatus();
   render();
   sendGraph();
-  reconcileAudioInput();
+  syncAudioOutputDevice()
+    .then(() => reconcileAudioInput())
+    .then(() => updateAudioStatus())
+    .catch(() => updateAudioStatus({ inputBlocked: true }));
   savePatch();
 }
 
@@ -1921,9 +2274,13 @@ function newPatch() {
 
   const midiChannel = state.midiChannel;
   const midiInputId = state.midiInputId;
+  const audioInputDeviceId = state.audioInputDeviceId;
+  const audioOutputDeviceId = state.audioOutputDeviceId;
   const normalized = normalizeDefaultPatch();
   state.patchName = "Untitled Patch";
   state.maxVoices = normalized.maxVoices;
+  state.audioInputDeviceId = audioInputDeviceId;
+  state.audioOutputDeviceId = audioOutputDeviceId;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
   state.midiBindings = normalized.midiBindings;
@@ -1951,7 +2308,7 @@ function effectSection(id, title, effect, params) {
         </label>
         ${midiCcButton("effect", id, "enabled")}
       </div>
-      ${params.map(([key, label, min, max, unit]) => effectField(id, key, label, effect[key], min, max, unit)).join("")}
+      ${effect.enabled ? params.map(([key, label, min, max, unit]) => effectField(id, key, label, effect[key], min, max, unit)).join("") : ""}
     </section>
   `;
 }
@@ -2025,6 +2382,48 @@ function modulationTargetLabel(target, destination = "") {
     "envelope.release": "Envelope release",
   };
   return labels[target] || target;
+}
+
+function signalModeLabel(mode) {
+  const labels = {
+    raw: "Raw",
+    envelope: "Envelope",
+    "inverted-envelope": "Inverted Envelope",
+  };
+  return labels[mode] || mode;
+}
+
+function linkMeter(linkId) {
+  const levels = linkMeterLevels.get(linkId) || { input: 0, output: 0, envelope: 0 };
+  return `
+    <div class="link-meter" data-link-meter="${escapeHtml(linkId)}" aria-label="Link signal meter">
+      <div class="link-meter-channel">
+        <span class="link-meter-label">in</span>
+        <span class="link-meter-track" aria-hidden="true">
+          <span class="link-meter-fill" data-link-meter-fill="input" style="transform: scaleY(${clamp(levels.input || 0, 0, 1)})"></span>
+        </span>
+      </div>
+      <div class="link-meter-channel">
+        <span class="link-meter-label">out</span>
+        <span class="link-meter-track" aria-hidden="true">
+          <span class="link-meter-fill" data-link-meter-fill="output" style="transform: scaleY(${clamp(levels.output || 0, 0, 1)})"></span>
+        </span>
+      </div>
+    </div>
+  `;
+}
+
+function envelopeMeter(linkId) {
+  const levels = linkMeterLevels.get(linkId) || { input: 0, output: 0, envelope: 0 };
+  return `
+    <div class="link-meter envelope-meter" data-envelope-meter="${escapeHtml(linkId)}" aria-label="Envelope level meter">
+      <div class="link-meter-channel">
+        <span class="link-meter-track" aria-hidden="true">
+          <span class="link-meter-fill" data-link-meter-fill="envelope" style="transform: scaleY(${clamp(levels.envelope || 0, 0, 1)})"></span>
+        </span>
+      </div>
+    </div>
+  `;
 }
 
 function modulationTargetsForLink(link) {
@@ -2643,11 +3042,25 @@ function renderEmptyPanel() {
     )),
     ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
   ].join("");
+  const audioInputOptions = audioDeviceOptions(
+    audioInputDevices(),
+    selectedAudioDeviceId("input"),
+    "System default input",
+    "Audio input",
+    "Unavailable input",
+  );
+  const audioOutputOptions = audioDeviceOptions(
+    audioOutputDevices(),
+    selectedAudioDeviceId("output"),
+    "System default output",
+    "Audio output",
+    "Unavailable output",
+  );
 
   panel.innerHTML = `
     <div class="panel-empty">
       <h1>Patch</h1>
-      <p class="panel-subtitle">File and MIDI settings</p>
+      <p class="panel-subtitle">File, audio, and MIDI settings</p>
       <div class="field">
         <label for="patchName">Name</label>
         <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
@@ -2664,6 +3077,14 @@ function renderEmptyPanel() {
           <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
           <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
         </div>
+      </div>
+      <div class="field">
+        <label for="audioInputDevice">Audio input</label>
+        <select id="audioInputDevice">${audioInputOptions}</select>
+      </div>
+      <div class="field">
+        <label for="audioOutputDevice">Audio output</label>
+        <select id="audioOutputDevice">${audioOutputOptions}</select>
       </div>
       <div class="field">
         <label for="midiInput">MIDI input</label>
@@ -2689,6 +3110,35 @@ function renderEmptyPanel() {
   bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
     state.maxVoices = Math.round(value);
     sendGraph();
+    savePatch();
+  });
+  panel.querySelector("#audioInputDevice").addEventListener("change", (event) => {
+    state.audioInputDeviceId = event.target.value;
+    if (patchUsesAudioInput()) {
+      stopAudioInput();
+      reconcileAudioInput();
+    }
+    savePatch();
+  });
+  panel.querySelector("#audioOutputDevice").addEventListener("change", async (event) => {
+    const previousDeviceId = state.audioOutputDeviceId;
+    state.audioOutputDeviceId = event.target.value;
+    try {
+      await ensureAudio();
+      const outputReady = await syncAudioOutputDevice();
+      if (outputReady) {
+        await refreshAudioDevices();
+      } else {
+        state.audioOutputDeviceId = previousDeviceId;
+        await syncAudioOutputDevice();
+      }
+    } catch {
+      state.audioOutputDeviceId = previousDeviceId;
+      await syncAudioOutputDevice();
+      audioOutputRouteError = "Audio output blocked";
+    }
+    updateAudioStatus();
+    renderPanel();
     savePatch();
   });
   panel.querySelector("#savePatchButton").addEventListener("click", downloadPatch);
@@ -2740,6 +3190,7 @@ function addNode(position = null) {
     ratio: 1,
     frequency: 440,
     speed: 8,
+    audioInputGain: 1,
   };
   state.nodes.push(node);
   select("node", node.id);
@@ -2807,6 +3258,8 @@ function upsertLink(from, to) {
     velocitySensitivity: to === "audio" ? 1 : 0,
     modulationTarget: to === "audio" ? "amplitude" : targetLink ? "amplitude" : "phase",
     drone: false,
+    signalMode: "raw",
+    follower: { ...DEFAULT_LINK_FOLLOWER },
     filter: { ...DEFAULT_LINK_FILTER },
     envelope: to === "audio"
       ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
@@ -3094,6 +3547,11 @@ window.addEventListener("keyup", (event) => {
   noteOff(note);
 });
 
+navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+  refreshAudioDevices({ renderPatchPanel: !state.selected.type });
+});
+
 render();
+refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 setupMidi();
 requestAnimationFrame(showAudioEnableModal);

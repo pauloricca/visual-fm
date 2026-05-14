@@ -1,10 +1,13 @@
 import {
   DEFAULT_LINK_FILTER,
+  DEFAULT_LINK_FOLLOWER,
+  DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_MAX_VOICES,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
   LINK_MIDI_PARAMETERS,
   LINK_MODULATION_TARGETS,
+  LINK_SIGNAL_MODES,
   MASTER_EFFECT_IDS,
   MASTER_EFFECTS,
   MAX_MAX_VOICES,
@@ -36,6 +39,8 @@ export function normalizePatch(patch) {
   const midiInputId = typeof source.midiInputId === "string" && source.midiInputId.trim()
     ? source.midiInputId
     : "all";
+  const audioInputDeviceId = normalizeAudioDeviceId(source.audioInputDeviceId);
+  const audioOutputDeviceId = normalizeAudioDeviceId(source.audioOutputDeviceId);
   const nodeIdMap = new Map();
   const linkIdMap = new Map();
   const nodes = source.nodes.map((node, index) => {
@@ -52,6 +57,7 @@ export function normalizePatch(patch) {
       ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
       frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
+      audioInputGain: Number.isFinite(Number(node.audioInputGain)) ? clamp(Number(node.audioInputGain), 0, 4) : 1,
     };
   });
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -91,6 +97,8 @@ export function normalizePatch(patch) {
           sourceLinkIds.has(link.to) ? sourceLinksById.get(link.to) : null,
         ),
         drone: Boolean(link.drone),
+        signalMode: normalizeSignalMode(link.signalMode),
+        follower: normalizeFollower(link.follower),
         filter: normalizeLinkFilter(link.filter),
         envelope: normalizeEnvelope(link.envelope),
       };
@@ -109,6 +117,8 @@ export function normalizePatch(patch) {
   return {
     patchName,
     maxVoices,
+    audioInputDeviceId,
+    audioOutputDeviceId,
     midiChannel,
     midiInputId,
     midiBindings: normalizeMidiBindings(source.midiBindings, nodes, links, nodeIdMap, linkIdMap),
@@ -116,6 +126,12 @@ export function normalizePatch(patch) {
     nodes,
     links,
   };
+}
+
+function normalizeAudioDeviceId(deviceId) {
+  return typeof deviceId === "string" && deviceId.trim()
+    ? deviceId
+    : DEFAULT_AUDIO_DEVICE_ID;
 }
 
 export function normalizeDefaultPatch() {
@@ -148,6 +164,10 @@ export function normalizeModulationTarget(target, to, targetLink = null) {
 
 export function normalizeFrequencyMode(mode) {
   return FREQUENCY_MODES.includes(mode) ? mode : "ratio";
+}
+
+export function normalizeSignalMode(mode) {
+  return LINK_SIGNAL_MODES.includes(mode) ? mode : "raw";
 }
 
 export function linkHasPan(link) {
@@ -184,6 +204,17 @@ function normalizeEnvelope(envelope = {}) {
     decay: Number.isFinite(Number(envelope.decay)) ? Number(envelope.decay) : 0.16,
     sustain: Number.isFinite(Number(envelope.sustain)) ? Number(envelope.sustain) : 0.65,
     release: Number.isFinite(Number(envelope.release)) ? Number(envelope.release) : 0.26,
+  };
+}
+
+function normalizeFollower(follower = {}) {
+  return {
+    attack: Number.isFinite(Number(follower.attack))
+      ? clamp(Number(follower.attack), 0.001, 2)
+      : DEFAULT_LINK_FOLLOWER.attack,
+    release: Number.isFinite(Number(follower.release))
+      ? clamp(Number(follower.release), 0.001, 4)
+      : DEFAULT_LINK_FOLLOWER.release,
   };
 }
 

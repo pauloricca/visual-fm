@@ -1,6 +1,7 @@
 export const STORAGE_KEY = "visual-fm.patch.v1";
 
 export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
+export const LINK_SIGNAL_MODES = ["raw", "envelope", "inverted-envelope"];
 export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"];
 export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
 export const SPEED_WAVE_TYPES = new Set(["perlin"]);
@@ -22,6 +23,7 @@ export const LINK_MODULATION_TARGETS = [
 ];
 
 export const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
+export const DEFAULT_LINK_FOLLOWER = { attack: 0.01, release: 0.12 };
 
 export const MASTER_EFFECTS = {
   chorus: {
@@ -56,6 +58,7 @@ export const VELOCITY_SENSITIVITY_MAX = 8;
 export const DEFAULT_MAX_VOICES = 5;
 export const MIN_MAX_VOICES = 1;
 export const MAX_MAX_VOICES = 16;
+export const DEFAULT_AUDIO_DEVICE_ID = "default";
 
 export const MIDI_CC_SMOOTH_SECONDS = 0.09;
 export const MIDI_CC_SETTLE_RATIO = 0.00025;
@@ -64,7 +67,7 @@ export const RECENT_MIDI_CC_WINDOW_MS = 2000;
 export const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
 
 export const LINK_INPUT_T = 0.45;
-export const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed"]);
+export const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed", "audioInputGain"]);
 export const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
   "amount",
@@ -73,6 +76,10 @@ export const LINK_MIDI_PARAMETERS = new Set([
   "noise",
   "delay",
   "drone",
+  "filter.enabled",
+  "signalMode",
+  "follower.attack",
+  "follower.release",
   "filter.type",
   "filter.cutoff",
   "filter.resonance",
@@ -86,6 +93,8 @@ export const LINK_MIDI_PARAMETERS = new Set([
 export const defaultPatch = {
   patchName: "Visual FM Patch",
   maxVoices: DEFAULT_MAX_VOICES,
+  audioInputDeviceId: DEFAULT_AUDIO_DEVICE_ID,
+  audioOutputDeviceId: DEFAULT_AUDIO_DEVICE_ID,
   midiChannel: "all",
   midiInputId: "all",
   midiBindings: [],
@@ -95,8 +104,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8 },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8 },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8, audioInputGain: 1 },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8, audioInputGain: 1 },
   ],
   links: [
     {
@@ -109,6 +118,8 @@ export const defaultPatch = {
       velocitySensitivity: 0,
       modulationTarget: "phase",
       drone: false,
+      signalMode: "raw",
+      follower: { ...DEFAULT_LINK_FOLLOWER },
       filter: { ...DEFAULT_LINK_FILTER },
       envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
     },
@@ -123,6 +134,8 @@ export const defaultPatch = {
       velocitySensitivity: 1,
       modulationTarget: "amplitude",
       drone: false,
+      signalMode: "raw",
+      follower: { ...DEFAULT_LINK_FOLLOWER },
       filter: { ...DEFAULT_LINK_FILTER },
       envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },
     },
