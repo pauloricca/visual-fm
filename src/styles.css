@@ -55,6 +55,14 @@ select {
     radial-gradient(circle at 82% 76%, rgba(117, 208, 164, 0.11), transparent 34%),
     #0f1114;
   background-size: 28px 28px, 28px 28px, auto, auto, auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.stage * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .topbar {
@@ -119,6 +127,11 @@ select {
 
 .text-button.danger {
   color: #f0a8b4;
+}
+
+.text-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
 }
 
 .visually-hidden {
@@ -321,7 +334,7 @@ select {
 .wire-hit {
   fill: none;
   stroke: transparent;
-  stroke-width: 18;
+  stroke-width: 26;
   stroke-linecap: round;
   cursor: pointer;
 }
@@ -379,6 +392,7 @@ select {
   transform: translate(-50%, -50%);
   cursor: grab;
   pointer-events: auto;
+  touch-action: none;
   user-select: none;
   transition: border-color 220ms ease, box-shadow 220ms ease;
 }
@@ -425,20 +439,39 @@ select {
 .audio-anchor {
   position: absolute;
   left: 50%;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  cursor: crosshair;
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+  transition: opacity 120ms ease, box-shadow 120ms ease;
+}
+
+.anchor::after,
+.audio-anchor::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
   width: 18px;
   height: 18px;
   border: 3px solid #0e1114;
   border-radius: 50%;
   background: var(--blue);
   transform: translate(-50%, -50%);
-  cursor: crosshair;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease, box-shadow 120ms ease;
+  transition: box-shadow 120ms ease, width 120ms ease, height 120ms ease;
 }
 
 .anchor.input {
   top: 0;
+}
+
+.anchor.input::after {
   background: var(--rose);
 }
 
@@ -450,17 +483,21 @@ select {
 
 .anchor.output {
   bottom: 0;
-  background: var(--green);
   transform: translate(-50%, 50%);
 }
 
-.node:hover .anchor.output {
+.anchor.output::after {
+  background: var(--green);
+}
+
+.node:hover .anchor.output,
+.node.selected .anchor.output {
   opacity: 1;
   pointer-events: auto;
 }
 
-.anchor:hover,
-.audio-anchor:hover {
+.anchor:hover::after,
+.audio-anchor:hover::after {
   box-shadow: 0 0 0 5px rgba(117, 208, 164, 0.18);
 }
 
@@ -506,6 +543,9 @@ select {
 
 .audio-anchor {
   top: 0;
+}
+
+.audio-anchor::after {
   background: var(--amber);
 }
 
@@ -540,6 +580,8 @@ select {
 }
 
 .panel {
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   border-left: 1px solid rgba(255, 255, 255, 0.09);
   background: #15171b;
@@ -567,8 +609,46 @@ select {
   margin: 0 0 22px;
 }
 
+.panel-heading > div:first-child {
+  min-width: 0;
+}
+
 .panel-heading .panel-subtitle {
   margin-bottom: 0;
+}
+
+.panel-remove-footer {
+  position: sticky;
+  z-index: 4;
+  bottom: -22px;
+  margin: auto -22px -22px;
+  padding: 14px 22px 22px;
+  background:
+    linear-gradient(to top, #15171b 72%, rgba(21, 23, 27, 0));
+}
+
+.panel-remove-action {
+  width: 100%;
+  height: 42px;
+  border: 1px solid rgba(240, 168, 180, 0.32);
+  border-radius: 8px;
+  background: rgba(154, 65, 88, 0.22);
+  color: #f0a8b4;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 760;
+  padding: 0 14px;
+}
+
+.panel-remove-action:hover {
+  border-color: rgba(240, 168, 180, 0.54);
+  background: rgba(154, 65, 88, 0.32);
+  color: #ffd5dc;
+}
+
+.panel-remove-action:focus-visible {
+  outline: 2px solid rgba(240, 168, 180, 0.6);
+  outline-offset: 2px;
 }
 
 .panel-subtitle {
@@ -896,6 +976,13 @@ select {
   letter-spacing: 0;
 }
 
+.modal-error {
+  margin: -8px 0 16px;
+  color: #f0a8b4;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .modal-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
@@ -1008,6 +1095,8 @@ select {
   box-shadow: none;
   cursor: ew-resize;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
 
@@ -1090,6 +1179,8 @@ select {
   font-weight: 720;
   text-align: left;
   cursor: inherit;
+  user-select: none;
+  -webkit-user-select: none;
   transition: color 140ms ease, background 140ms ease;
   appearance: textfield;
   -moz-appearance: textfield;
@@ -1098,6 +1189,7 @@ select {
 .field .value-slider-input:read-only,
 .adsr-value.value-slider-input:read-only {
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .field .value-slider-input::-webkit-outer-spin-button,
@@ -1113,6 +1205,9 @@ select {
   background: rgba(5, 7, 10, 0.12);
   color: var(--text);
   caret-color: var(--green);
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .value-slider--vertical .value-slider-input {

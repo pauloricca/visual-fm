@@ -60,6 +60,10 @@ const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 
+function audioContextConstructor() {
+  return window.AudioContext || window.webkitAudioContext;
+}
+
 const state = {
   ...loadPatch(),
   selected: { type: null, id: null },
@@ -964,6 +968,28 @@ function stagePoint(clientX, clientY) {
   };
 }
 
+function captureStagePointer(pointerId) {
+  try {
+    stage.setPointerCapture?.(pointerId);
+  } catch {
+    // Pointer capture can fail if the browser has already cancelled the contact.
+  }
+}
+
+function releaseStagePointer(pointerId) {
+  try {
+    if (!stage.hasPointerCapture || stage.hasPointerCapture(pointerId)) {
+      stage.releasePointerCapture?.(pointerId);
+    }
+  } catch {
+    // The pointer may already be gone after a touch cancellation.
+  }
+}
+
+function isPrimaryDragPointer(event) {
+  return event.isPrimary || !event.pointerType || event.pointerType === "mouse";
+}
+
 function nodeOutputPoint(id) {
   const node = nodeById(id);
   return { x: node.x, y: node.y + 43 };
@@ -1355,12 +1381,46 @@ async function ensureAudio() {
   return audioReadyPromise;
 }
 
+function createAudioContext() {
+  const AudioContextConstructor = audioContextConstructor();
+  if (!AudioContextConstructor) {
+    throw new Error("Web Audio is not supported in this browser.");
+  }
+  return new AudioContextConstructor();
+}
+
+async function resumeAudioContext() {
+  if (!audioContext || audioContext.state === "running") return;
+  await audioContext.resume();
+}
+
+function audioEnableErrorMessage(error) {
+  if (!audioContextConstructor()) {
+    return "This browser does not support Web Audio.";
+  }
+  if (audioContext && !audioContext.audioWorklet?.addModule) {
+    if (!window.isSecureContext) {
+      return "AudioWorklet needs HTTPS on iOS. Open this page from a secure URL.";
+    }
+    return "This browser does not support AudioWorklet.";
+  }
+  if (error?.name === "NotAllowedError") {
+    return "Audio was blocked. Tap Enable audio again.";
+  }
+  return "Audio could not start. Tap Enable audio again.";
+}
+
 async function setupAudio() {
   if (!audioContext) {
-    audioContext = new AudioContext();
+    audioContext = createAudioContext();
   }
 
+  await resumeAudioContext();
+
   if (!synthNode) {
+    if (!audioContext.audioWorklet?.addModule) {
+      throw new Error("AudioWorklet is not supported in this browser.");
+    }
     await audioContext.audioWorklet.addModule(AUDIO_WORKLET_MODULE_URL);
     synthNode = new AudioWorkletNode(audioContext, "visual-fm-engine", {
       numberOfInputs: 1,
@@ -1380,9 +1440,7 @@ async function setupAudio() {
     synthNode.connect(recorderDestination);
   }
 
-  if (audioContext.state !== "running") {
-    await audioContext.resume();
-  }
+  await resumeAudioContext();
   await syncAudioOutputDevice();
   let inputBlocked = false;
   if (patchUsesAudioInput()) {
@@ -1453,6 +1511,7 @@ function showAudioEnableModal() {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="audioEnableHeading">
       <h2 id="audioEnableHeading">Visual FM</h2>
+      <p class="modal-error" id="audioEnableError" role="alert" hidden></p>
       <div class="modal-actions">
         <button class="text-button primary" id="enableAudioButton" type="button">Enable audio</button>
       </div>
@@ -1460,14 +1519,38 @@ function showAudioEnableModal() {
   `;
   document.body.appendChild(overlay);
 
-  overlay.querySelector("#enableAudioButton").addEventListener("click", async () => {
+  const enableButton = overlay.querySelector("#enableAudioButton");
+  const errorMessage = overlay.querySelector("#audioEnableError");
+  const enableButtonLabel = enableButton.textContent;
+  let enabling = false;
+
+  const handleEnableAudio = async () => {
+    if (enabling) return;
+    enabling = true;
+    enableButton.disabled = true;
+    enableButton.textContent = "Enabling...";
+    errorMessage.hidden = true;
     try {
       await ensureAudio();
       overlay.remove();
-    } catch {
-      setAudioStatusLabel("Audio blocked");
+    } catch (error) {
+      console.error("Could not enable audio", error);
+      const message = audioEnableErrorMessage(error);
+      errorMessage.textContent = message;
+      errorMessage.hidden = false;
+      setAudioStatusLabel(message);
+      enableButton.disabled = false;
+      enableButton.textContent = enableButtonLabel;
+      enabling = false;
     }
+  };
+
+  enableButton.addEventListener("pointerup", handleEnableAudio);
+  enableButton.addEventListener("touchend", (event) => {
+    event.preventDefault();
+    handleEnableAudio();
   });
+  enableButton.addEventListener("click", handleEnableAudio);
 }
 
 function setRecordingButtonState(isRecording) {
@@ -1690,11 +1773,11 @@ function renderWires() {
     anchor.dataset.midiTargetId = link.id;
     anchorHit.setAttribute("cx", geometry.midpoint.x);
     anchorHit.setAttribute("cy", geometry.midpoint.y);
-    anchorHit.setAttribute("r", "22");
+    anchorHit.setAttribute("r", "34");
     anchorHit.setAttribute("class", "link-anchor-hit");
     anchorDot.setAttribute("cx", geometry.midpoint.x);
     anchorDot.setAttribute("cy", geometry.midpoint.y);
-    anchorDot.setAttribute("r", "8");
+    anchorDot.setAttribute("r", "10");
     anchorDot.setAttribute("class", "link-anchor-dot");
     anchor.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1772,14 +1855,37 @@ function drawAdsr(envelope) {
   `;
 }
 
+function panelRemoveAction(label) {
+  return `
+    <div class="panel-remove-footer">
+      <button class="panel-remove-action" type="button" aria-label="${escapeHtml(label)}">
+        Remove
+      </button>
+    </div>
+  `;
+}
+
+function attachPanelRemoveAction() {
+  panel.querySelector(".panel-remove-action")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    removeSelectedElements();
+  });
+}
+
 function renderPanel() {
   const selection = state.selected;
   if (selection.type === "nodes") {
     const count = selectedNodeIds().length;
     panel.innerHTML = `
-      <h1>${count} nodes selected</h1>
-      <p class="panel-subtitle">Drag any selected node to move the group.</p>
+      <div class="panel-heading">
+        <div>
+          <h1>${count} nodes selected</h1>
+          <p class="panel-subtitle">Drag any selected node to move the group.</p>
+        </div>
+      </div>
+      ${panelRemoveAction(`Remove ${count} selected nodes`)}
     `;
+    attachPanelRemoveAction();
     return;
   }
 
@@ -1798,8 +1904,12 @@ function renderPanel() {
     const audioInputGainValue = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
 
     panel.innerHTML = `
-      <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
-      <p class="panel-subtitle">Oscillator</p>
+      <div class="panel-heading">
+        <div>
+          <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
+          <p class="panel-subtitle">Oscillator</p>
+        </div>
+      </div>
       <div class="field">
         <label for="nodeName">Name</label>
         <input id="nodeName" type="text" value="${escapeHtml(nodeName(node))}" autocomplete="off">
@@ -1844,8 +1954,10 @@ function renderPanel() {
           </div>
         </div>
       ` : ""}
+      ${panelRemoveAction(`Remove ${nodeName(node)}`)}
     `;
 
+    attachPanelRemoveAction();
     panel.querySelector("#nodeName").addEventListener("input", (event) => {
       node.name = event.target.value;
       panel.querySelector("#nodeHeading").textContent = nodeName(node);
@@ -2072,8 +2184,10 @@ function renderPanel() {
         </div>
         ${filterControls}
       </section>
+      ${panelRemoveAction("Remove selected link")}
     `;
     updateSelectedLinkMeter();
+    attachPanelRemoveAction();
 
     bindNumberPair("amount", "amountRange", 0, amountMax, (value) => {
       link.amount = value;
@@ -2479,10 +2593,6 @@ function bindNumberPair(numberId, rangeId, min, max, onValue) {
   enhanceValueSlider(number, range, min, max, step);
   number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false }));
   number.addEventListener("focus", (event) => event.target.select());
-  number.addEventListener("pointerup", (event) => {
-    event.preventDefault();
-    event.target.select();
-  });
   number.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       commitValue(event.currentTarget.value);
@@ -3355,6 +3465,27 @@ function removeLink(id) {
   savePatch();
 }
 
+function removeSelectedElements() {
+  if (state.selected.type === "node" && state.selected.id) {
+    removeNode(state.selected.id);
+    return true;
+  }
+
+  if (state.selected.type === "nodes") {
+    const ids = selectedNodeIds();
+    if (!ids.length) return false;
+    removeNodes(ids);
+    return true;
+  }
+
+  if (state.selected.type === "link" && state.selected.id) {
+    removeLink(state.selected.id);
+    return true;
+  }
+
+  return false;
+}
+
 function upsertLink(from, to) {
   const existing = state.links.find((link) => link.from === from && link.to === to);
   if (existing) {
@@ -3388,6 +3519,8 @@ function upsertLink(from, to) {
 }
 
 function onNodePointerDown(event) {
+  if (event.button !== 0 || !isPrimaryDragPointer(event)) return;
+
   const anchor = event.target.closest("[data-anchor]");
   const nodeElement = event.currentTarget;
   const nodeId = nodeElement.dataset.nodeId;
@@ -3398,11 +3531,15 @@ function onNodePointerDown(event) {
   if (anchor?.dataset.anchor === "output") {
     event.stopPropagation();
     linkDrag = {
+      pointerId: event.pointerId,
       from: nodeId,
       to: stagePoint(event.clientX, event.clientY),
     };
+    captureStagePointer(event.pointerId);
     window.addEventListener("pointermove", onLinkPointerMove);
-    window.addEventListener("pointerup", onLinkPointerUp, { once: true });
+    window.addEventListener("pointerup", onLinkPointerEnd);
+    window.addEventListener("pointercancel", onLinkPointerEnd);
+    stage.addEventListener("lostpointercapture", onLinkPointerEnd);
     renderWires();
     return;
   }
@@ -3421,6 +3558,7 @@ function onNodePointerDown(event) {
   const sourceIds = isNodeSelected(nodeId) ? selectedNodeIds() : [nodeId];
   const ids = event.altKey ? duplicateNodes(sourceIds).copies.map((node) => node.id) : sourceIds;
   dragState = {
+    pointerId: event.pointerId,
     nodes: ids.map((id) => {
       const node = nodeById(id);
       return {
@@ -3430,15 +3568,18 @@ function onNodePointerDown(event) {
       };
     }),
   };
+  captureStagePointer(event.pointerId);
   window.addEventListener("pointermove", onNodePointerMove);
-  window.addEventListener("pointerup", onNodePointerUp, { once: true });
+  window.addEventListener("pointerup", onNodePointerEnd);
+  window.addEventListener("pointercancel", onNodePointerEnd);
+  stage.addEventListener("lostpointercapture", onNodePointerEnd);
   if (!event.altKey && !isNodeSelected(nodeId)) {
     select("node", nodeId);
   }
 }
 
 function onNodePointerMove(event) {
-  if (!dragState) return;
+  if (!dragState || event.pointerId !== dragState.pointerId) return;
   const point = stagePoint(event.clientX, event.clientY);
   const rect = stage.getBoundingClientRect();
   for (const item of dragState.nodes) {
@@ -3450,40 +3591,54 @@ function onNodePointerMove(event) {
   scheduleNodesAndWiresRender();
 }
 
-function onNodePointerUp() {
+function onNodePointerEnd(event) {
+  if (!dragState || event.pointerId !== dragState.pointerId) return;
+  const pointerId = dragState.pointerId;
   if (dragState) {
     savePatch();
   }
   dragState = null;
   window.removeEventListener("pointermove", onNodePointerMove);
+  window.removeEventListener("pointerup", onNodePointerEnd);
+  window.removeEventListener("pointercancel", onNodePointerEnd);
+  stage.removeEventListener("lostpointercapture", onNodePointerEnd);
+  releaseStagePointer(pointerId);
 }
 
 function onLinkPointerMove(event) {
-  if (!linkDrag) return;
+  if (!linkDrag || event.pointerId !== linkDrag.pointerId) return;
   linkDrag.to = stagePoint(event.clientX, event.clientY);
   scheduleWiresRender();
 }
 
-function onLinkPointerUp(event) {
-  if (!linkDrag) return;
-  const targets = document.elementsFromPoint(event.clientX, event.clientY);
-  const target = targets[0];
-  const inputAnchor = target?.closest?.(".anchor.input");
-  const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
-  const linkAnchor = targets
-    .map((item) => item.closest?.(".link-anchor.input"))
-    .find(Boolean);
+function onLinkPointerEnd(event) {
+  if (!linkDrag || event.pointerId !== linkDrag.pointerId) return;
+  const pointerId = linkDrag.pointerId;
 
-  if (inputAnchor?.dataset.nodeId) {
-    upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
-  } else if (linkAnchor?.dataset.linkId) {
-    upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
-  } else if (audioAnchor) {
-    upsertLink(linkDrag.from, "audio");
+  if (event.type === "pointerup") {
+    const targets = document.elementsFromPoint(event.clientX, event.clientY);
+    const target = targets[0];
+    const inputAnchor = target?.closest?.(".anchor.input");
+    const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
+    const linkAnchor = targets
+      .map((item) => item.closest?.(".link-anchor.input"))
+      .find(Boolean);
+
+    if (inputAnchor?.dataset.nodeId) {
+      upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+    } else if (linkAnchor?.dataset.linkId) {
+      upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
+    } else if (audioAnchor) {
+      upsertLink(linkDrag.from, "audio");
+    }
   }
 
   linkDrag = null;
   window.removeEventListener("pointermove", onLinkPointerMove);
+  window.removeEventListener("pointerup", onLinkPointerEnd);
+  window.removeEventListener("pointercancel", onLinkPointerEnd);
+  stage.removeEventListener("lostpointercapture", onLinkPointerEnd);
+  releaseStagePointer(pointerId);
   renderWires();
 }
 
@@ -3509,22 +3664,27 @@ function trackValueEditExitClick(event) {
 
 function onStagePointerDown(event) {
   if (event.button !== 0 || !isEmptyCanvasTarget(event.target)) return;
+  if (!isPrimaryDragPointer(event)) return;
   if (preserveSelectionAfterValueEditClick) return;
 
   const point = stagePoint(event.clientX, event.clientY);
   marqueeState = {
+    pointerId: event.pointerId,
     active: true,
     moved: false,
     start: point,
     current: point,
   };
+  captureStagePointer(event.pointerId);
   renderSelectionRect();
   window.addEventListener("pointermove", onMarqueePointerMove);
-  window.addEventListener("pointerup", onMarqueePointerUp, { once: true });
+  window.addEventListener("pointerup", onMarqueePointerEnd);
+  window.addEventListener("pointercancel", onMarqueePointerEnd);
+  stage.addEventListener("lostpointercapture", onMarqueePointerEnd);
 }
 
 function onMarqueePointerMove(event) {
-  if (!marqueeState) return;
+  if (!marqueeState || event.pointerId !== marqueeState.pointerId) return;
 
   marqueeState.current = stagePoint(event.clientX, event.clientY);
   const bounds = selectionBounds(marqueeState.start, marqueeState.current);
@@ -3545,14 +3705,19 @@ function onMarqueePointerMove(event) {
   }
 }
 
-function onMarqueePointerUp() {
-  if (!marqueeState) return;
+function onMarqueePointerEnd(event) {
+  if (!marqueeState || event.pointerId !== marqueeState.pointerId) return;
 
-  const shouldSelect = marqueeState.moved;
+  const pointerId = marqueeState.pointerId;
+  const shouldSelect = event.type === "pointerup" && marqueeState.moved;
   const ids = shouldSelect ? nodesInsideSelection() : [];
   marqueeState = null;
   renderSelectionRect();
   window.removeEventListener("pointermove", onMarqueePointerMove);
+  window.removeEventListener("pointerup", onMarqueePointerEnd);
+  window.removeEventListener("pointercancel", onMarqueePointerEnd);
+  stage.removeEventListener("lostpointercapture", onMarqueePointerEnd);
+  releaseStagePointer(pointerId);
 
   if (shouldSelect) {
     suppressNextStageClick = true;
@@ -3656,19 +3821,10 @@ window.addEventListener("resize", onStageResize);
 
 window.addEventListener("keydown", (event) => {
   if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
-  if ((event.key === "Backspace" || event.key === "Delete") && state.selected.id) {
+  if (event.key === "Backspace" || event.key === "Delete") {
+    const removed = removeSelectedElements();
+    if (!removed) return;
     event.preventDefault();
-    if (state.selected.type === "node") {
-      removeNode(state.selected.id);
-    } else if (state.selected.type === "link") {
-      removeLink(state.selected.id);
-    }
-    return;
-  }
-
-  if ((event.key === "Backspace" || event.key === "Delete") && state.selected.type === "nodes") {
-    event.preventDefault();
-    removeNodes(selectedNodeIds());
     return;
   }
 

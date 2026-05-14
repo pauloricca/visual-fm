@@ -1,4 +1,5 @@
 .git
+.certs
 .DS_Store
 node_modules
 dist
