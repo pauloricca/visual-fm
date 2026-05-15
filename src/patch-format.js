@@ -6,9 +6,12 @@ export function patchFileName(patchName, date = new Date()) {
 }
 
 export function downloadPatchFile(patch) {
-  const yaml = `# Visual FM patch\n# visual-fm-json: ${encodePatchJson(patch)}\n${toYaml(patch)}\n`;
-  const blob = new Blob([yaml], { type: "application/x-yaml" });
+  const blob = new Blob([patchFileText(patch)], { type: "application/x-yaml" });
   downloadBlob(blob, patchFileName(patch.patchName));
+}
+
+export function patchFileText(patch) {
+  return `# Visual FM patch\n# visual-fm-json: ${encodePatchJson(patch)}\n${toYaml(patch)}\n`;
 }
 
 export function parsePatchFile(text) {

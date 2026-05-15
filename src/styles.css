@@ -87,6 +87,14 @@ select {
 .brand {
   font-weight: 720;
   letter-spacing: 0;
+  min-width: 0;
+  max-width: min(48vw, 620px);
+}
+
+#appTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand-mark {
@@ -206,6 +214,13 @@ select {
   padding-bottom: 3px;
 }
 
+.icon-button.compact {
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
 .record-button {
   background: rgba(20, 22, 26, 0.78);
   backdrop-filter: blur(14px);
@@ -231,6 +246,28 @@ select {
 
 .record-button.recording .record-dot {
   animation: recordBlink 1s steps(2, start) infinite;
+}
+
+.record-button.saved {
+  width: 58px;
+  border-color: rgba(117, 208, 164, 0.54);
+  background: rgba(117, 208, 164, 0.18);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.record-button.saved .record-dot {
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.record-button.saved .record-dot::before {
+  content: "Saved";
 }
 
 @keyframes recordBlink {
@@ -289,6 +326,10 @@ select {
 
 .wire.feedback {
   stroke: var(--line);
+}
+
+.wire.metered {
+  transition: filter 220ms ease;
 }
 
 .wire.selected {
@@ -903,6 +944,10 @@ select {
   font-weight: 720;
 }
 
+.panel-empty > .toggle-row {
+  margin: 0 0 18px;
+}
+
 .toggle-field {
   display: flex;
   align-items: center;
@@ -992,6 +1037,94 @@ select {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 10px;
+}
+
+.patch-library-modal {
+  width: min(680px, 100%);
+}
+
+.patch-library-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 18px;
+}
+
+.patch-library-heading h2 {
+  margin: 0;
+}
+
+.patch-library-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin: 0 0 18px;
+}
+
+.patch-library-column {
+  min-width: 0;
+}
+
+.patch-library-column h3 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.patch-library-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  height: min(330px, 42vh);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.patch-library-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.patch-library-row:hover {
+  border-color: rgba(117, 208, 164, 0.26);
+}
+
+.patch-library-row.selected {
+  border-color: rgba(117, 208, 164, 0.54);
+  background: rgba(117, 208, 164, 0.14);
+}
+
+.patch-library-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.patch-library-row small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.patch-library-empty {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .midi-range-row {

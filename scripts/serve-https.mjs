@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { extname, join, normalize, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces } from "node:os";
+import { createAppRequestHandler } from "./app-handler.mjs";
 
 const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const certDir = join(rootDir, ".certs");
 const host = process.env.HOST || "0.0.0.0";
-const port = Number(process.env.PORT || 8843);
+const httpPort = Number(process.env.HTTP_PORT || 8839);
+const port = Number(process.env.HTTPS_PORT || process.env.PORT || 8843);
 const certPort = Number(process.env.CERT_PORT || 8844);
 
 const rootKeyPath = join(certDir, "visual-fm-dev-root.key");
@@ -22,16 +24,6 @@ const serverCertPath = join(certDir, "visual-fm-dev-server.crt");
 const serverReqConfigPath = join(certDir, "server-req.conf");
 const serverExtConfigPath = join(certDir, "server-ext.conf");
 const rootConfigPath = join(certDir, "root.conf");
-
-const mimeTypes = new Map([
-  [".css", "text/css; charset=utf-8"],
-  [".html", "text/html; charset=utf-8"],
-  [".js", "text/javascript; charset=utf-8"],
-  [".json", "application/json; charset=utf-8"],
-  [".map", "application/json; charset=utf-8"],
-  [".svg", "image/svg+xml"],
-  [".wav", "audio/wav"],
-]);
 
 function localIPv4Addresses() {
   return Object.values(networkInterfaces())
@@ -161,37 +153,6 @@ function ensureCertificates(addresses) {
   generateServerCertificate(addresses);
 }
 
-function safeFilePath(pathname) {
-  const requestedPath = pathname === "/" ? "/index.html" : pathname;
-  const decodedPath = decodeURIComponent(requestedPath);
-  const normalizedPath = normalize(decodedPath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = join(rootDir, normalizedPath);
-  const relativePath = relative(rootDir, filePath);
-  const pathParts = relativePath.split(sep);
-
-  if (relativePath.startsWith("..") || relativePath.includes(`..${sep}`) || pathParts.some((part) => part.startsWith("."))) {
-    return null;
-  }
-  return filePath;
-}
-
-function handleAppRequest(request, response) {
-  const url = new URL(request.url, `https://${request.headers.host || "localhost"}`);
-  const filePath = safeFilePath(url.pathname);
-
-  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    response.end("Not found\n");
-    return;
-  }
-
-  response.writeHead(200, {
-    "content-type": mimeTypes.get(extname(filePath)) || "application/octet-stream",
-    "cache-control": "no-store",
-  });
-  createReadStream(filePath).pipe(response);
-}
-
 function handleCertificateRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
@@ -225,14 +186,17 @@ function listen(server, serverHost, serverPort) {
 const lanAddresses = localIPv4Addresses();
 ensureCertificates(lanAddresses);
 
+const appHandler = createAppRequestHandler(rootDir);
+const httpServer = createHttpServer(appHandler);
 const httpsServer = createHttpsServer({
   key: readFileSync(serverKeyPath),
   cert: readFileSync(serverCertPath),
-}, handleAppRequest);
+}, appHandler);
 
 const certServer = createHttpServer(handleCertificateRequest);
 
 try {
+  await listen(httpServer, host, httpPort);
   await listen(httpsServer, host, port);
   await listen(certServer, host, certPort);
 } catch (error) {
@@ -241,12 +205,13 @@ try {
 }
 
 const appUrls = [
+  `http://localhost:${httpPort}/`,
   `https://localhost:${port}/`,
   ...lanAddresses.map((address) => `https://${address}:${port}/`),
 ];
 const certUrls = lanAddresses.map((address) => `http://${address}:${certPort}/visual-fm-dev-root.crt`);
 
-console.log("Visual FM HTTPS dev server");
+console.log("Visual FM dev server");
 console.log("");
 console.log("App URLs:");
 for (const url of appUrls) console.log(`  ${url}`);

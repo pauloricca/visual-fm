@@ -1,9 +1,11 @@
 services:
   visual-fm:
     build: .
-    command: ["python", "-m", "http.server", "8839", "--bind", "0.0.0.0"]
+    command: ["node", "scripts/serve.mjs"]
     ports:
       - "8839:8839"
+      - "8843:8843"
+      - "8844:8844"
     volumes:
-      - .:/app:ro
+      - .:/app
     restart: unless-stopped

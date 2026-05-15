@@ -41,6 +41,7 @@ export function normalizePatch(patch) {
     : "all";
   const audioInputDeviceId = normalizeAudioDeviceId(source.audioInputDeviceId);
   const audioOutputDeviceId = normalizeAudioDeviceId(source.audioOutputDeviceId);
+  const linkSignalGradientMeters = Boolean(source.linkSignalGradientMeters);
   const nodeIdMap = new Map();
   const linkIdMap = new Map();
   const nodes = source.nodes.map((node, index) => {
@@ -119,6 +120,7 @@ export function normalizePatch(patch) {
     maxVoices,
     audioInputDeviceId,
     audioOutputDeviceId,
+    linkSignalGradientMeters,
     midiChannel,
     midiInputId,
     midiBindings: normalizeMidiBindings(source.midiBindings, nodes, links, nodeIdMap, linkIdMap),

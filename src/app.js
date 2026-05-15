@@ -23,7 +23,7 @@ import {
   WAVE_TYPES,
   keyMap,
 } from "./constants.js";
-import { downloadPatchFile, parsePatchFile } from "./patch-format.js";
+import { parsePatchFile, patchFileText } from "./patch-format.js";
 import {
   linkHasPan,
   normalizeDefaultPatch,
@@ -36,18 +36,16 @@ import {
   alphaName,
   clamp,
   clonePatch,
-  downloadBlob,
   escapeHtml,
   isPitchedWave,
   isSpeedWave,
-  slugifyPatchName,
-  timestampForFile,
 } from "./utils.js";
 
 const stage = document.querySelector("#stage");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
+const appTitle = document.querySelector("#appTitle");
 const addNodeButton = document.querySelector("#addNodeButton");
 const recordButton = document.querySelector("#recordButton");
 const audioOut = document.querySelector("#audioOut");
@@ -80,8 +78,15 @@ const AUDIO_BACKENDS = {
   },
 };
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
+const LINK_AMOUNT_SLIDER_MAX = 8;
+const LINK_AMOUNT_INPUT_MAX = 32;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
+const WIRE_METER_COLORS = {
+  default: [143, 117, 216],
+  output: [224, 164, 63],
+  linkMod: [111, 165, 232],
+};
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -120,6 +125,7 @@ let mediaRecorder = null;
 let recordingChunks = [];
 let recordingStartedAt = null;
 let recordingStarting = false;
+let recordingSavedTimer = null;
 let audioMuted = false;
 let audioBackend = loadAudioBackend();
 let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
@@ -152,6 +158,7 @@ let preserveSelectionAfterValueEditClick = false;
 let touchFineSliderPointerId = null;
 let keyboardFineSliderActive = false;
 let availableAudioDevices = { inputs: [], outputs: [] };
+let patchLibrary = null;
 
 syncCounters();
 pruneMidiBindings();
@@ -221,6 +228,7 @@ function currentPatchData() {
     maxVoices: state.maxVoices,
     audioInputDeviceId: state.audioInputDeviceId,
     audioOutputDeviceId: state.audioOutputDeviceId,
+    linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
     midiBindings: state.midiBindings,
@@ -340,7 +348,7 @@ function nodeParameterDefinitions(node) {
 function linkParameterDefinitions(link) {
   const targetNameLabel = targetName(link.to);
   const modulationTargets = modulationTargetsForLink(link);
-  const amountMax = link.modulationTarget === "mix" ? 1 : 8;
+  const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
   const definitions = [
     ...(modulationTargets.length ? [{
       id: "modulationTarget",
@@ -1333,6 +1341,7 @@ function scheduleLinkMeterPaint() {
   pendingLinkMeterFrame = requestAnimationFrame(() => {
     pendingLinkMeterFrame = null;
     updateSelectedLinkMeter();
+    if (state.linkSignalGradientMeters) updateWireSignalMeters();
   });
 }
 
@@ -1367,6 +1376,39 @@ function updateSelectedLinkMeter() {
   if (inputFill) inputFill.style.transform = `scaleY(${clamp(levels.input || 0, 0, 1)})`;
   if (outputFill) outputFill.style.transform = `scaleY(${clamp(levels.output || 0, 0, 1)})`;
   if (envelopeFill) envelopeFill.style.transform = `scaleY(${clamp(levels.envelope || 0, 0, 1)})`;
+}
+
+function wireMeterGradientId(linkId) {
+  return `wire-signal-meter-${linkId}`;
+}
+
+function wireMeterBaseColor(link) {
+  if (linkById(link.to)) return WIRE_METER_COLORS.linkMod;
+  if (link.to === "audio") return WIRE_METER_COLORS.output;
+  return WIRE_METER_COLORS.default;
+}
+
+function wireMeterColor(baseColor, level) {
+  const brightness = 0.22 + clamp(level || 0, 0, 1) * 1.18;
+  const color = baseColor.map((channel) => Math.round(clamp(channel * brightness, 18, 255)));
+  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+function setWireMeterStopColor(stop, baseColor, level) {
+  if (stop) stop.setAttribute("stop-color", wireMeterColor(baseColor, level));
+}
+
+function updateWireSignalMeter(link) {
+  const gradient = wireLayer.querySelector(`#${CSS.escape(wireMeterGradientId(link.id))}`);
+  if (!gradient) return;
+  const levels = linkMeterLevels.get(link.id) || { input: 0, output: 0 };
+  const baseColor = wireMeterBaseColor(link);
+  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='input']"), baseColor, levels.input);
+  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='output']"), baseColor, levels.output);
+}
+
+function updateWireSignalMeters() {
+  for (const link of state.links) updateWireSignalMeter(link);
 }
 
 function syncOutputMute() {
@@ -1643,13 +1685,42 @@ function showAudioEnableModal() {
 }
 
 function setRecordingButtonState(isRecording) {
+  if (isRecording) {
+    clearTimeout(recordingSavedTimer);
+    recordButton.classList.remove("saved");
+  }
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-label", isRecording ? "Stop recording" : "Start recording");
   recordButton.title = isRecording ? "Stop recording" : "Start recording";
 }
 
-function recordingFileName(date = new Date()) {
-  return `${slugifyPatchName(state.patchName || "visual-fm-patch")}-${timestampForFile(date)}.wav`;
+function showRecordingSavedState() {
+  clearTimeout(recordingSavedTimer);
+  recordButton.classList.remove("recording");
+  recordButton.classList.add("saved");
+  recordButton.setAttribute("aria-label", "Recording saved");
+  recordButton.title = "Recording saved";
+  recordingSavedTimer = window.setTimeout(() => {
+    recordButton.classList.remove("saved");
+    recordButton.setAttribute("aria-label", "Start recording");
+    recordButton.title = "Start recording";
+    recordingSavedTimer = null;
+  }, 1200);
+}
+
+async function saveRecordingToServer(wavBlob) {
+  const response = await fetch("/api/recordings", {
+    method: "POST",
+    headers: {
+      "content-type": "audio/wav",
+      "x-recording-started-at": (recordingStartedAt || new Date()).toISOString(),
+    },
+    body: wavBlob,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Recording save failed (${response.status}).`);
+  }
 }
 
 async function exportRecording() {
@@ -1658,7 +1729,7 @@ async function exportRecording() {
 
   const arrayBuffer = await sourceBlob.arrayBuffer();
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-  downloadBlob(audioBufferToWav(decoded), recordingFileName(recordingStartedAt || new Date()));
+  await saveRecordingToServer(audioBufferToWav(decoded));
 }
 
 async function startRecording() {
@@ -1689,8 +1760,9 @@ async function startRecording() {
     setRecordingButtonState(false);
     try {
       await exportRecording();
+      showRecordingSavedState();
     } catch (error) {
-      alert(`Could not export recording: ${error.message}`);
+      alert(`Could not save recording: ${error.message}`);
     } finally {
       recordButton.disabled = false;
       mediaRecorder = null;
@@ -1833,6 +1905,10 @@ function renderWires() {
   stage.classList.toggle("link-dragging", Boolean(linkDrag));
   wireLayer.innerHTML = "";
   const geometryContext = {};
+  const defs = state.linkSignalGradientMeters
+    ? document.createElementNS("http://www.w3.org/2000/svg", "defs")
+    : null;
+  if (defs) wireLayer.appendChild(defs);
 
   for (const link of state.links) {
     const geometry = linkGeometry(link, new Set(), geometryContext);
@@ -1846,6 +1922,25 @@ function renderWires() {
 
     visible.setAttribute("d", geometry.path);
     visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    if (defs) {
+      const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
+      const inputStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+      const outputStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+      gradient.id = wireMeterGradientId(link.id);
+      gradient.setAttribute("gradientUnits", "userSpaceOnUse");
+      gradient.setAttribute("x1", geometry.from.x);
+      gradient.setAttribute("y1", geometry.from.y);
+      gradient.setAttribute("x2", geometry.to.x);
+      gradient.setAttribute("y2", geometry.to.y);
+      inputStop.setAttribute("offset", "0%");
+      inputStop.dataset.wireMeterStop = "input";
+      outputStop.setAttribute("offset", "100%");
+      outputStop.dataset.wireMeterStop = "output";
+      gradient.append(inputStop, outputStop);
+      defs.appendChild(gradient);
+      visible.classList.add("metered");
+      visible.style.stroke = `url(#${wireMeterGradientId(link.id)})`;
+    }
     visible.dataset.midiTargetType = "link";
     visible.dataset.midiTargetId = link.id;
 
@@ -1869,6 +1964,7 @@ function renderWires() {
 
     group.append(visible, hit, anchor);
     wireLayer.appendChild(group);
+    if (defs) updateWireSignalMeter(link);
   }
 
   if (linkDrag) {
@@ -2116,7 +2212,8 @@ function renderPanel() {
     const to = targetName(link.to);
     const targetKind = linkTargetKind(link);
     const modulationTargets = modulationTargetsForLink(link);
-    const amountMax = link.modulationTarget === "mix" ? 1 : 8;
+    const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_SLIDER_MAX;
+    const amountInputMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
     const usesEnvelopeControls = !link.drone;
     const signalMode = normalizeSignalMode(link.signalMode);
     const usesFollowerControls = signalMode !== "raw";
@@ -2222,7 +2319,7 @@ function renderPanel() {
         ${parameterLabel("amount", "Amplitude", "link", link.id, "amount")}
         <div class="field-row">
           <input id="amountRange" type="range" min="0" max="${amountMax}" step="0.001" value="${clamp(link.amount, 0, amountMax)}">
-          <input id="amount" type="number" min="0" max="${amountMax}" step="0.001" value="${clamp(link.amount, 0, amountMax)}">
+          <input id="amount" type="number" min="0" max="${amountInputMax}" step="0.001" value="${clamp(link.amount, 0, amountInputMax)}">
         </div>
       </div>
       ${link.to === "audio" ? `
@@ -2275,7 +2372,7 @@ function renderPanel() {
       link.amount = value;
       sendLinkParam(link.id, "amount", value);
       schedulePatchSave();
-    });
+    }, { inputMax: amountInputMax });
 
     if (link.to === "audio") {
       bindNumberPair("pan", "panRange", -1, 1, (value) => {
@@ -2423,23 +2520,196 @@ function renderMasterEffectsPanel() {
   attachParameterMidiButtons();
 }
 
-function downloadPatch() {
-  downloadPatchFile(currentPatchData());
-}
-
-async function loadPatchFile(file) {
-  if (!file) return;
+async function savePatchToServer() {
+  const button = panel.querySelector("#savePatchButton");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Saving";
+  }
 
   try {
-    const text = await file.text();
-    const patch = parsePatchFile(text);
-    applyPatchData(patch);
+    const patch = currentPatchData();
+    const response = await fetch("/api/patches", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        patchName: patch.patchName,
+        content: patchFileText(patch),
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || `Save failed (${response.status}).`);
+    }
+    if (button) button.textContent = "Saved";
+    window.setTimeout(() => {
+      const currentButton = panel.querySelector("#savePatchButton");
+      if (currentButton) currentButton.textContent = "Save";
+    }, 900);
   } catch (error) {
-    alert(`Could not load patch: ${error.message}`);
+    alert(`Could not save patch: ${error.message}`);
+    if (button) button.textContent = "Save";
   } finally {
-    const input = panel.querySelector("#loadPatchInput");
-    if (input) input.value = "";
+    if (button) button.disabled = false;
   }
+}
+
+async function fetchSavedPatches() {
+  const response = await fetch("/api/patches", { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not list patches (${response.status}).`);
+  }
+  return Array.isArray(result.patches) ? result.patches : [];
+}
+
+async function loadSavedPatch(patchName, timestamp) {
+  const response = await fetch(`/api/patches/${encodeURIComponent(patchName)}/${encodeURIComponent(timestamp)}`, {
+    cache: "no-store",
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let error = text.trim();
+    try {
+      error = JSON.parse(text).error || error;
+    } catch {
+      // Plain text errors are also useful enough to show.
+    }
+    throw new Error(error || `Could not load patch (${response.status}).`);
+  }
+  applyPatchData(parsePatchFile(text));
+}
+
+async function openPatchLibrary() {
+  patchLibrary = {
+    patches: [],
+    selectedPatchName: null,
+    selectedTimestamp: null,
+    loading: true,
+    error: "",
+  };
+  renderPatchLibraryModal();
+
+  try {
+    const patches = await fetchSavedPatches();
+    patchLibrary.patches = patches;
+    patchLibrary.selectedPatchName = patches[0]?.name || null;
+    patchLibrary.selectedTimestamp = patches[0]?.timestamps?.[0] || null;
+    patchLibrary.loading = false;
+  } catch (error) {
+    patchLibrary.loading = false;
+    patchLibrary.error = error.message;
+  }
+  renderPatchLibraryModal();
+}
+
+function closePatchLibrary() {
+  document.querySelector("#patchLibraryModal")?.remove();
+  patchLibrary = null;
+}
+
+function renderPatchLibraryModal() {
+  if (!patchLibrary) return;
+
+  let backdrop = document.querySelector("#patchLibraryModal");
+  if (!backdrop) {
+    backdrop = document.createElement("div");
+    backdrop.id = "patchLibraryModal";
+    backdrop.className = "modal-backdrop";
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closePatchLibrary();
+    });
+    document.body.appendChild(backdrop);
+  }
+
+  const selectedPatch = patchLibrary.patches.find((patch) => patch.name === patchLibrary.selectedPatchName);
+  const timestamps = selectedPatch?.timestamps || [];
+  const canLoad = Boolean(patchLibrary.selectedPatchName && patchLibrary.selectedTimestamp);
+  const patchRows = patchLibrary.patches.length
+    ? patchLibrary.patches.map((patch) => `
+      <button
+        class="patch-library-row ${patch.name === patchLibrary.selectedPatchName ? "selected" : ""}"
+        type="button"
+        data-patch-name="${escapeHtml(patch.name)}"
+      >
+        <span>${escapeHtml(patch.name)}</span>
+        <small>${patch.timestamps.length}</small>
+      </button>
+    `).join("")
+    : `<p class="patch-library-empty">No server-saved patches yet.</p>`;
+  const timestampRows = timestamps.length
+    ? timestamps.map((timestamp) => `
+      <button
+        class="patch-library-row ${timestamp === patchLibrary.selectedTimestamp ? "selected" : ""}"
+        type="button"
+        data-timestamp="${escapeHtml(timestamp)}"
+      >
+        <span>${escapeHtml(formatSavedPatchTimestamp(timestamp))}</span>
+      </button>
+    `).join("")
+    : `<p class="patch-library-empty">Choose a patch name.</p>`;
+
+  backdrop.innerHTML = `
+    <div class="modal patch-library-modal" role="dialog" aria-modal="true" aria-labelledby="patchLibraryTitle">
+      <div class="patch-library-heading">
+        <h2 id="patchLibraryTitle">Load Patch</h2>
+        <button class="icon-button compact" id="closePatchLibraryButton" type="button" aria-label="Close" title="Close">x</button>
+      </div>
+      ${patchLibrary.error ? `<p class="modal-error">${escapeHtml(patchLibrary.error)}</p>` : ""}
+      ${patchLibrary.loading ? `<p class="patch-library-empty">Loading saved patches...</p>` : `
+        <div class="patch-library-grid">
+          <section class="patch-library-column" aria-label="Patch names">
+            <h3>Patch</h3>
+            <div class="patch-library-list">${patchRows}</div>
+          </section>
+          <section class="patch-library-column" aria-label="Saved timestamps">
+            <h3>Saved At</h3>
+            <div class="patch-library-list">${timestampRows}</div>
+          </section>
+        </div>
+      `}
+      <div class="modal-actions">
+        <button class="text-button" id="cancelPatchLibraryButton" type="button">Cancel</button>
+        <button class="text-button primary" id="confirmLoadPatchButton" type="button" ${canLoad ? "" : "disabled"}>Load</button>
+      </div>
+    </div>
+  `;
+
+  backdrop.querySelector("#closePatchLibraryButton").addEventListener("click", closePatchLibrary);
+  backdrop.querySelector("#cancelPatchLibraryButton").addEventListener("click", closePatchLibrary);
+  backdrop.querySelectorAll("[data-patch-name]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const patchName = button.dataset.patchName;
+      const patch = patchLibrary.patches.find((item) => item.name === patchName);
+      patchLibrary.selectedPatchName = patchName;
+      patchLibrary.selectedTimestamp = patch?.timestamps?.[0] || null;
+      renderPatchLibraryModal();
+    });
+  });
+  backdrop.querySelectorAll("[data-timestamp]").forEach((button) => {
+    button.addEventListener("click", () => {
+      patchLibrary.selectedTimestamp = button.dataset.timestamp;
+      renderPatchLibraryModal();
+    });
+  });
+  backdrop.querySelector("#confirmLoadPatchButton").addEventListener("click", async (event) => {
+    if (!patchLibrary.selectedPatchName || !patchLibrary.selectedTimestamp) return;
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = "Loading";
+    try {
+      await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
+      closePatchLibrary();
+    } catch (error) {
+      patchLibrary.error = error.message;
+      renderPatchLibraryModal();
+    }
+  });
+}
+
+function formatSavedPatchTimestamp(timestamp) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})(-\d+)?$/.exec(timestamp);
+  if (!match) return timestamp;
+  return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}${match[7] || ""}`;
 }
 
 function applyPatchData(patch) {
@@ -2448,6 +2718,7 @@ function applyPatchData(patch) {
   state.maxVoices = normalized.maxVoices;
   state.audioInputDeviceId = normalized.audioInputDeviceId;
   state.audioOutputDeviceId = normalized.audioOutputDeviceId;
+  state.linkSignalGradientMeters = normalized.linkSignalGradientMeters;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
   state.midiBindings = normalized.midiBindings;
@@ -2477,11 +2748,13 @@ function newPatch() {
   const midiInputId = state.midiInputId;
   const audioInputDeviceId = state.audioInputDeviceId;
   const audioOutputDeviceId = state.audioOutputDeviceId;
+  const linkSignalGradientMeters = state.linkSignalGradientMeters;
   const normalized = normalizeDefaultPatch();
   state.patchName = "Untitled Patch";
   state.maxVoices = normalized.maxVoices;
   state.audioInputDeviceId = audioInputDeviceId;
   state.audioOutputDeviceId = audioOutputDeviceId;
+  state.linkSignalGradientMeters = linkSignalGradientMeters;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
   state.midiBindings = normalized.midiBindings;
@@ -2652,18 +2925,19 @@ function adsrField(name, letter, label, value, min, max, linkId) {
   `;
 }
 
-function bindNumberPair(numberId, rangeId, min, max, onValue) {
+function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   const number = panel.querySelector(`#${numberId}`);
   const range = panel.querySelector(`#${rangeId}`);
   const step = valueSliderStep(number, range);
+  const inputMax = Number.isFinite(options.inputMax) ? options.inputMax : max;
 
-  const commitValue = (rawValue, { updateNumber = true } = {}) => {
+  const commitValue = (rawValue, { updateNumber = true, valueMax = max } = {}) => {
     if (rawValue === "" || rawValue === "." || rawValue === "-") return;
 
     const parsed = Number(rawValue);
     if (!Number.isFinite(parsed)) return;
 
-    const value = snapValueSliderValue(parsed, min, max, step);
+    const value = snapValueSliderValue(parsed, min, valueMax, step);
     if (updateNumber) {
       syncValueSliderNumber(number, range, value);
     }
@@ -2673,15 +2947,15 @@ function bindNumberPair(numberId, rangeId, min, max, onValue) {
   };
 
   enhanceValueSlider(number, range, min, max, step);
-  number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false }));
+  number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false, valueMax: inputMax }));
   number.addEventListener("focus", (event) => event.target.select());
   number.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      commitValue(event.currentTarget.value);
+      commitValue(event.currentTarget.value, { valueMax: inputMax });
       event.currentTarget.blur();
     }
   });
-  number.addEventListener("blur", (event) => commitValue(event.target.value));
+  number.addEventListener("blur", (event) => commitValue(event.target.value, { valueMax: inputMax }));
   range.addEventListener("input", (event) => commitValue(event.target.value));
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }
@@ -2714,16 +2988,16 @@ function enhanceValueSlider(number, range, min, max, step) {
   number.addEventListener("focus", () => {
     control.classList.add("is-editing");
     number.readOnly = false;
-    number.value = formatEditableValue(Number(range.value), step);
+    number.value = formatEditableValue(Number(number.value), step);
   });
   number.addEventListener("blur", () => {
     control.classList.remove("is-editing");
     number.readOnly = true;
-    syncValueSliderNumber(number, range, Number(range.value));
+    syncValueSliderNumber(number, range, Number(number.value));
   });
 
   syncValueSliderProgress(range, min, max);
-  syncValueSliderNumber(number, range, Number(range.value));
+  syncValueSliderNumber(number, range, Number(number.value));
 }
 
 function syncValueSliderProgress(range, min, max) {
@@ -3380,7 +3654,6 @@ function renderEmptyPanel() {
         <button class="text-button" id="newPatchButton" type="button">New</button>
         <button class="text-button" id="savePatchButton" type="button">Save</button>
         <button class="text-button" id="loadPatchButton" type="button">Load</button>
-        <input class="visually-hidden" id="loadPatchInput" type="file" accept=".yaml,.yml,.json,application/x-yaml,application/json">
       </div>
       <div class="field">
         <label for="maxVoices">Max voices</label>
@@ -3393,6 +3666,10 @@ function renderEmptyPanel() {
         <label for="audioEngine">Audio engine</label>
         <select id="audioEngine">${audioBackendOptions}</select>
       </div>
+      <label class="toggle-row">
+        <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
+        <span>Link signal gradients</span>
+      </label>
       <div class="field">
         <label for="audioInputDevice">Audio input</label>
         <select id="audioInputDevice">${audioInputOptions}</select>
@@ -3415,6 +3692,7 @@ function renderEmptyPanel() {
 
   panel.querySelector("#patchName").addEventListener("input", (event) => {
     state.patchName = event.target.value;
+    renderAppTitle();
     savePatch();
   });
   panel.querySelector("#patchName").addEventListener("keydown", (event) => {
@@ -3441,6 +3719,12 @@ function renderEmptyPanel() {
       url.searchParams.set("engine", audioBackend);
     }
     window.location.href = url.toString();
+  });
+  panel.querySelector("#linkSignalGradientMeters").addEventListener("change", (event) => {
+    state.linkSignalGradientMeters = event.target.checked;
+    renderWires();
+    if (state.linkSignalGradientMeters) updateWireSignalMeters();
+    savePatch();
   });
   panel.querySelector("#audioInputDevice").addEventListener("change", (event) => {
     state.audioInputDeviceId = event.target.value;
@@ -3471,14 +3755,9 @@ function renderEmptyPanel() {
     renderPanel();
     savePatch();
   });
-  panel.querySelector("#savePatchButton").addEventListener("click", downloadPatch);
+  panel.querySelector("#savePatchButton").addEventListener("click", savePatchToServer);
   panel.querySelector("#newPatchButton").addEventListener("click", newPatch);
-  panel.querySelector("#loadPatchButton").addEventListener("click", () => {
-    panel.querySelector("#loadPatchInput").click();
-  });
-  panel.querySelector("#loadPatchInput").addEventListener("change", (event) => {
-    loadPatchFile(event.target.files?.[0]);
-  });
+  panel.querySelector("#loadPatchButton").addEventListener("click", openPatchLibrary);
   panel.querySelector("#midiInput").addEventListener("change", (event) => {
     state.midiInputId = event.target.value;
     synthNode?.port.postMessage({ type: "panic" });
@@ -3502,10 +3781,17 @@ function select(type, id) {
 }
 
 function render() {
+  renderAppTitle();
   renderNodes();
   renderWires();
   renderAudioOut();
   renderPanel();
+}
+
+function renderAppTitle() {
+  const patchName = state.patchName?.trim() || "Untitled Patch";
+  appTitle.textContent = `Visual FM - ${patchName}`;
+  document.title = `Visual FM - ${patchName}`;
 }
 
 function addNode(position = null) {

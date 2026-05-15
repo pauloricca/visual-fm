@@ -6,3 +6,5 @@ dist/
 coverage/
 target/
 rust/**/target/
+patches/
+recordings/

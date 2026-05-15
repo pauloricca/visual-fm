@@ -41,25 +41,25 @@ You can also run a headless JS-vs-WASM render benchmark against that patch:
 node scripts/benchmark-engines.mjs
 ```
 
-For the host-side convenience flow that opens the browser automatically:
+For the convenience flow that starts both HTTP and HTTPS and opens the browser automatically:
 
 ```sh
 ./start.sh
 ```
 
-Containers cannot reliably open the host browser by themselves, so the helper script starts Compose and opens the page from your machine.
+The helper script starts Docker Compose and opens the HTTP app URL from your machine. Use `./start.sh local` to run the same combined HTTP/HTTPS server directly with Node.
 
 ## Run on iOS
 
 iOS browsers need a secure context for AudioWorklet. `http://localhost:8839` works only on the same device that is serving the app; if you open the app from an iPhone using `http://<computer-ip>:8839`, audio will be blocked.
 
-Start the HTTPS dev server:
+Start the combined HTTP/HTTPS dev server:
 
 ```sh
-./start.sh https
+./start.sh
 ```
 
-The script generates local certificates in `.certs/`, serves the app at `https://localhost:8843`, and prints LAN URLs for your iPhone. You can also run the server directly with `node scripts/serve-https.mjs`.
+The script generates local certificates in `.certs/`, serves the app at `http://localhost:8839` and `https://localhost:8843`, and prints LAN URLs for your iPhone. You can also run the server directly with `node scripts/serve.mjs`.
 
 On the iPhone:
 
@@ -73,7 +73,7 @@ On the iPhone:
 Serve the folder from a local web server:
 
 ```sh
-python3 -m http.server 8839
+node scripts/serve.mjs
 ```
 
 Then open `http://localhost:8839`.

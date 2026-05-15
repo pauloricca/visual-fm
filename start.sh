@@ -1,8 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-mode="${1:-http}"
-
 open_browser() {
   url="$1"
   if command -v open >/dev/null 2>&1; then
@@ -32,19 +30,11 @@ wait_then_open() {
   ) &
 }
 
-case "$mode" in
-  http)
-    url="http://localhost:8839"
-    wait_then_open "$url"
-    docker compose up --build
-    ;;
-  https)
-    url="https://localhost:${PORT:-8843}"
-    wait_then_open "$url"
-    node scripts/serve-https.mjs
-    ;;
-  *)
-    printf 'Usage: %s [http|https]\n' "$0" >&2
-    exit 2
-    ;;
-esac
+url="http://localhost:${HTTP_PORT:-8839}"
+wait_then_open "$url"
+
+if [ "${1:-}" = "local" ]; then
+  node scripts/serve.mjs
+else
+  docker compose up --build
+fi
