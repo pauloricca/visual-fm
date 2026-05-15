@@ -84,6 +84,10 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.leftBuffer = null;
     this.rightBuffer = null;
     this.inputBuffer = null;
+    this.linkMeterInputSums = null;
+    this.linkMeterOutputSums = null;
+    this.linkMeterEnvelopeSums = null;
+    this.linkMeterCounts = null;
     this.masterEffects = this.normalizeEffects();
     this.chorusBuffers = [
       new Float32Array(Math.ceil(sampleRate * 0.08)),
@@ -139,6 +143,17 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       this.rightBuffer = new Float32Array(this.wasm.memory.buffer, rightOffset, MAX_WASM_FRAMES);
       if (typeof this.wasm.inputPtr === "function") {
         this.inputBuffer = new Float32Array(this.wasm.memory.buffer, this.wasm.inputPtr(), MAX_WASM_FRAMES);
+      }
+      if (
+        typeof this.wasm.linkMeterInputPtr === "function"
+        && typeof this.wasm.linkMeterOutputPtr === "function"
+        && typeof this.wasm.linkMeterEnvelopePtr === "function"
+        && typeof this.wasm.linkMeterCountPtr === "function"
+      ) {
+        this.linkMeterInputSums = new Float64Array(this.wasm.memory.buffer, this.wasm.linkMeterInputPtr(), 1024);
+        this.linkMeterOutputSums = new Float64Array(this.wasm.memory.buffer, this.wasm.linkMeterOutputPtr(), 1024);
+        this.linkMeterEnvelopeSums = new Float64Array(this.wasm.memory.buffer, this.wasm.linkMeterEnvelopePtr(), 1024);
+        this.linkMeterCounts = new Uint32Array(this.wasm.memory.buffer, this.wasm.linkMeterCountPtr(), 1024);
       }
       this.wasm.resetPhases();
       this.ready = true;
@@ -245,6 +260,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     if (!this.wasm?.clearGraph) return;
 
     this.wasm.clearGraph();
+    this.wasm.clearLinkMeters?.();
     for (const node of this.nodes) {
       node.wasmIndex = this.wasm.addNode(
         this.waveId(node),
@@ -693,6 +709,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.inputDcBlockers = [this.createDcBlocker(), this.createDcBlocker()];
     this.outputDcBlockers = [this.createDcBlocker(), this.createDcBlocker()];
     if (this.wasm) this.wasm.resetPhases();
+    this.wasm?.clearLinkMeters?.();
   }
 
   waveId(node) {
@@ -721,14 +738,21 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
   flushLinkMeters() {
     if (this.sampleCursor < this.nextLinkMeterPostSample) return;
     this.nextLinkMeterPostSample = this.sampleCursor + Math.max(1, Math.round(sampleRate * LINK_METER_POST_SECONDS));
-    const outputPeak = this.clamp(this.lastOutputPeak, 0, 1);
     const levels = this.links.map((link) => {
-      if (link.to === "audio") {
-        return [link.id, outputPeak, outputPeak, this.voices.size ? 1 : 0];
+      const index = link.wasmIndex;
+      const count = index >= 0 ? this.linkMeterCounts?.[index] || 0 : 0;
+      if (count > 0) {
+        return [
+          link.id,
+          this.clamp((this.linkMeterInputSums?.[index] || 0) / count, 0, 1),
+          this.clamp((this.linkMeterOutputSums?.[index] || 0) / count, 0, 1),
+          this.clamp((this.linkMeterEnvelopeSums?.[index] || 0) / count, 0, 1),
+        ];
       }
-      return [link.id, outputPeak, outputPeak * this.clamp((link.amount || 0) / 8, 0, 1), this.voices.size ? 1 : 0];
+      return [link.id, 0, 0, 0];
     });
     this.lastOutputPeak = 0;
+    this.wasm?.clearLinkMeters?.();
     this.port.postMessage({ type: "linkMeters", payload: { levels } });
   }
 

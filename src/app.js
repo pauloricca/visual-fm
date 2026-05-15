@@ -1388,14 +1388,18 @@ function wireMeterBaseColor(link) {
   return WIRE_METER_COLORS.default;
 }
 
-function wireMeterColor(baseColor, level) {
-  const brightness = 0.22 + clamp(level || 0, 0, 1) * 1.18;
-  const color = baseColor.map((channel) => Math.round(clamp(channel * brightness, 18, 255)));
+function wireMeterColor(baseColor, level, selected = false) {
+  const brightness = 0.4 + clamp(level || 0, 0, 1) * 1;
+  const whiteMix = selected ? 0.42 : 0;
+  const color = baseColor.map((channel) => {
+    const brightened = clamp(channel * brightness, 34, 255);
+    return Math.round(brightened + (255 - brightened) * whiteMix);
+  });
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
 }
 
-function setWireMeterStopColor(stop, baseColor, level) {
-  if (stop) stop.setAttribute("stop-color", wireMeterColor(baseColor, level));
+function setWireMeterStopColor(stop, baseColor, level, selected = false) {
+  if (stop) stop.setAttribute("stop-color", wireMeterColor(baseColor, level, selected));
 }
 
 function updateWireSignalMeter(link) {
@@ -1403,8 +1407,9 @@ function updateWireSignalMeter(link) {
   if (!gradient) return;
   const levels = linkMeterLevels.get(link.id) || { input: 0, output: 0 };
   const baseColor = wireMeterBaseColor(link);
-  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='input']"), baseColor, levels.input);
-  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='output']"), baseColor, levels.output);
+  const selected = state.selected.type === "link" && state.selected.id === link.id;
+  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='input']"), baseColor, levels.input, selected);
+  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='output']"), baseColor, levels.output, selected);
 }
 
 function updateWireSignalMeters() {

@@ -166,6 +166,10 @@ static mut RENDER_CACHE: [f64; MAX_NODES] = [0.0; MAX_NODES];
 static mut CACHE_STAMPS: [u32; MAX_NODES] = [0; MAX_NODES];
 static mut RENDER_STACK: [bool; MAX_NODES] = [false; MAX_NODES];
 static mut LINK_PARAM_STACK: [bool; MAX_LINKS] = [false; MAX_LINKS];
+static mut LINK_METER_INPUT_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
+static mut LINK_METER_OUTPUT_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
+static mut LINK_METER_ENVELOPE_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
+static mut LINK_METER_COUNTS: [u32; MAX_LINKS] = [0; MAX_LINKS];
 static mut CURRENT_STAMP: u32 = 1;
 
 #[no_mangle]
@@ -181,6 +185,26 @@ pub extern "C" fn rightPtr() -> *const f32 {
 #[no_mangle]
 pub extern "C" fn inputPtr() -> *mut f32 {
     core::ptr::addr_of_mut!(INPUT).cast::<f32>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkMeterInputPtr() -> *const f64 {
+    core::ptr::addr_of!(LINK_METER_INPUT_SUMS).cast::<f64>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkMeterOutputPtr() -> *const f64 {
+    core::ptr::addr_of!(LINK_METER_OUTPUT_SUMS).cast::<f64>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkMeterEnvelopePtr() -> *const f64 {
+    core::ptr::addr_of!(LINK_METER_ENVELOPE_SUMS).cast::<f64>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkMeterCountPtr() -> *const u32 {
+    core::ptr::addr_of!(LINK_METER_COUNTS).cast::<u32>()
 }
 
 #[no_mangle]
@@ -208,6 +232,18 @@ pub extern "C" fn clearGraph() {
             LINK_FIRST_MODULATOR[index] = -1;
             LINK_NEXT_MODULATOR[index] = -1;
             LINK_HAS_ENVELOPE_TRIGGER[index] = false;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn clearLinkMeters() {
+    unsafe {
+        for index in 0..MAX_LINKS {
+            LINK_METER_INPUT_SUMS[index] = 0.0;
+            LINK_METER_OUTPUT_SUMS[index] = 0.0;
+            LINK_METER_ENVELOPE_SUMS[index] = 0.0;
+            LINK_METER_COUNTS[index] = 0;
         }
     }
 }
@@ -455,6 +491,18 @@ fn link_target_index(target: i32) -> Option<usize> {
         Some((LINK_TARGET_BASE - target) as usize)
     } else {
         None
+    }
+}
+
+fn observe_link_meter(link_index: usize, input: f64, output: f64, envelope: f64) {
+    unsafe {
+        if link_index >= MAX_LINKS {
+            return;
+        }
+        LINK_METER_INPUT_SUMS[link_index] += input.abs().clamp(0.0, 1.0);
+        LINK_METER_OUTPUT_SUMS[link_index] += output.abs().clamp(0.0, 1.0);
+        LINK_METER_ENVELOPE_SUMS[link_index] += envelope.abs().clamp(0.0, 1.0);
+        LINK_METER_COUNTS[link_index] = LINK_METER_COUNTS[link_index].saturating_add(1);
     }
 }
 
@@ -969,6 +1017,7 @@ fn render_link_signal(
         sample_rate,
         noisy_source * envelope * velocity_scale(link.velocity_sensitivity, velocity),
     );
+    observe_link_meter(link_index, source, delayed_source * link.amount, envelope);
     LinkSignal {
         signal: delayed_source,
         amount: link.amount,
