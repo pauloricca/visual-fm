@@ -1920,6 +1920,9 @@ function renderWires() {
     if (!geometry) continue;
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     const visible = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const flow = state.linkSignalGradientMeters
+      ? document.createElementNS("http://www.w3.org/2000/svg", "path")
+      : null;
     const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
     const anchor = document.createElementNS("http://www.w3.org/2000/svg", "g");
     const anchorHit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -1949,6 +1952,11 @@ function renderWires() {
     visible.dataset.midiTargetType = "link";
     visible.dataset.midiTargetId = link.id;
 
+    if (flow) {
+      flow.setAttribute("d", geometry.path);
+      flow.setAttribute("class", `wire-flow ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    }
+
     hit.setAttribute("d", geometry.path);
     hit.setAttribute("class", "wire-hit");
     hit.dataset.linkId = link.id;
@@ -1967,7 +1975,9 @@ function renderWires() {
     anchorDot.setAttribute("class", "link-anchor-dot");
     anchor.append(anchorHit, anchorDot);
 
-    group.append(visible, hit, anchor);
+    group.append(visible);
+    if (flow) group.appendChild(flow);
+    group.append(hit, anchor);
     wireLayer.appendChild(group);
     if (defs) updateWireSignalMeter(link);
   }
@@ -3673,7 +3683,7 @@ function renderEmptyPanel() {
       </div>
       <label class="toggle-row">
         <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
-        <span>Link signal gradients</span>
+        <span>Visualise signal flow</span>
       </label>
       <div class="field">
         <label for="audioInputDevice">Audio input</label>
