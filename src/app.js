@@ -55,13 +55,50 @@ const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
-const AUDIO_WORKLET_MODULE_URL = "./src/audio-worklet.js?v=link-signal-follower-meter-7";
+const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
+const AUDIO_BACKENDS = {
+  js: {
+    label: "JS AudioWorklet",
+    moduleUrl: "./src/audio-worklet.js?v=link-signal-follower-meter-7",
+    processorName: "visual-fm-engine",
+  },
+  wasm: {
+    label: "WASM spike",
+    moduleUrl: "./src/audio-worklet-wasm.js?v=wasm-engine-spike-7",
+    processorName: "visual-fm-wasm-engine",
+    processorOptions: async () => {
+      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=wasm-engine-spike-7", window.location.href).href;
+      const response = await fetch(wasmUrl);
+      if (!response.ok) {
+        throw new Error(`Could not fetch WASM kernel (${response.status}).`);
+      }
+      return {
+        wasmUrl,
+        wasmBytes: await response.arrayBuffer(),
+      };
+    },
+  },
+};
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
+}
+
+function normalizeAudioBackend(value) {
+  return value === "wasm" ? "wasm" : "js";
+}
+
+function loadAudioBackend() {
+  const queryBackend = new URLSearchParams(window.location.search).get("engine");
+  if (queryBackend) return normalizeAudioBackend(queryBackend);
+  try {
+    return normalizeAudioBackend(localStorage.getItem(AUDIO_BACKEND_STORAGE_KEY));
+  } catch {
+    return "js";
+  }
 }
 
 const state = {
@@ -84,6 +121,8 @@ let recordingChunks = [];
 let recordingStartedAt = null;
 let recordingStarting = false;
 let audioMuted = false;
+let audioBackend = loadAudioBackend();
+let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
 let nodeCounter = 3;
 let linkCounter = 3;
 let midiBindingCounter = 1;
@@ -1299,6 +1338,11 @@ function scheduleLinkMeterPaint() {
 
 function handleWorkletMessage(event) {
   const { type, payload } = event.data || {};
+  if (type === "backendStatus") {
+    audioBackendStatus = payload || { backend: audioBackend, ready: false };
+    updateAudioStatus();
+    return;
+  }
   if (type !== "linkMeters" || !Array.isArray(payload?.levels)) return;
 
   for (const [id, inputLevel, outputLevel, envelopeLevel] of payload.levels) {
@@ -1356,6 +1400,10 @@ function updateAudioStatus({ inputBlocked = false } = {}) {
     setAudioStatusLabel("Audio input blocked");
   } else if (audioOutputRouteError) {
     setAudioStatusLabel(audioOutputRouteError);
+  } else if (audioContext && synthNode && audioBackendStatus?.backend === "wasm" && audioBackendStatus.error) {
+    setAudioStatusLabel("WASM audio failed");
+  } else if (audioContext && synthNode && audioBackendStatus?.backend === "wasm" && !audioBackendStatus.ready) {
+    setAudioStatusLabel("WASM loading");
   } else if (audioContext && synthNode) {
     updateAudioReadyButton();
   } else {
@@ -1456,12 +1504,18 @@ async function setupAudio() {
     if (!audioContext.audioWorklet?.addModule) {
       throw new Error("AudioWorklet is not supported in this browser.");
     }
-    await audioContext.audioWorklet.addModule(AUDIO_WORKLET_MODULE_URL);
-    synthNode = new AudioWorkletNode(audioContext, "visual-fm-engine", {
+    const backend = AUDIO_BACKENDS[audioBackend] || AUDIO_BACKENDS.js;
+    audioBackendStatus = audioBackend === "wasm"
+      ? { backend: "wasm", ready: false }
+      : { backend: "js", ready: true };
+    await audioContext.audioWorklet.addModule(backend.moduleUrl);
+    const processorOptions = await backend.processorOptions?.() || {};
+    synthNode = new AudioWorkletNode(audioContext, backend.processorName, {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       inputChannelCount: [2],
       outputChannelCount: [2],
+      processorOptions,
     });
     outputGainNode = audioContext.createGain();
     syncOutputMute();
@@ -3310,6 +3364,9 @@ function renderEmptyPanel() {
     "Audio output",
     "Unavailable output",
   );
+  const audioBackendOptions = Object.entries(AUDIO_BACKENDS).map(([id, backend]) => (
+    `<option value="${id}" ${audioBackend === id ? "selected" : ""}>${escapeHtml(backend.label)}</option>`
+  )).join("");
 
   panel.innerHTML = `
     <div class="panel-empty">
@@ -3331,6 +3388,10 @@ function renderEmptyPanel() {
           <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
           <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
         </div>
+      </div>
+      <div class="field">
+        <label for="audioEngine">Audio engine</label>
+        <select id="audioEngine">${audioBackendOptions}</select>
       </div>
       <div class="field">
         <label for="audioInputDevice">Audio input</label>
@@ -3365,6 +3426,21 @@ function renderEmptyPanel() {
     state.maxVoices = Math.round(value);
     sendGraph();
     savePatch();
+  });
+  panel.querySelector("#audioEngine").addEventListener("change", (event) => {
+    audioBackend = normalizeAudioBackend(event.target.value);
+    try {
+      localStorage.setItem(AUDIO_BACKEND_STORAGE_KEY, audioBackend);
+    } catch {
+      // The URL flag still carries the backend choice when storage is unavailable.
+    }
+    const url = new URL(window.location.href);
+    if (audioBackend === "js") {
+      url.searchParams.delete("engine");
+    } else {
+      url.searchParams.set("engine", audioBackend);
+    }
+    window.location.href = url.toString();
   });
   panel.querySelector("#audioInputDevice").addEventListener("change", (event) => {
     state.audioInputDeviceId = event.target.value;

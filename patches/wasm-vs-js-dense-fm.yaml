@@ -1,0 +1,6940 @@
+# Visual FM benchmark patch
+# 96 independent two-operator lanes: every carrier goes to Audio Out, every carrier has one phase modulator.
+# This matches the current Rust/WASM backend surface while pushing the JS graph renderer hard.
+patchName: "WASM vs JS Dense FM Benchmark"
+maxVoices: 16
+audioInputDeviceId: "default"
+audioOutputDeviceId: "default"
+midiChannel: "all"
+midiInputId: "all"
+midiBindings: []
+masterEffects:
+  chorus:
+    enabled: false
+    rate: 0.8
+    depth: 0.012
+    mix: 0.25
+  delay:
+    enabled: false
+    time: 0.28
+    feedback: 0.35
+    mix: 0.25
+  reverb:
+    enabled: false
+    size: 0.55
+    decay: 0.45
+    mix: 0.25
+nodes:
+  -
+    id: "mod-001"
+    name: "M01"
+    x: 180
+    y: 160
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 0.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-001"
+    name: "C01"
+    x: 180
+    y: 252
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 0.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-002"
+    name: "M02"
+    x: 390
+    y: 160
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-002"
+    name: "C02"
+    x: 390
+    y: 252
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-003"
+    name: "M03"
+    x: 600
+    y: 160
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-003"
+    name: "C03"
+    x: 600
+    y: 252
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-004"
+    name: "M04"
+    x: 810
+    y: 160
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 0.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-004"
+    name: "C04"
+    x: 810
+    y: 252
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-005"
+    name: "M05"
+    x: 1020
+    y: 160
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-005"
+    name: "C05"
+    x: 1020
+    y: 252
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 0.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-006"
+    name: "M06"
+    x: 1230
+    y: 160
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-006"
+    name: "C06"
+    x: 1230
+    y: 252
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-007"
+    name: "M07"
+    x: 1440
+    y: 160
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-007"
+    name: "C07"
+    x: 1440
+    y: 252
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-008"
+    name: "M08"
+    x: 1650
+    y: 160
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-008"
+    name: "C08"
+    x: 1650
+    y: 252
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 0.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-009"
+    name: "M09"
+    x: 1860
+    y: 160
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-009"
+    name: "C09"
+    x: 1860
+    y: 252
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-010"
+    name: "M10"
+    x: 2070
+    y: 160
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-010"
+    name: "C10"
+    x: 2070
+    y: 252
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-011"
+    name: "M11"
+    x: 2280
+    y: 160
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 0.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-011"
+    name: "C11"
+    x: 2280
+    y: 252
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-012"
+    name: "M12"
+    x: 2490
+    y: 160
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-012"
+    name: "C12"
+    x: 2490
+    y: 252
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 0.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-013"
+    name: "M13"
+    x: 180
+    y: 370
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-013"
+    name: "C13"
+    x: 180
+    y: 462
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-014"
+    name: "M14"
+    x: 390
+    y: 370
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 0.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-014"
+    name: "C14"
+    x: 390
+    y: 462
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-015"
+    name: "M15"
+    x: 600
+    y: 370
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-015"
+    name: "C15"
+    x: 600
+    y: 462
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 0.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-016"
+    name: "M16"
+    x: 810
+    y: 370
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-016"
+    name: "C16"
+    x: 810
+    y: 462
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-017"
+    name: "M17"
+    x: 1020
+    y: 370
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-017"
+    name: "C17"
+    x: 1020
+    y: 462
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-018"
+    name: "M18"
+    x: 1230
+    y: 370
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 0.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-018"
+    name: "C18"
+    x: 1230
+    y: 462
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-019"
+    name: "M19"
+    x: 1440
+    y: 370
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-019"
+    name: "C19"
+    x: 1440
+    y: 462
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-020"
+    name: "M20"
+    x: 1650
+    y: 370
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-020"
+    name: "C20"
+    x: 1650
+    y: 462
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-021"
+    name: "M21"
+    x: 1860
+    y: 370
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 0.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-021"
+    name: "C21"
+    x: 1860
+    y: 462
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-022"
+    name: "M22"
+    x: 2070
+    y: 370
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-022"
+    name: "C22"
+    x: 2070
+    y: 462
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 0.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-023"
+    name: "M23"
+    x: 2280
+    y: 370
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-023"
+    name: "C23"
+    x: 2280
+    y: 462
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-024"
+    name: "M24"
+    x: 2490
+    y: 370
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-024"
+    name: "C24"
+    x: 2490
+    y: 462
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-025"
+    name: "M25"
+    x: 180
+    y: 580
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-025"
+    name: "C25"
+    x: 180
+    y: 672
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-026"
+    name: "M26"
+    x: 390
+    y: 580
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-026"
+    name: "C26"
+    x: 390
+    y: 672
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-027"
+    name: "M27"
+    x: 600
+    y: 580
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-027"
+    name: "C27"
+    x: 600
+    y: 672
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-028"
+    name: "M28"
+    x: 810
+    y: 580
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-028"
+    name: "C28"
+    x: 810
+    y: 672
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-029"
+    name: "M29"
+    x: 1020
+    y: 580
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-029"
+    name: "C29"
+    x: 1020
+    y: 672
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-030"
+    name: "M30"
+    x: 1230
+    y: 580
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-030"
+    name: "C30"
+    x: 1230
+    y: 672
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-031"
+    name: "M31"
+    x: 1440
+    y: 580
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-031"
+    name: "C31"
+    x: 1440
+    y: 672
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-032"
+    name: "M32"
+    x: 1650
+    y: 580
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-032"
+    name: "C32"
+    x: 1650
+    y: 672
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-033"
+    name: "M33"
+    x: 1860
+    y: 580
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-033"
+    name: "C33"
+    x: 1860
+    y: 672
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-034"
+    name: "M34"
+    x: 2070
+    y: 580
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-034"
+    name: "C34"
+    x: 2070
+    y: 672
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-035"
+    name: "M35"
+    x: 2280
+    y: 580
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-035"
+    name: "C35"
+    x: 2280
+    y: 672
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-036"
+    name: "M36"
+    x: 2490
+    y: 580
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-036"
+    name: "C36"
+    x: 2490
+    y: 672
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-037"
+    name: "M37"
+    x: 180
+    y: 790
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-037"
+    name: "C37"
+    x: 180
+    y: 882
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-038"
+    name: "M38"
+    x: 390
+    y: 790
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-038"
+    name: "C38"
+    x: 390
+    y: 882
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-039"
+    name: "M39"
+    x: 600
+    y: 790
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-039"
+    name: "C39"
+    x: 600
+    y: 882
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-040"
+    name: "M40"
+    x: 810
+    y: 790
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-040"
+    name: "C40"
+    x: 810
+    y: 882
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-041"
+    name: "M41"
+    x: 1020
+    y: 790
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-041"
+    name: "C41"
+    x: 1020
+    y: 882
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-042"
+    name: "M42"
+    x: 1230
+    y: 790
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-042"
+    name: "C42"
+    x: 1230
+    y: 882
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-043"
+    name: "M43"
+    x: 1440
+    y: 790
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-043"
+    name: "C43"
+    x: 1440
+    y: 882
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-044"
+    name: "M44"
+    x: 1650
+    y: 790
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-044"
+    name: "C44"
+    x: 1650
+    y: 882
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-045"
+    name: "M45"
+    x: 1860
+    y: 790
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-045"
+    name: "C45"
+    x: 1860
+    y: 882
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-046"
+    name: "M46"
+    x: 2070
+    y: 790
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-046"
+    name: "C46"
+    x: 2070
+    y: 882
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-047"
+    name: "M47"
+    x: 2280
+    y: 790
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-047"
+    name: "C47"
+    x: 2280
+    y: 882
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-048"
+    name: "M48"
+    x: 2490
+    y: 790
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-048"
+    name: "C48"
+    x: 2490
+    y: 882
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-049"
+    name: "M49"
+    x: 180
+    y: 1000
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-049"
+    name: "C49"
+    x: 180
+    y: 1092
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-050"
+    name: "M50"
+    x: 390
+    y: 1000
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-050"
+    name: "C50"
+    x: 390
+    y: 1092
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-051"
+    name: "M51"
+    x: 600
+    y: 1000
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 3.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-051"
+    name: "C51"
+    x: 600
+    y: 1092
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-052"
+    name: "M52"
+    x: 810
+    y: 1000
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-052"
+    name: "C52"
+    x: 810
+    y: 1092
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-053"
+    name: "M53"
+    x: 1020
+    y: 1000
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-053"
+    name: "C53"
+    x: 1020
+    y: 1092
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-054"
+    name: "M54"
+    x: 1230
+    y: 1000
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-054"
+    name: "C54"
+    x: 1230
+    y: 1092
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-055"
+    name: "M55"
+    x: 1440
+    y: 1000
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-055"
+    name: "C55"
+    x: 1440
+    y: 1092
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-056"
+    name: "M56"
+    x: 1650
+    y: 1000
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-056"
+    name: "C56"
+    x: 1650
+    y: 1092
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-057"
+    name: "M57"
+    x: 1860
+    y: 1000
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-057"
+    name: "C57"
+    x: 1860
+    y: 1092
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-058"
+    name: "M58"
+    x: 2070
+    y: 1000
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-058"
+    name: "C58"
+    x: 2070
+    y: 1092
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-059"
+    name: "M59"
+    x: 2280
+    y: 1000
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-059"
+    name: "C59"
+    x: 2280
+    y: 1092
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-060"
+    name: "M60"
+    x: 2490
+    y: 1000
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-060"
+    name: "C60"
+    x: 2490
+    y: 1092
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-061"
+    name: "M61"
+    x: 180
+    y: 1210
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-061"
+    name: "C61"
+    x: 180
+    y: 1302
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-062"
+    name: "M62"
+    x: 390
+    y: 1210
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 1.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-062"
+    name: "C62"
+    x: 390
+    y: 1302
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-063"
+    name: "M63"
+    x: 600
+    y: 1210
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-063"
+    name: "C63"
+    x: 600
+    y: 1302
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-064"
+    name: "M64"
+    x: 810
+    y: 1210
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-064"
+    name: "C64"
+    x: 810
+    y: 1302
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-065"
+    name: "M65"
+    x: 1020
+    y: 1210
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-065"
+    name: "C65"
+    x: 1020
+    y: 1302
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-066"
+    name: "M66"
+    x: 1230
+    y: 1210
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 1.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-066"
+    name: "C66"
+    x: 1230
+    y: 1302
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-067"
+    name: "M67"
+    x: 1440
+    y: 1210
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-067"
+    name: "C67"
+    x: 1440
+    y: 1302
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-068"
+    name: "M68"
+    x: 1650
+    y: 1210
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-068"
+    name: "C68"
+    x: 1650
+    y: 1302
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-069"
+    name: "M69"
+    x: 1860
+    y: 1210
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 1.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-069"
+    name: "C69"
+    x: 1860
+    y: 1302
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-070"
+    name: "M70"
+    x: 2070
+    y: 1210
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-070"
+    name: "C70"
+    x: 2070
+    y: 1302
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 1.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-071"
+    name: "M71"
+    x: 2280
+    y: 1210
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-071"
+    name: "C71"
+    x: 2280
+    y: 1302
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-072"
+    name: "M72"
+    x: 2490
+    y: 1210
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-072"
+    name: "C72"
+    x: 2490
+    y: 1302
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-073"
+    name: "M73"
+    x: 180
+    y: 1420
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-073"
+    name: "C73"
+    x: 180
+    y: 1512
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-074"
+    name: "M74"
+    x: 390
+    y: 1420
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-074"
+    name: "C74"
+    x: 390
+    y: 1512
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-075"
+    name: "M75"
+    x: 600
+    y: 1420
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-075"
+    name: "C75"
+    x: 600
+    y: 1512
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-076"
+    name: "M76"
+    x: 810
+    y: 1420
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-076"
+    name: "C76"
+    x: 810
+    y: 1512
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-077"
+    name: "M77"
+    x: 1020
+    y: 1420
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-077"
+    name: "C77"
+    x: 1020
+    y: 1512
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-078"
+    name: "M78"
+    x: 1230
+    y: 1420
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-078"
+    name: "C78"
+    x: 1230
+    y: 1512
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-079"
+    name: "M79"
+    x: 1440
+    y: 1420
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-079"
+    name: "C79"
+    x: 1440
+    y: 1512
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-080"
+    name: "M80"
+    x: 1650
+    y: 1420
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-080"
+    name: "C80"
+    x: 1650
+    y: 1512
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-081"
+    name: "M81"
+    x: 1860
+    y: 1420
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 3.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-081"
+    name: "C81"
+    x: 1860
+    y: 1512
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-082"
+    name: "M82"
+    x: 2070
+    y: 1420
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-082"
+    name: "C82"
+    x: 2070
+    y: 1512
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-083"
+    name: "M83"
+    x: 2280
+    y: 1420
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-083"
+    name: "C83"
+    x: 2280
+    y: 1512
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 3.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-084"
+    name: "M84"
+    x: 2490
+    y: 1420
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-084"
+    name: "C84"
+    x: 2490
+    y: 1512
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-085"
+    name: "M85"
+    x: 180
+    y: 1630
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-085"
+    name: "C85"
+    x: 180
+    y: 1722
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-086"
+    name: "M86"
+    x: 390
+    y: 1630
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-086"
+    name: "C86"
+    x: 390
+    y: 1722
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-087"
+    name: "M87"
+    x: 600
+    y: 1630
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.5833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-087"
+    name: "C87"
+    x: 600
+    y: 1722
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-088"
+    name: "M88"
+    x: 810
+    y: 1630
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3.1667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-088"
+    name: "C88"
+    x: 810
+    y: 1722
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-089"
+    name: "M89"
+    x: 1020
+    y: 1630
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.75
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-089"
+    name: "C89"
+    x: 1020
+    y: 1722
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-090"
+    name: "M90"
+    x: 1230
+    y: 1630
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 2.3333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-090"
+    name: "C90"
+    x: 1230
+    y: 1722
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 3.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-091"
+    name: "M91"
+    x: 1440
+    y: 1630
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 2.9167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-091"
+    name: "C91"
+    x: 1440
+    y: 1722
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-092"
+    name: "M92"
+    x: 1650
+    y: 1630
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 3.5
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-092"
+    name: "C92"
+    x: 1650
+    y: 1722
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-093"
+    name: "M93"
+    x: 1860
+    y: 1630
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.0833
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-093"
+    name: "C93"
+    x: 1860
+    y: 1722
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 3.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-094"
+    name: "M94"
+    x: 2070
+    y: 1630
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 2.6667
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-094"
+    name: "C94"
+    x: 2070
+    y: 1722
+    wave: "ramp"
+    frequencyMode: "ratio"
+    ratio: 2.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-095"
+    name: "M95"
+    x: 2280
+    y: 1630
+    wave: "triangle"
+    frequencyMode: "ratio"
+    ratio: 3.25
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-095"
+    name: "C95"
+    x: 2280
+    y: 1722
+    wave: "square"
+    frequencyMode: "ratio"
+    ratio: 2.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "mod-096"
+    name: "M96"
+    x: 2490
+    y: 1630
+    wave: "saw"
+    frequencyMode: "ratio"
+    ratio: 3.8333
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+  -
+    id: "car-096"
+    name: "C96"
+    x: 2490
+    y: 1722
+    wave: "sine"
+    frequencyMode: "ratio"
+    ratio: 3.4167
+    frequency: 440
+    speed: 8
+    audioInputGain: 1
+links:
+  -
+    id: "fm-001"
+    from: "mod-001"
+    to: "car-001"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-001"
+    from: "car-001"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-002"
+    from: "mod-002"
+    to: "car-002"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-002"
+    from: "car-002"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-003"
+    from: "mod-003"
+    to: "car-003"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-003"
+    from: "car-003"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-004"
+    from: "mod-004"
+    to: "car-004"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-004"
+    from: "car-004"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-005"
+    from: "mod-005"
+    to: "car-005"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-005"
+    from: "car-005"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-006"
+    from: "mod-006"
+    to: "car-006"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-006"
+    from: "car-006"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-007"
+    from: "mod-007"
+    to: "car-007"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-007"
+    from: "car-007"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-008"
+    from: "mod-008"
+    to: "car-008"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-008"
+    from: "car-008"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-009"
+    from: "mod-009"
+    to: "car-009"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-009"
+    from: "car-009"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-010"
+    from: "mod-010"
+    to: "car-010"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-010"
+    from: "car-010"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-011"
+    from: "mod-011"
+    to: "car-011"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-011"
+    from: "car-011"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-012"
+    from: "mod-012"
+    to: "car-012"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-012"
+    from: "car-012"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-013"
+    from: "mod-013"
+    to: "car-013"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-013"
+    from: "car-013"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-014"
+    from: "mod-014"
+    to: "car-014"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-014"
+    from: "car-014"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-015"
+    from: "mod-015"
+    to: "car-015"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-015"
+    from: "car-015"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-016"
+    from: "mod-016"
+    to: "car-016"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-016"
+    from: "car-016"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-017"
+    from: "mod-017"
+    to: "car-017"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-017"
+    from: "car-017"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-018"
+    from: "mod-018"
+    to: "car-018"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-018"
+    from: "car-018"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-019"
+    from: "mod-019"
+    to: "car-019"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-019"
+    from: "car-019"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-020"
+    from: "mod-020"
+    to: "car-020"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-020"
+    from: "car-020"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-021"
+    from: "mod-021"
+    to: "car-021"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-021"
+    from: "car-021"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-022"
+    from: "mod-022"
+    to: "car-022"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-022"
+    from: "car-022"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-023"
+    from: "mod-023"
+    to: "car-023"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-023"
+    from: "car-023"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-024"
+    from: "mod-024"
+    to: "car-024"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-024"
+    from: "car-024"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-025"
+    from: "mod-025"
+    to: "car-025"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-025"
+    from: "car-025"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-026"
+    from: "mod-026"
+    to: "car-026"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-026"
+    from: "car-026"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-027"
+    from: "mod-027"
+    to: "car-027"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-027"
+    from: "car-027"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-028"
+    from: "mod-028"
+    to: "car-028"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-028"
+    from: "car-028"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-029"
+    from: "mod-029"
+    to: "car-029"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-029"
+    from: "car-029"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-030"
+    from: "mod-030"
+    to: "car-030"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-030"
+    from: "car-030"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-031"
+    from: "mod-031"
+    to: "car-031"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-031"
+    from: "car-031"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-032"
+    from: "mod-032"
+    to: "car-032"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-032"
+    from: "car-032"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-033"
+    from: "mod-033"
+    to: "car-033"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-033"
+    from: "car-033"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-034"
+    from: "mod-034"
+    to: "car-034"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-034"
+    from: "car-034"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-035"
+    from: "mod-035"
+    to: "car-035"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-035"
+    from: "car-035"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-036"
+    from: "mod-036"
+    to: "car-036"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-036"
+    from: "car-036"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-037"
+    from: "mod-037"
+    to: "car-037"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-037"
+    from: "car-037"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-038"
+    from: "mod-038"
+    to: "car-038"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-038"
+    from: "car-038"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-039"
+    from: "mod-039"
+    to: "car-039"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-039"
+    from: "car-039"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-040"
+    from: "mod-040"
+    to: "car-040"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-040"
+    from: "car-040"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-041"
+    from: "mod-041"
+    to: "car-041"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-041"
+    from: "car-041"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-042"
+    from: "mod-042"
+    to: "car-042"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-042"
+    from: "car-042"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-043"
+    from: "mod-043"
+    to: "car-043"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-043"
+    from: "car-043"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-044"
+    from: "mod-044"
+    to: "car-044"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-044"
+    from: "car-044"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-045"
+    from: "mod-045"
+    to: "car-045"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-045"
+    from: "car-045"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-046"
+    from: "mod-046"
+    to: "car-046"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-046"
+    from: "car-046"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-047"
+    from: "mod-047"
+    to: "car-047"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-047"
+    from: "car-047"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-048"
+    from: "mod-048"
+    to: "car-048"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-048"
+    from: "car-048"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-049"
+    from: "mod-049"
+    to: "car-049"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-049"
+    from: "car-049"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-050"
+    from: "mod-050"
+    to: "car-050"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-050"
+    from: "car-050"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-051"
+    from: "mod-051"
+    to: "car-051"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-051"
+    from: "car-051"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-052"
+    from: "mod-052"
+    to: "car-052"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-052"
+    from: "car-052"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-053"
+    from: "mod-053"
+    to: "car-053"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-053"
+    from: "car-053"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-054"
+    from: "mod-054"
+    to: "car-054"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-054"
+    from: "car-054"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-055"
+    from: "mod-055"
+    to: "car-055"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-055"
+    from: "car-055"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-056"
+    from: "mod-056"
+    to: "car-056"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-056"
+    from: "car-056"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-057"
+    from: "mod-057"
+    to: "car-057"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-057"
+    from: "car-057"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-058"
+    from: "mod-058"
+    to: "car-058"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-058"
+    from: "car-058"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-059"
+    from: "mod-059"
+    to: "car-059"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-059"
+    from: "car-059"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-060"
+    from: "mod-060"
+    to: "car-060"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-060"
+    from: "car-060"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-061"
+    from: "mod-061"
+    to: "car-061"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-061"
+    from: "car-061"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-062"
+    from: "mod-062"
+    to: "car-062"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-062"
+    from: "car-062"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-063"
+    from: "mod-063"
+    to: "car-063"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-063"
+    from: "car-063"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-064"
+    from: "mod-064"
+    to: "car-064"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-064"
+    from: "car-064"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-065"
+    from: "mod-065"
+    to: "car-065"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-065"
+    from: "car-065"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-066"
+    from: "mod-066"
+    to: "car-066"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-066"
+    from: "car-066"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-067"
+    from: "mod-067"
+    to: "car-067"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-067"
+    from: "car-067"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-068"
+    from: "mod-068"
+    to: "car-068"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-068"
+    from: "car-068"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-069"
+    from: "mod-069"
+    to: "car-069"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-069"
+    from: "car-069"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-070"
+    from: "mod-070"
+    to: "car-070"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-070"
+    from: "car-070"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-071"
+    from: "mod-071"
+    to: "car-071"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-071"
+    from: "car-071"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-072"
+    from: "mod-072"
+    to: "car-072"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-072"
+    from: "car-072"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-073"
+    from: "mod-073"
+    to: "car-073"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-073"
+    from: "car-073"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-074"
+    from: "mod-074"
+    to: "car-074"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-074"
+    from: "car-074"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-075"
+    from: "mod-075"
+    to: "car-075"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-075"
+    from: "car-075"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-076"
+    from: "mod-076"
+    to: "car-076"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-076"
+    from: "car-076"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-077"
+    from: "mod-077"
+    to: "car-077"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-077"
+    from: "car-077"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-078"
+    from: "mod-078"
+    to: "car-078"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-078"
+    from: "car-078"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-079"
+    from: "mod-079"
+    to: "car-079"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-079"
+    from: "car-079"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-080"
+    from: "mod-080"
+    to: "car-080"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.034
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-080"
+    from: "car-080"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-081"
+    from: "mod-081"
+    to: "car-081"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.018
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-081"
+    from: "car-081"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-082"
+    from: "mod-082"
+    to: "car-082"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.022
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-082"
+    from: "car-082"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-083"
+    from: "mod-083"
+    to: "car-083"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.026
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-083"
+    from: "car-083"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-084"
+    from: "mod-084"
+    to: "car-084"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.03
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-084"
+    from: "car-084"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-085"
+    from: "mod-085"
+    to: "car-085"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.034
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-085"
+    from: "car-085"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-086"
+    from: "mod-086"
+    to: "car-086"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.018
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-086"
+    from: "car-086"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-087"
+    from: "mod-087"
+    to: "car-087"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.022
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-087"
+    from: "car-087"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: -0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-088"
+    from: "mod-088"
+    to: "car-088"
+    amount: 3.62
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.026
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-088"
+    from: "car-088"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: -0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-089"
+    from: "mod-089"
+    to: "car-089"
+    amount: 3.99
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.03
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-089"
+    from: "car-089"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: -0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "fm-090"
+    from: "mod-090"
+    to: "car-090"
+    amount: 4.36
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.034
+      sustain: 1
+      release: 0.18
+  -
+    id: "out-090"
+    from: "car-090"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: -0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "fm-091"
+    from: "mod-091"
+    to: "car-091"
+    amount: 1.4
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.018
+      sustain: 1
+      release: 0.198
+  -
+    id: "out-091"
+    from: "car-091"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.0909
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "fm-092"
+    from: "mod-092"
+    to: "car-092"
+    amount: 1.77
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.022
+      sustain: 1
+      release: 0.09
+  -
+    id: "out-092"
+    from: "car-092"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 0.2727
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "fm-093"
+    from: "mod-093"
+    to: "car-093"
+    amount: 2.14
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.026
+      sustain: 1
+      release: 0.108
+  -
+    id: "out-093"
+    from: "car-093"
+    to: "audio"
+    amount: 0.035
+    delay: 0
+    noise: 0
+    pan: 0.4545
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "fm-094"
+    from: "mod-094"
+    to: "car-094"
+    amount: 2.51
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.03
+      sustain: 1
+      release: 0.126
+  -
+    id: "out-094"
+    from: "car-094"
+    to: "audio"
+    amount: 0.039
+    delay: 0
+    noise: 0
+    pan: 0.6364
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.001
+      decay: 0.022
+      sustain: 1
+      release: 0.18
+  -
+    id: "fm-095"
+    from: "mod-095"
+    to: "car-095"
+    amount: 2.88
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.034
+      sustain: 1
+      release: 0.144
+  -
+    id: "out-095"
+    from: "car-095"
+    to: "audio"
+    amount: 0.043
+    delay: 0
+    noise: 0
+    pan: 0.8182
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.002
+      decay: 0.026
+      sustain: 1
+      release: 0.198
+  -
+    id: "fm-096"
+    from: "mod-096"
+    to: "car-096"
+    amount: 3.25
+    delay: 0
+    noise: 0
+    pan: 0
+    velocitySensitivity: 0
+    modulationTarget: "phase"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.004
+      decay: 0.018
+      sustain: 1
+      release: 0.162
+  -
+    id: "out-096"
+    from: "car-096"
+    to: "audio"
+    amount: 0.047
+    delay: 0
+    noise: 0
+    pan: 1
+    velocitySensitivity: 1
+    modulationTarget: "amplitude"
+    drone: false
+    signalMode: "raw"
+    follower:
+      attack: 0.01
+      release: 0.12
+    filter:
+      type: "none"
+      cutoff: 5000
+      resonance: 0.7
+    envelope:
+      delay: 0
+      attack: 0.003
+      decay: 0.03
+      sustain: 1
+      release: 0.09

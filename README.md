@@ -14,6 +14,33 @@ docker compose up --build
 
 Then open `http://localhost:8839`.
 
+## Try the WASM engine spike
+
+The default engine is still the full JavaScript AudioWorklet. To try the experimental WASM-backed worklet, open:
+
+```sh
+http://localhost:8839/?engine=wasm
+```
+
+You can also switch between `JS AudioWorklet` and `WASM spike` from the Patch panel. The WASM spike now syncs a compact node/link graph into Rust and renders recursive node modulation for `phase`, `frequency`, `ring`, `fold`, and `mix` targets, plus link-to-link modulation, link ADSR envelopes and triggers, smoothed live link controls, velocity scaling, noise, signal followers, link filters, bounded link delay, extra oscillator waves, audio-input nodes, and the master chorus/delay/reverb effects. The JavaScript engine remains the feature-complete backend.
+
+The WASM delay pool is intentionally bounded so dense benchmark patches do not allocate huge multi-second buffers for every link; use the JavaScript engine for full-length experimental delay patches while the Rust backend is still a spike.
+
+The WASM kernel source lives in `rust/visual-fm-kernel` and is built in Docker, so no local Rust toolchain is required. Rebuild and smoke-test the checked-in WASM kernel with:
+
+```sh
+sh scripts/build-rust-wasm.sh
+node scripts/smoke-wasm-worklet.mjs
+```
+
+For a heavier current-backend benchmark, load `patches/wasm-vs-js-dense-fm.yaml`. It contains 96 independent two-operator FM lanes, with 192 nodes and 192 links, and is designed to stress the JavaScript graph renderer while staying inside the Rust/WASM spike's supported feature set.
+
+You can also run a headless JS-vs-WASM render benchmark against that patch:
+
+```sh
+node scripts/benchmark-engines.mjs
+```
+
 For the host-side convenience flow that opens the browser automatically:
 
 ```sh
