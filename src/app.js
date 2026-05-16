@@ -82,11 +82,6 @@ const LINK_AMOUNT_SLIDER_MAX = 8;
 const LINK_AMOUNT_INPUT_MAX = 32;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
-const WIRE_METER_COLORS = {
-  default: [143, 117, 216],
-  output: [224, 164, 63],
-  linkMod: [111, 165, 232],
-};
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -1382,34 +1377,20 @@ function wireMeterGradientId(linkId) {
   return `wire-signal-meter-${linkId}`;
 }
 
-function wireMeterBaseColor(link) {
-  if (linkById(link.to)) return WIRE_METER_COLORS.linkMod;
-  if (link.to === "audio") return WIRE_METER_COLORS.output;
-  return WIRE_METER_COLORS.default;
-}
-
-function wireMeterColor(baseColor, level, selected = false) {
-  const brightness = 0.4 + clamp(level || 0, 0, 1) * 1;
-  const whiteMix = selected ? 0.42 : 0;
-  const color = baseColor.map((channel) => {
-    const brightened = clamp(channel * brightness, 34, 255);
-    return Math.round(brightened + (255 - brightened) * whiteMix);
-  });
-  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
-}
-
-function setWireMeterStopColor(stop, baseColor, level, selected = false) {
-  if (stop) stop.setAttribute("stop-color", wireMeterColor(baseColor, level, selected));
+function setWireFlowStopOpacity(stop, level, selected = false) {
+  if (!stop) return;
+  stop.setAttribute("stop-color", "#ffffff");
+  stop.setAttribute("stop-opacity", String(clamp(level || 0, 0, 1) * (selected ? 1 : 0.72)));
 }
 
 function updateWireSignalMeter(link) {
   const gradient = wireLayer.querySelector(`#${CSS.escape(wireMeterGradientId(link.id))}`);
   if (!gradient) return;
   const levels = linkMeterLevels.get(link.id) || { input: 0, output: 0 };
-  const baseColor = wireMeterBaseColor(link);
   const selected = state.selected.type === "link" && state.selected.id === link.id;
-  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='input']"), baseColor, levels.input, selected);
-  setWireMeterStopColor(gradient.querySelector("[data-wire-meter-stop='output']"), baseColor, levels.output, selected);
+  setWireFlowStopOpacity(gradient.querySelector("[data-wire-meter-stop='input']"), levels.input, selected);
+  setWireFlowStopOpacity(gradient.querySelector("[data-wire-meter-stop='output']"), levels.output, selected);
+  setWireFlowStopOpacity(gradient.querySelector("[data-wire-meter-stop='output-end']"), levels.output, selected);
 }
 
 function updateWireSignalMeters() {
@@ -1934,6 +1915,7 @@ function renderWires() {
       const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
       const inputStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
       const outputStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+      const outputEndStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
       gradient.id = wireMeterGradientId(link.id);
       gradient.setAttribute("gradientUnits", "userSpaceOnUse");
       gradient.setAttribute("x1", geometry.from.x);
@@ -1941,13 +1923,19 @@ function renderWires() {
       gradient.setAttribute("x2", geometry.to.x);
       gradient.setAttribute("y2", geometry.to.y);
       inputStop.setAttribute("offset", "0%");
+      inputStop.setAttribute("stop-color", "#ffffff");
+      inputStop.setAttribute("stop-opacity", "0");
       inputStop.dataset.wireMeterStop = "input";
-      outputStop.setAttribute("offset", "100%");
+      outputStop.setAttribute("offset", "25%");
+      outputStop.setAttribute("stop-color", "#ffffff");
+      outputStop.setAttribute("stop-opacity", "0");
       outputStop.dataset.wireMeterStop = "output";
-      gradient.append(inputStop, outputStop);
+      outputEndStop.setAttribute("offset", "100%");
+      outputEndStop.setAttribute("stop-color", "#ffffff");
+      outputEndStop.setAttribute("stop-opacity", "0");
+      outputEndStop.dataset.wireMeterStop = "output-end";
+      gradient.append(inputStop, outputStop, outputEndStop);
       defs.appendChild(gradient);
-      visible.classList.add("metered");
-      visible.style.stroke = `url(#${wireMeterGradientId(link.id)})`;
     }
     visible.dataset.midiTargetType = "link";
     visible.dataset.midiTargetId = link.id;
@@ -1955,6 +1943,7 @@ function renderWires() {
     if (flow) {
       flow.setAttribute("d", geometry.path);
       flow.setAttribute("class", `wire-flow ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+      flow.style.stroke = `url(#${wireMeterGradientId(link.id)})`;
     }
 
     hit.setAttribute("d", geometry.path);
