@@ -696,11 +696,15 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const voices = [...this.voices.values()];
     return voices
       .sort((a, b) => {
-        if ((a.releasedAt === null) !== (b.releasedAt === null)) {
-          return a.releasedAt === null ? 1 : -1;
-        }
+        if ((a.releasedAt === null) !== (b.releasedAt === null)) return a.releasedAt === null ? 1 : -1;
         return (a.releasedAt ?? a.startedAt) - (b.releasedAt ?? b.startedAt);
       })[0] || null;
+  }
+
+  activeVoiceToSteal() {
+    return [...this.voices.values()]
+      .filter((voice) => voice.releasedAt === null)
+      .sort((a, b) => a.startedAt - b.startedAt)[0] || null;
   }
 
   activeVoiceCount() {
@@ -713,7 +717,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
   enforceVoiceLimit() {
     while (this.activeVoiceCount() > this.maxVoices) {
-      const candidate = this.voiceToSteal();
+      const candidate = this.activeVoiceToSteal();
       if (!candidate) return;
       this.releaseVoice(candidate, this.sampleCursor / sampleRate, VOICE_STEAL_FADE_SECONDS);
     }

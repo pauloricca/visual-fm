@@ -145,6 +145,39 @@ if (inputPeak <= 0) {
 }
 
 engine.resetRuntimeState();
+const customWaveStressPatch = normalizePatch(parsePatchFile(readFileSync(
+  resolve(ROOT, "patches/test custom wave/2026-05-17_19-55-13.yaml"),
+  "utf8",
+)));
+engine.setGraph({
+  maxVoices: customWaveStressPatch.maxVoices,
+  nodes: customWaveStressPatch.nodes,
+  links: customWaveStressPatch.links,
+  masterEffects: customWaveStressPatch.masterEffects,
+});
+const stressNotes = [60, 62, 64, 65, 67, 69];
+let stressPeak = 0;
+for (let pass = 0; pass < 2; pass += 1) {
+  for (const note of stressNotes) engine.noteOn(note, 1);
+  for (let block = 0; block < 2; block += 1) {
+    const left = new Float32Array(128);
+    const right = new Float32Array(128);
+    engine.process([], [[left, right]]);
+    for (let index = 0; index < left.length; index += 1) {
+      if (!Number.isFinite(left[index]) || !Number.isFinite(right[index])) {
+        throw new Error("WASM worklet produced a non-finite sample during rapid custom-wave chord stealing.");
+      }
+      stressPeak = Math.max(stressPeak, Math.abs(left[index]), Math.abs(right[index]));
+    }
+  }
+  for (const note of stressNotes) engine.noteOff(note);
+  engine.process([], [[new Float32Array(128), new Float32Array(128)]]);
+}
+if (stressPeak <= 0) {
+  throw new Error("WASM worklet custom-wave chord stress rendered silence.");
+}
+
+engine.resetRuntimeState();
 const savedPatch = normalizePatch(parsePatchFile(readFileSync(
   resolve(ROOT, "patches/test custom wave/2026-05-17_11-32-32.yaml"),
   "utf8",
