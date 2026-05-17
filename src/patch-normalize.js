@@ -2,6 +2,7 @@ import {
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_FOLLOWER,
   DEFAULT_AUDIO_DEVICE_ID,
+  DEFAULT_CUSTOM_WAVE,
   DEFAULT_MAX_VOICES,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
@@ -15,6 +16,7 @@ import {
   MIN_MAX_VOICES,
   NODE_MIDI_PARAMETERS,
   NODE_MODULATION_TARGETS,
+  OSCILLATOR_WAVE_TYPES,
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
   WAVE_TYPES,
@@ -59,9 +61,11 @@ export function normalizePatch(patch) {
       frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
       audioInputGain: Number.isFinite(Number(node.audioInputGain)) ? clamp(Number(node.audioInputGain), 0, 4) : 1,
+      customWave: normalizeCustomWave(node.customWave),
     };
   });
   const nodeIds = new Set(nodes.map((node) => node.id));
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const sourceLinksById = new Map();
   const linkIdsByIndex = source.links.map((link, index) => {
     const sourceId = sourceEntityId(link.id, "link", index);
@@ -96,6 +100,7 @@ export function normalizePatch(patch) {
           link.modulationTarget,
           to,
           sourceLinkIds.has(link.to) ? sourceLinksById.get(link.to) : null,
+          nodesById.get(to),
         ),
         drone: Boolean(link.drone),
         signalMode: normalizeSignalMode(link.signalMode),
@@ -145,15 +150,15 @@ export function normalizeLinkFilter(filter = {}) {
   return {
     type,
     cutoff: Number.isFinite(Number(filter.cutoff))
-      ? clamp(Number(filter.cutoff), 20, 12000)
-      : DEFAULT_LINK_FILTER.cutoff,
+      ? clamp(Number(filter.cutoff), type === "formant" ? 0 : 20, type === "formant" ? 1 : 12000)
+      : type === "formant" ? 0 : DEFAULT_LINK_FILTER.cutoff,
     resonance: Number.isFinite(Number(filter.resonance))
-      ? clamp(Number(filter.resonance), 0.1, 12)
+      ? clamp(Number(filter.resonance), 0.1, type === "formant" ? 36 : 12)
       : DEFAULT_LINK_FILTER.resonance,
   };
 }
 
-export function normalizeModulationTarget(target, to, targetLink = null) {
+export function normalizeModulationTarget(target, to, targetLink = null, targetNode = null) {
   if (to === "audio") return "amplitude";
   if (targetLink) {
     const targets = linkHasPan(targetLink)
@@ -161,7 +166,10 @@ export function normalizeModulationTarget(target, to, targetLink = null) {
       : LINK_MODULATION_TARGETS.filter((item) => item !== "pan");
     return targets.includes(target) ? target : "amplitude";
   }
-  return NODE_MODULATION_TARGETS.includes(target) ? target : "phase";
+  const targets = targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
+    ? NODE_MODULATION_TARGETS
+    : NODE_MODULATION_TARGETS.filter((item) => item !== "wave");
+  return targets.includes(target) ? target : "phase";
 }
 
 export function normalizeFrequencyMode(mode) {
@@ -170,6 +178,37 @@ export function normalizeFrequencyMode(mode) {
 
 export function normalizeSignalMode(mode) {
   return LINK_SIGNAL_MODES.includes(mode) ? mode : "raw";
+}
+
+export function normalizeCustomWave(customWave = {}) {
+  const customWaveModes = new Set(["loop", "once", "ping-pong", "sustain", "sustain-loop", "sustain-ping-pong"]);
+  const sourceMode = customWave.mode || customWave.playback;
+  const mode = customWaveModes.has(sourceMode) ? sourceMode : DEFAULT_CUSTOM_WAVE.mode;
+  const sustainStart = Number.isFinite(Number(customWave.sustainStart))
+    ? clamp(Number(customWave.sustainStart), 0, 0.999)
+    : DEFAULT_CUSTOM_WAVE.sustainStart;
+  const sustainEnd = Number.isFinite(Number(customWave.sustainEnd))
+    ? clamp(Number(customWave.sustainEnd), sustainStart + 0.001, 1)
+    : Math.max(sustainStart + 0.001, DEFAULT_CUSTOM_WAVE.sustainEnd);
+  const sourcePoints = Array.isArray(customWave.points) ? customWave.points : DEFAULT_CUSTOM_WAVE.points;
+  const pointsByX = new Map();
+  for (const point of sourcePoints) {
+    const x = Number(point?.x);
+    const y = Number(point?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    pointsByX.set(clamp(x, 0, 1), clamp(y, -1, 1));
+  }
+  pointsByX.set(0, 0);
+  pointsByX.set(1, 0);
+  const points = [...pointsByX.entries()]
+    .map(([x, y]) => ({ x, y }))
+    .sort((a, b) => a.x - b.x);
+  return {
+    mode,
+    sustainStart,
+    sustainEnd,
+    points,
+  };
 }
 
 export function linkHasPan(link) {

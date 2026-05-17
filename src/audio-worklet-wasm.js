@@ -14,6 +14,8 @@ const LINK_CONTROL_SETTLE_EPSILON = 1e-7;
 const LINK_METER_POST_SECONDS = 1 / 30;
 const MASTER_DC_BLOCK_HZ = 10;
 const DENORMAL_EPSILON = 1e-20;
+const FORMANT_INTENSITY_MAX = 36;
+const MAX_CUSTOM_WAVE_POINTS = 64;
 
 const WAVE_IDS = new Map([
   ["sine", 0],
@@ -25,11 +27,14 @@ const WAVE_IDS = new Map([
   ["noise", 6],
   ["perlin", 7],
   ["audio-input", 8],
+  ["custom", 9],
 ]);
 
 const MODULATION_TARGET_IDS = new Map([
   ["phase", 0],
   ["frequency", 1],
+  ["wave", 5],
+  ["phaseResetTrigger", 6],
   ["ring", 2],
   ["fold", 3],
   ["mix", 4],
@@ -58,7 +63,25 @@ const FILTER_TYPE_IDS = new Map([
   ["lowpass", 1],
   ["highpass", 2],
   ["bandpass", 3],
+  ["formant", 4],
 ]);
+const CUSTOM_WAVE_MODE_IDS = new Map([
+  ["loop", 0],
+  ["once", 1],
+  ["ping-pong", 2],
+  ["sustain", 3],
+  ["sustain-loop", 4],
+  ["sustain-ping-pong", 5],
+]);
+const DEFAULT_CUSTOM_WAVE = Object.freeze({
+  mode: "loop",
+  sustainStart: 0.5,
+  sustainEnd: 0.75,
+  points: Object.freeze([
+    Object.freeze({ x: 0, y: 0 }),
+    Object.freeze({ x: 1, y: 0 }),
+  ]),
+});
 
 class VisualFmWasmEngine extends AudioWorkletProcessor {
   constructor(options = {}) {
@@ -69,7 +92,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.linksById = new Map();
     this.linkControlSmoothers = new Map();
     this.activeLinkControlSmoothers = new Set();
-    this.hasDroneOutput = false;
+    this.hasActiveDroneLinks = false;
     this.maxVoices = 5;
     this.voices = new Map();
     this.activeVoicesByNote = new Map();
@@ -155,11 +178,11 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.linkMeterEnvelopeSums = new Float64Array(this.wasm.memory.buffer, this.wasm.linkMeterEnvelopePtr(), 1024);
         this.linkMeterCounts = new Uint32Array(this.wasm.memory.buffer, this.wasm.linkMeterCountPtr(), 1024);
       }
-      this.wasm.resetPhases();
+        this.wasm.resetPhases();
       this.ready = true;
       this.syncRustGraph();
       for (const link of this.links) {
-        if (!link.controlSmoother) link.controlSmoother = this.syncLinkControlSmoother(link);
+        link.controlSmoother = this.syncLinkControlSmoother(link, true);
         this.applyLinkControlSmoother(link);
       }
       this.port.postMessage({ type: "backendStatus", payload: { backend: "wasm", ready: true } });
@@ -176,6 +199,17 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.nodesById = new Map(this.nodes.map((node) => [node.id, node]));
     this.links = (graph.links || []).map((link) => this.normalizeLink(link));
     this.linksById = new Map(this.links.map((link) => [link.id, link]));
+    const linkModulations = new Map();
+    for (const link of this.links) {
+      if (!this.linksById.has(link.to)) continue;
+      const modulators = linkModulations.get(link.to) || [];
+      modulators.push(link);
+      linkModulations.set(link.to, modulators);
+    }
+    for (const link of this.links) {
+      link.hasEnvelopeTriggers = (linkModulations.get(link.id) || [])
+        .some((modLink) => modLink.modulationTarget === "envelopeTrigger");
+    }
     const linkIds = new Set(this.links.map((link) => link.id));
     for (const id of this.linkControlSmoothers.keys()) {
       if (!linkIds.has(id)) {
@@ -185,10 +219,10 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     }
     this.maxVoices = this.clamp(Math.round(Number(graph.maxVoices) || 5), 1, MAX_ACTIVE_VOICES);
     this.masterEffects = this.normalizeEffects(graph.masterEffects);
-    this.hasDroneOutput = this.links.some((link) => link.to === "audio" && link.drone);
+    this.hasActiveDroneLinks = this.links.some((link) => link.drone || link.hasEnvelopeTriggers);
     this.syncRustGraph();
     for (const link of this.links) {
-      link.controlSmoother = this.syncLinkControlSmoother(link);
+      link.controlSmoother = this.syncLinkControlSmoother(link, true);
       this.applyLinkControlSmoother(link);
     }
     this.enforceVoiceLimit();
@@ -207,6 +241,41 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
+      customWave: this.normalizeCustomWave(node.customWave),
+    };
+  }
+
+  normalizeCustomWave(customWave = {}) {
+    const customWaveModes = new Set(["loop", "once", "ping-pong", "sustain", "sustain-loop", "sustain-ping-pong"]);
+    const sourceMode = customWave.mode || customWave.playback;
+    const mode = customWaveModes.has(sourceMode) ? sourceMode : DEFAULT_CUSTOM_WAVE.mode;
+    const sustainStart = Number.isFinite(Number(customWave.sustainStart))
+      ? this.clamp(Number(customWave.sustainStart), 0, 0.999)
+      : DEFAULT_CUSTOM_WAVE.sustainStart;
+    const sustainEnd = Number.isFinite(Number(customWave.sustainEnd))
+      ? this.clamp(Number(customWave.sustainEnd), sustainStart + 0.001, 1)
+      : Math.max(sustainStart + 0.001, DEFAULT_CUSTOM_WAVE.sustainEnd);
+    const sourcePoints = Array.isArray(customWave.points) ? customWave.points : DEFAULT_CUSTOM_WAVE.points;
+    const pointsByX = new Map();
+    for (const point of sourcePoints) {
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      pointsByX.set(this.clamp(x, 0, 1), this.clamp(y, -1, 1));
+    }
+    pointsByX.set(0, 0);
+    pointsByX.set(1, 0);
+    const points = [...pointsByX.entries()]
+      .map(([x, y]) => ({ x, y }))
+      .sort((a, b) => a.x - b.x);
+    const cappedPoints = points.length > MAX_CUSTOM_WAVE_POINTS
+      ? [...points.slice(0, MAX_CUSTOM_WAVE_POINTS - 1), points[points.length - 1]]
+      : points;
+    return {
+      mode,
+      sustainStart,
+      sustainEnd,
+      points: cappedPoints,
     };
   }
 
@@ -243,8 +312,12 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       },
       filter: {
         type: FILTER_TYPE_IDS.has(link.filter?.type) ? link.filter.type : "none",
-        cutoff: Number.isFinite(filterCutoff) ? this.clamp(filterCutoff, 20, Math.min(12000, sampleRate * 0.45)) : 5000,
-        resonance: Number.isFinite(filterResonance) ? this.clamp(filterResonance, 0.1, 12) : 0.7,
+        cutoff: link.filter?.type === "formant"
+          ? this.clamp(Number.isFinite(filterCutoff) ? filterCutoff : 0, 0, 1)
+          : Number.isFinite(filterCutoff) ? this.clamp(filterCutoff, 20, Math.min(12000, sampleRate * 0.45)) : 5000,
+        resonance: Number.isFinite(filterResonance)
+          ? this.clamp(filterResonance, 0.1, link.filter?.type === "formant" ? FORMANT_INTENSITY_MAX : 12)
+          : 0.7,
       },
       envelope: {
         delay: Number.isFinite(envelopeDelay) ? this.clamp(envelopeDelay, 0, 4) : 0,
@@ -269,7 +342,15 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         node.frequency,
         node.speed,
         node.audioInputGain,
+        CUSTOM_WAVE_MODE_IDS.get(node.customWave?.mode) ?? 0,
+        node.customWave?.sustainStart ?? 0.5,
+        node.customWave?.sustainEnd ?? 0.75,
       );
+      if (node.wasmIndex >= 0 && node.wave === "custom" && typeof this.wasm.addCustomWavePoint === "function") {
+        for (const point of node.customWave.points) {
+          this.wasm.addCustomWavePoint(node.wasmIndex, point.x, point.y);
+        }
+      }
     }
 
     this.links.forEach((link, index) => {
@@ -306,7 +387,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
           link.follower?.attack || 0.01,
           link.follower?.release || 0.12,
           FILTER_TYPE_IDS.get(link.filter?.type) ?? 0,
-          link.filter?.cutoff || 5000,
+          link.filter?.cutoff ?? 5000,
           link.filter?.resonance || 0.7,
           link.envelope?.delay || 0,
           link.envelope?.attack || 0.01,
@@ -335,9 +416,21 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.wasm.setLinkVelocitySensitivity(link.wasmIndex, link.velocitySensitivity);
       }
     } else if (parameter === "filter.cutoff") {
-      link.filter.cutoff = this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
+      link.filter.cutoff = link.filter.type === "formant"
+        ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 0, 0, 1)
+        : this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
+      if (link.filter.type === "formant" && this.wasm?.setLinkFilterCutoff && link.wasmIndex >= 0) {
+        this.wasm.setLinkFilterCutoff(link.wasmIndex, link.filter.cutoff);
+      }
     } else if (parameter === "filter.resonance") {
-      link.filter.resonance = this.clamp(Number(value) || 0.7, 0.1, 12);
+      link.filter.resonance = this.clamp(
+        Number(value) || 0.7,
+        0.1,
+        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+      );
+      if (link.filter.type === "formant" && this.wasm?.setLinkFilterResonance && link.wasmIndex >= 0) {
+        this.wasm.setLinkFilterResonance(link.wasmIndex, link.filter.resonance);
+      }
     } else {
       return;
     }
@@ -351,7 +444,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       delay: link.delay,
       noise: link.noise,
       pan: link.pan,
-      filterCutoff: link.filter?.cutoff || 5000,
+      filterCutoff: link.filter?.cutoff ?? 5000,
       filterResonance: link.filter?.resonance || 0.7,
     };
   }
@@ -374,11 +467,16 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     }
   }
 
-  syncLinkControlSmoother(link) {
+  syncLinkControlSmoother(link, resetCurrent = false) {
     const target = this.linkControlTargets(link);
     const existing = this.linkControlSmoothers.get(link.id);
     if (existing) {
       existing.target = target;
+      if (resetCurrent) existing.current = { ...target };
+      if (resetCurrent || link.filter?.type === "formant") {
+        existing.current.filterCutoff = target.filterCutoff;
+        existing.current.filterResonance = target.filterResonance;
+      }
       this.syncActiveLinkControlSmoother(existing);
       return existing;
     }
@@ -632,6 +730,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.enforceVoiceLimit();
     const slot = this.allocateSlot();
     if (slot === null) return;
+    this.wasm?.resetVoiceSlot?.(slot);
     const voice = {
       id: `voice-${this.voiceCounter++}`,
       slot,
@@ -798,7 +897,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.wasm.clear(frames);
     this.copyInput(inputs, frames);
 
-    if (this.hasDroneOutput) {
+    if (this.hasActiveDroneLinks) {
       this.renderVoice({
         slot: DRONE_SLOT,
         frequency: 440,

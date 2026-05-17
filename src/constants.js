@@ -1,12 +1,22 @@
 export const STORAGE_KEY = "visual-fm.patch.v1";
 
-export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass"];
+export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass", "formant"];
 export const LINK_SIGNAL_MODES = ["raw", "envelope", "inverted-envelope"];
-export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"];
-export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
+export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"];
+export const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"];
+export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"]);
+export const DEFAULT_CUSTOM_WAVE = Object.freeze({
+  mode: "loop",
+  sustainStart: 0.5,
+  sustainEnd: 0.75,
+  points: Object.freeze([
+    Object.freeze({ x: 0, y: 0 }),
+    Object.freeze({ x: 1, y: 0 }),
+  ]),
+});
 export const SPEED_WAVE_TYPES = new Set(["perlin"]);
 export const FREQUENCY_MODES = ["ratio", "fixed"];
-export const NODE_MODULATION_TARGETS = ["phase", "frequency", "ring", "fold", "mix"];
+export const NODE_MODULATION_TARGETS = ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix"];
 export const LINK_MODULATION_TARGETS = [
   "amplitude",
   "pan",
@@ -67,7 +77,14 @@ export const RECENT_MIDI_CC_WINDOW_MS = 2000;
 export const MIDI_CC_CURVES = ["linear", "logarithmic", "exponential"];
 
 export const LINK_INPUT_T = 0.45;
-export const NODE_MIDI_PARAMETERS = new Set(["wave", "frequencyMode", "ratio", "frequency", "speed", "audioInputGain"]);
+export const NODE_MIDI_PARAMETERS = new Set([
+  "wave",
+  "frequencyMode",
+  "ratio",
+  "frequency",
+  "speed",
+  "audioInputGain",
+]);
 export const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
   "amount",
@@ -104,8 +121,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8, audioInputGain: 1 },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8, audioInputGain: 1 },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
   ],
   links: [
     {

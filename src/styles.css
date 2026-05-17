@@ -1011,6 +1011,51 @@ select {
   accent-color: var(--green);
 }
 
+.custom-wave-preview {
+  display: block;
+  width: 100%;
+  height: 84px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: #101317;
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.custom-wave-preview svg,
+.custom-wave-editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.custom-wave-zero {
+  stroke: rgba(241, 244, 242, 0.23);
+  stroke-width: 1;
+}
+
+.custom-wave-path {
+  fill: none;
+  stroke: var(--green);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.custom-wave-points circle,
+.custom-wave-handle {
+  fill: #101317;
+  stroke: var(--green);
+  stroke-width: 2;
+}
+
+.custom-wave-points .custom-wave-endpoint,
+.custom-wave-handle.custom-wave-endpoint {
+  fill: var(--green);
+}
+
 .modal-backdrop {
   position: fixed;
   z-index: 20;
@@ -1029,6 +1074,8 @@ select {
   border-radius: 8px;
   background: #17191d;
   box-shadow: var(--shadow);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .modal-stack {
@@ -1058,6 +1105,76 @@ select {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 10px;
+}
+
+.custom-wave-modal {
+  width: min(760px, 100%);
+}
+
+.custom-wave-editor {
+  height: min(320px, 52vh);
+  margin: 0 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    #101317;
+  background-size: 40px 40px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.custom-wave-editor text {
+  fill: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.custom-wave-chart-chrome {
+  pointer-events: none;
+}
+
+.custom-wave-grid-line {
+  stroke: rgba(241, 244, 242, 0.14);
+  stroke-width: 1;
+}
+
+.custom-wave-sustain-line {
+  stroke: #82b7f5;
+  stroke-dasharray: 8 7;
+  stroke-width: 2;
+}
+
+.custom-wave-sustain-line.is-end {
+  stroke: #a8d8f5;
+}
+
+.custom-wave-modal-controls {
+  --custom-wave-field-count: 1;
+  display: grid;
+  grid-template-columns: repeat(var(--custom-wave-field-count), minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.custom-wave-handle {
+  cursor: grab;
+}
+
+.custom-wave-handle.is-locked {
+  cursor: default;
+}
+
+.custom-wave-handle:active {
+  cursor: grabbing;
+}
+
+.custom-wave-handle.is-locked:active {
+  cursor: default;
 }
 
 .patch-library-modal {

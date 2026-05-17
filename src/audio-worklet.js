@@ -8,6 +8,7 @@ const MAX_MAX_ACTIVE_VOICES = 16;
 const NOTE_ON_BATCH_SECONDS = 0.008;
 const VOICE_START_FADE_SECONDS = 0.006;
 const VOICE_STEAL_FADE_SECONDS = 0.03;
+const CUSTOM_ONESHOT_EDGE_FADE_SECONDS = 0.002;
 const LINK_CONTROL_SMOOTH_SECONDS = 0.012;
 const LINK_CONTROL_SETTLE_EPSILON = 1e-7;
 const ENVELOPE_TRIGGER_THRESHOLD = 0.5;
@@ -15,9 +16,11 @@ const ENVELOPE_TRIGGER_REARM = 0.45;
 const LINK_METER_POST_SECONDS = 1 / 30;
 const DENORMAL_EPSILON = 1e-20;
 const MASTER_DC_BLOCK_HZ = 10;
+const FORMANT_INTENSITY_MAX = 36;
 const EMPTY_LINKS = Object.freeze([]);
-const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "noise", "perlin", "audio-input"]);
-const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold"]);
+const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"];
+const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"]);
+const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"]);
 const SPEED_WAVE_TYPES = new Set(["perlin"]);
 const LINK_SIGNAL_MODES = new Set(["raw", "envelope", "inverted-envelope"]);
 const LINK_ENVELOPE_TARGETS = new Set([
@@ -38,6 +41,42 @@ const DEFAULT_LINK_FOLLOWER = Object.freeze({
   attack: 0.01,
   release: 0.12,
 });
+const DEFAULT_CUSTOM_WAVE = Object.freeze({
+  mode: "loop",
+  sustainStart: 0.5,
+  sustainEnd: 0.75,
+  points: Object.freeze([
+    Object.freeze({ x: 0, y: 0 }),
+    Object.freeze({ x: 1, y: 0 }),
+  ]),
+});
+const FORMANT_VOWELS = Object.freeze([
+  Object.freeze([
+    Object.freeze({ frequency: 800, q: 7.5, gainDb: 0 }),
+    Object.freeze({ frequency: 1150, q: 9, gainDb: -5 }),
+    Object.freeze({ frequency: 2900, q: 12, gainDb: -13 }),
+  ]),
+  Object.freeze([
+    Object.freeze({ frequency: 420, q: 7.5, gainDb: 0 }),
+    Object.freeze({ frequency: 1750, q: 12, gainDb: -4 }),
+    Object.freeze({ frequency: 2600, q: 13, gainDb: -12 }),
+  ]),
+  Object.freeze([
+    Object.freeze({ frequency: 300, q: 8.5, gainDb: 0 }),
+    Object.freeze({ frequency: 2200, q: 14, gainDb: -3 }),
+    Object.freeze({ frequency: 3000, q: 15, gainDb: -10 }),
+  ]),
+  Object.freeze([
+    Object.freeze({ frequency: 500, q: 8, gainDb: 0 }),
+    Object.freeze({ frequency: 900, q: 9, gainDb: -5 }),
+    Object.freeze({ frequency: 2500, q: 12, gainDb: -14 }),
+  ]),
+  Object.freeze([
+    Object.freeze({ frequency: 350, q: 8, gainDb: 0 }),
+    Object.freeze({ frequency: 700, q: 9, gainDb: -7 }),
+    Object.freeze({ frequency: 2400, q: 12, gainDb: -16 }),
+  ]),
+]);
 
 class VisualFmEngine extends AudioWorkletProcessor {
   constructor() {
@@ -112,10 +151,11 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const rawLinksById = new Map(rawLinks.map((link) => [link.id, link]));
     this.links = rawLinks.map((link) => {
       const targetLink = rawLinksById.get(link.to);
+      const targetNode = this.nodesById.get(link.to);
       const filter = this.normalizeLinkFilter(link.filter);
       const normalized = {
         ...link,
-        modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to, targetLink),
+        modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to, targetLink, targetNode),
         drone: Boolean(link.drone),
         signalMode: LINK_SIGNAL_MODES.has(link.signalMode) ? link.signalMode : "raw",
         follower: this.normalizeFollower(link.follower),
@@ -198,6 +238,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (!voice.linkEnvelopeReleaseLevels) voice.linkEnvelopeReleaseLevels = new Map();
     if (!voice.sampleHolds) voice.sampleHolds = new Map();
     if (!voice.perlinStates) voice.perlinStates = new Map();
+    if (!voice.customWaveDone) voice.customWaveDone = new Map();
+    if (!voice.customWaveDirections) voice.customWaveDirections = new Map();
 
     const nodeIds = new Set(this.nodes.map((node) => node.id));
     const linkIds = new Set(this.links.map((link) => link.id));
@@ -209,7 +251,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
       if (!nodeIds.has(key)) voice.feedback.delete(key);
     }
     for (const key of voice.nodeFilters.keys()) {
-      if (!nodeIds.has(key)) voice.nodeFilters.delete(key);
+      const nodeId = String(key).split(":")[0];
+      if (!nodeIds.has(nodeId)) voice.nodeFilters.delete(key);
     }
     for (const key of voice.frequencyMods.keys()) {
       if (!nodeIds.has(key)) voice.frequencyMods.delete(key);
@@ -219,6 +262,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
     for (const key of voice.perlinStates.keys()) {
       if (!nodeIds.has(key)) voice.perlinStates.delete(key);
+    }
+    for (const key of voice.customWaveDone.keys()) {
+      if (!nodeIds.has(key)) voice.customWaveDone.delete(key);
+    }
+    for (const key of voice.customWaveDirections.keys()) {
+      if (!nodeIds.has(key)) voice.customWaveDirections.delete(key);
     }
     for (const key of voice.linkFilters.keys()) {
       if (!linkStateKeys.has(key)) voice.linkFilters.delete(key);
@@ -256,7 +305,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
     for (const node of this.nodes) {
       if (!voice.phases.has(node.id)) {
-        voice.phases.set(node.id, Math.random());
+        voice.phases.set(node.id, node.wave === "custom" ? 0 : Math.random());
       }
       if (!voice.feedback.has(node.id)) {
         voice.feedback.set(node.id, { prev1: 0, prev2: 0 });
@@ -266,6 +315,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
       if (node.wave === "perlin" && !voice.perlinStates.has(node.id)) {
         voice.perlinStates.set(node.id, this.createPerlinState());
+      }
+      if (node.wave !== "custom" || !this.isCustomOneShotMode(node.customWave?.mode)) {
+        voice.customWaveDone.delete(node.id);
+        voice.customWaveDirections.delete(node.id);
       }
     }
   }
@@ -283,6 +336,37 @@ class VisualFmEngine extends AudioWorkletProcessor {
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
+      customWave: this.normalizeCustomWave(node.customWave),
+    };
+  }
+
+  normalizeCustomWave(customWave = {}) {
+    const customWaveModes = new Set(["loop", "once", "ping-pong", "sustain", "sustain-loop", "sustain-ping-pong"]);
+    const sourceMode = customWave.mode || customWave.playback;
+    const mode = customWaveModes.has(sourceMode) ? sourceMode : DEFAULT_CUSTOM_WAVE.mode;
+    const sustainStart = Number.isFinite(Number(customWave.sustainStart))
+      ? this.clamp(Number(customWave.sustainStart), 0, 0.999)
+      : DEFAULT_CUSTOM_WAVE.sustainStart;
+    const sustainEnd = Number.isFinite(Number(customWave.sustainEnd))
+      ? this.clamp(Number(customWave.sustainEnd), sustainStart + 0.001, 1)
+      : Math.max(sustainStart + 0.001, DEFAULT_CUSTOM_WAVE.sustainEnd);
+    const sourcePoints = Array.isArray(customWave.points) ? customWave.points : DEFAULT_CUSTOM_WAVE.points;
+    const pointsByX = new Map();
+    for (const point of sourcePoints) {
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      pointsByX.set(this.clamp(x, 0, 1), this.clamp(y, -1, 1));
+    }
+    pointsByX.set(0, 0);
+    pointsByX.set(1, 0);
+    return {
+      mode,
+      sustainStart,
+      sustainEnd,
+      points: [...pointsByX.entries()]
+        .map(([x, y]) => ({ x, y }))
+        .sort((a, b) => a.x - b.x),
     };
   }
 
@@ -317,13 +401,19 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   normalizeLinkFilter(filter = {}) {
-    const type = ["none", "lowpass", "highpass", "bandpass"].includes(filter.type) ? filter.type : "none";
+    const type = ["none", "lowpass", "highpass", "bandpass", "formant"].includes(filter.type) ? filter.type : "none";
     const normalized = {
       type,
-      cutoff: this.clamp(Number(filter.cutoff) || 5000, 20, Math.min(12000, sampleRate * 0.45)),
-      resonance: this.clamp(Number(filter.resonance) || 0.7, 0.1, 12),
+      cutoff: type === "formant"
+        ? this.clamp(Number.isFinite(Number(filter.cutoff)) ? Number(filter.cutoff) : 0, 0, 1)
+        : this.clamp(Number(filter.cutoff) || 5000, 20, Math.min(12000, sampleRate * 0.45)),
+      resonance: this.clamp(
+        Number(filter.resonance) || 0.7,
+        0.1,
+        type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+      ),
     };
-    normalized.coefficients = type === "none" ? null : this.filterCoefficients(normalized);
+    normalized.coefficients = type === "none" || type === "formant" ? null : this.filterCoefficients(normalized);
     return normalized;
   }
 
@@ -334,7 +424,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
-  normalizeModulationTarget(target, to, targetLink = null) {
+  normalizeModulationTarget(target, to, targetLink = null, targetNode = null) {
     if (to === "audio") return "amplitude";
     if (targetLink) {
       const envelopeTargets = [...LINK_ENVELOPE_TARGETS];
@@ -343,7 +433,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
         : ["amplitude", "noise", "delay", "filterCutoff", "filterResonance", "envelopeTrigger", ...envelopeTargets];
       return targets.includes(target) ? target : "amplitude";
     }
-    return ["phase", "frequency", "ring", "fold", "mix"].includes(target) ? target : "phase";
+    const targets = targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
+      ? ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix"]
+      : ["phase", "phaseResetTrigger", "frequency", "ring", "fold", "mix"];
+    return targets.includes(target) ? target : "phase";
   }
 
   linkControlTargets(link) {
@@ -352,7 +445,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       delay: link.delay,
       noise: link.noise,
       pan: link.pan,
-      filterCutoff: link.filter?.cutoff || 5000,
+      filterCutoff: link.filter?.cutoff ?? 5000,
       filterResonance: link.filter?.resonance || 0.7,
     };
   }
@@ -413,9 +506,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
         VELOCITY_SENSITIVITY_MAX,
       );
     } else if (parameter === "filter.cutoff") {
-      link.filter.cutoff = this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
+      link.filter.cutoff = link.filter.type === "formant"
+        ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 0, 0, 1)
+        : this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
     } else if (parameter === "filter.resonance") {
-      link.filter.resonance = this.clamp(Number(value) || 0.7, 0.1, 12);
+      link.filter.resonance = this.clamp(
+        Number(value) || 0.7,
+        0.1,
+        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+      );
     } else {
       return;
     }
@@ -604,11 +703,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
       linkEnvelopeReleaseLevels: new Map(),
       sampleHolds: new Map(),
       perlinStates: new Map(),
+      customWaveDone: new Map(),
+      customWaveDirections: new Map(),
       isDrone,
     };
 
     for (const node of this.nodes) {
-      voice.phases.set(node.id, Math.random());
+      voice.phases.set(node.id, node.wave === "custom" ? 0 : Math.random());
       voice.feedback.set(node.id, { prev1: 0, prev2: 0 });
       if (node.wave === "sample-hold") {
         voice.sampleHolds.set(node.id, this.randomBipolar());
@@ -955,6 +1056,36 @@ class VisualFmEngine extends AudioWorkletProcessor {
     voice.linkTriggerSigns.set(modLink.id, sign);
   }
 
+  resetNodePhase(node, voice) {
+    if (!node?.id || voice.stolenAt !== null) return;
+    if (!voice.isDrone && voice.releasedAt !== null) return;
+    voice.phases.set(node.id, 0);
+    voice.customWaveDone.delete(node.id);
+    voice.customWaveDirections.set(node.id, 1);
+  }
+
+  applyPhaseResetTrigger(modLink, targetNode, voice, value) {
+    if (!Number.isFinite(value)) return;
+    const previousArmed = voice.linkTriggerArmed.get(modLink.id);
+    if (previousArmed === undefined) {
+      if (value >= ENVELOPE_TRIGGER_THRESHOLD) {
+        this.resetNodePhase(targetNode, voice);
+        voice.linkTriggerArmed.set(modLink.id, false);
+      } else {
+        voice.linkTriggerArmed.set(modLink.id, true);
+      }
+      return;
+    }
+    if (previousArmed && value >= ENVELOPE_TRIGGER_THRESHOLD) {
+      this.resetNodePhase(targetNode, voice);
+      voice.linkTriggerArmed.set(modLink.id, false);
+      return;
+    }
+    if (!previousArmed && value <= ENVELOPE_TRIGGER_REARM) {
+      voice.linkTriggerArmed.set(modLink.id, true);
+    }
+  }
+
   envelopeValue(link, voice, now, params = link) {
     if (link.drone) return 1;
     if (voice.isDrone && !link.hasEnvelopeTriggers) return 0;
@@ -975,9 +1106,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return Math.max(0, voice.releaseLevels.get(link.id) * this.decayCurve(t));
   }
 
-  oscillator(node, phase, voice) {
+  oscillator(node, phase, voice, wave = node.wave) {
     const p = phase - Math.floor(phase);
-    switch (node.wave) {
+    switch (wave) {
       case "triangle":
         return 1 - 4 * Math.abs(Math.round(p - 0.25) - (p - 0.25));
       case "saw":
@@ -995,12 +1126,128 @@ class VisualFmEngine extends AudioWorkletProcessor {
         return this.randomBipolar();
       case "perlin":
         return this.perlinValue(voice, node.id, p);
+      case "custom":
+        return this.customWaveValue(node, p);
       case "audio-input":
         return this.currentInputSample * node.audioInputGain;
       case "sine":
       default:
         return Math.sin(TWO_PI * p);
     }
+  }
+
+  customWaveValue(node, phase) {
+    const points = node.customWave?.points || DEFAULT_CUSTOM_WAVE.points;
+    if (points.length < 2) return 0;
+    const p = this.clamp(phase, 0, 1);
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const next = points[index];
+      if (p > next.x && index < points.length - 1) continue;
+      const span = next.x - previous.x;
+      if (span <= 0) return next.y;
+      const t = this.clamp((p - previous.x) / span, 0, 1);
+      return previous.y + (next.y - previous.y) * t;
+    }
+    return points[points.length - 1].y;
+  }
+
+  customOneShotEdgeGain(node, phase, baseFrequency) {
+    if (node.wave !== "custom" || !this.isCustomFiniteMode(node.customWave?.mode)) return 1;
+    if (!(baseFrequency > 0)) return 1;
+    const fadePhase = this.clamp(CUSTOM_ONESHOT_EDGE_FADE_SECONDS * baseFrequency, 0.0005, 0.08);
+    const p = this.clamp(phase, 0, 1);
+    return this.clamp(Math.min(p / fadePhase, (1 - p) / fadePhase), 0, 1);
+  }
+
+  isCustomFiniteMode(mode) {
+    return ["once", "sustain", "sustain-loop", "sustain-ping-pong"].includes(mode);
+  }
+
+  advanceCustomWavePhase(node, voice, step) {
+    const customWave = node.customWave || DEFAULT_CUSTOM_WAVE;
+    const mode = customWave.mode || "loop";
+    const released = voice.releasedAt !== null;
+    const current = voice.phases.get(node.id) || 0;
+    let direction = voice.customWaveDirections.get(node.id) || 1;
+    let next = current;
+    const start = this.clamp(customWave.sustainStart ?? 0.5, 0, 0.999);
+    const end = this.clamp(customWave.sustainEnd ?? 0.75, start + 0.001, 1);
+    const length = Math.max(0.001, end - start);
+    const finish = (value) => {
+      if (value >= 1) {
+        voice.customWaveDone.set(node.id, true);
+        voice.phases.set(node.id, 1);
+      } else {
+        voice.phases.set(node.id, this.clamp(value, 0, 1));
+      }
+      voice.customWaveDirections.set(node.id, direction);
+    };
+
+    if (mode === "ping-pong") {
+      next = current + step * direction;
+      if (next >= 1) {
+        next = 1 - (next - 1);
+        direction = -1;
+      } else if (next <= 0) {
+        next = -next;
+        direction = 1;
+      }
+      finish(next);
+      return;
+    }
+
+    if (mode === "once") {
+      finish(current + step);
+      return;
+    }
+
+    if (mode === "sustain") {
+      next = current + step;
+      if (!released && next >= start) next = start;
+      finish(next);
+      return;
+    }
+
+    if (mode === "sustain-loop") {
+      next = current + step;
+      if (!released) {
+        if (next >= start) {
+          next = start + (((next - start) % length) + length) % length;
+        }
+        finish(next);
+        return;
+      }
+      finish(next);
+      return;
+    }
+
+    if (mode === "sustain-ping-pong") {
+      if (!released) {
+        next = current + step * direction;
+        if (next >= end) {
+          next = end - (next - end);
+          direction = -1;
+        } else if (next <= start && current >= start) {
+          next = start + (start - next);
+          direction = 1;
+        } else if (next >= start && current < start) {
+          direction = 1;
+        }
+        finish(next);
+        return;
+      }
+      next = current + step * direction;
+      if (direction < 0 && next <= start) {
+        next = start + (start - next);
+        direction = 1;
+      }
+      finish(next);
+      return;
+    }
+
+    voice.phases.set(node.id, Number.isFinite(current + step) ? (current + step) - Math.floor(current + step) : 0);
+    voice.customWaveDirections.set(node.id, direction);
   }
 
   feedbackSignal(voice, nodeId) {
@@ -1026,7 +1273,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   filterCoefficients(filter) {
     const cutoff = this.clamp(Number(filter.cutoff) || 5000, 20, Math.min(12000, sampleRate * 0.45));
-    const q = this.clamp(Number(filter.resonance) || 0.7, 0.1, 12);
+    const q = this.clamp(Number(filter.resonance) || 0.7, 0.1, 96);
     const omega = (TWO_PI * cutoff) / sampleRate;
     const sin = Math.sin(omega);
     const cos = Math.cos(omega);
@@ -1061,11 +1308,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
   }
 
-  applyLinkFilter(link, voice, sample, filter = link.filter || { type: "none" }) {
-    if (filter.type === "none") return sample;
-
-    const state = this.linkFilterState(voice, link);
-    const coefficients = filter.coefficients || this.filterCoefficients(filter);
+  applyBiquadFilter(state, sample, coefficients) {
     const output = coefficients.b0 * sample
       + coefficients.b1 * state.x1
       + coefficients.b2 * state.x2
@@ -1077,6 +1320,68 @@ class VisualFmEngine extends AudioWorkletProcessor {
     state.y2 = state.y1;
     state.y1 = this.sanitizeSample(output, 4);
     return state.y1;
+  }
+
+  formantBands(morph, intensity) {
+    const position = this.clamp(morph, 0, 1) * (FORMANT_VOWELS.length - 1);
+    const leftIndex = Math.floor(position);
+    const rightIndex = Math.min(leftIndex + 1, FORMANT_VOWELS.length - 1);
+    const t = position - leftIndex;
+    const strength = this.clamp((intensity - 0.1) / 11.9, 0, 1);
+    const overdrive = this.clamp((intensity - 12) / (FORMANT_INTENSITY_MAX - 12), 0, 1);
+    const left = FORMANT_VOWELS[leftIndex];
+    const right = FORMANT_VOWELS[rightIndex];
+
+    return left.map((band, index) => {
+      const next = right[index];
+      const frequency = this.clamp(
+        band.frequency * Math.pow(next.frequency / band.frequency, t),
+        20,
+        Math.min(12000, sampleRate * 0.45),
+      );
+      const q = this.clamp((band.q + (next.q - band.q) * t) * (0.7 + strength * 1.9 + overdrive * 4.2), 0.1, 96);
+      const gainDb = band.gainDb + (next.gainDb - band.gainDb) * t + strength * 4 + overdrive * 18;
+      return {
+        frequency,
+        q,
+        gain: Math.pow(10, gainDb / 20),
+      };
+    });
+  }
+
+  applyFormantFilter(link, voice, sample, filter) {
+    const state = this.linkFilterState(voice, link);
+    if (!state.formants) {
+      state.formants = FORMANT_VOWELS[0].map(() => ({ x1: 0, x2: 0, y1: 0, y2: 0 }));
+    }
+
+    const intensity = this.clamp(Number(filter.resonance) || 0.7, 0.1, FORMANT_INTENSITY_MAX);
+    const strength = this.clamp((intensity - 0.1) / 11.9, 0, 1);
+    const overdrive = this.clamp((intensity - 12) / (FORMANT_INTENSITY_MAX - 12), 0, 1);
+    const bands = this.formantBands(Number(filter.cutoff) || 0, intensity);
+    let wet = 0;
+    for (let index = 0; index < bands.length; index += 1) {
+      const band = bands[index];
+      const coefficients = this.filterCoefficients({
+        type: "bandpass",
+        cutoff: band.frequency,
+        resonance: band.q,
+      });
+      wet += this.applyBiquadFilter(state.formants[index], sample, coefficients) * band.gain;
+    }
+
+    const dryMix = 0.42 - strength * 0.18 - overdrive * 0.16;
+    const wetMix = 0.46 + strength * 0.38 + overdrive * 0.95;
+    return this.sanitizeSample(sample * dryMix + wet * wetMix, 4);
+  }
+
+  applyLinkFilter(link, voice, sample, filter = link.filter || { type: "none" }) {
+    if (filter.type === "none") return sample;
+    if (filter.type === "formant") return this.applyFormantFilter(link, voice, sample, filter);
+
+    const state = this.linkFilterState(voice, link);
+    const coefficients = filter.coefficients || this.filterCoefficients(filter);
+    return this.applyBiquadFilter(state, sample, coefficients);
   }
 
   linkDelayState(voice, link) {
@@ -1158,7 +1463,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       cutoff: controls.filterCutoff,
       resonance: controls.filterResonance,
     };
-    filter.coefficients = filter.type === "none" ? null : this.filterCoefficients(filter);
+    filter.coefficients = filter.type === "none" || filter.type === "formant" ? null : this.filterCoefficients(filter);
     return {
       amount: controls.amount,
       delay: controls.delay,
@@ -1236,8 +1541,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
     params.panGains = panMod === 0 ? baseParams.panGains : this.panGains(params.pan);
     params.filter = {
       type: params.filter.type,
-      cutoff: this.clamp(params.filter.cutoff * Math.pow(2, this.clamp(cutoffMod, -5, 5)), 20, Math.min(12000, sampleRate * 0.45)),
-      resonance: this.clamp(params.filter.resonance + resonanceMod, 0.1, 12),
+      cutoff: params.filter.type === "formant"
+        ? this.clamp(params.filter.cutoff + cutoffMod, 0, 1)
+        : this.clamp(params.filter.cutoff * Math.pow(2, this.clamp(cutoffMod, -5, 5)), 20, Math.min(12000, sampleRate * 0.45)),
+      resonance: this.clamp(
+        params.filter.resonance + resonanceMod,
+        0.1,
+        params.filter.type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+      ),
     };
     if (cutoffMod === 0 && resonanceMod === 0) {
       params.filter = baseParams.filter;
@@ -1378,6 +1689,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const baseFrequency = this.baseFrequency(node, voice);
     let phaseMod = 0;
     let frequencyMod = 0;
+    let waveMod = 0;
     let foldDrive = 0;
     let mixAmount = 0;
     let mixSignal = 0;
@@ -1388,9 +1700,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
       const source = link.from === nodeId
         ? this.feedbackSignal(voice, nodeId)
         : this.renderNode(link.from, voice, now, cache, stack, linkStack);
-      const modulation = this.linkModulationSignal(link, voice, now, source, cache, stack, linkStack);
+      const modulation = this.linkModulationSignal(link, voice, now, source, cache, stack, linkStack, {
+        ignoreEnvelope: link.modulationTarget === "phaseResetTrigger",
+      });
       if (link.modulationTarget === "frequency") {
         frequencyMod += modulation.value;
+      } else if (link.modulationTarget === "phaseResetTrigger") {
+        this.applyPhaseResetTrigger(link, node, voice, modulation.value);
+      } else if (link.modulationTarget === "wave") {
+        waveMod += modulation.value;
       } else if (link.modulationTarget === "ring") {
         ringMods.push(modulation);
       } else if (link.modulationTarget === "fold") {
@@ -1409,8 +1727,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
 
     const phase = voice.phases.get(nodeId);
+    const isOneShotDone = node.wave === "custom"
+      && this.isCustomFiniteMode(node.customWave?.mode)
+      && voice.customWaveDone.get(node.id);
     const isActiveWave = PITCHED_WAVE_TYPES.has(node.wave) ? baseFrequency > 0 : true;
-    let value = isActiveWave ? this.oscillator(node, phase + phaseMod, voice) : 0;
+    const wave = this.modulatedWave(node.wave, waveMod);
+    let value = isActiveWave && !isOneShotDone ? this.oscillator(node, phase + phaseMod, voice, wave) : 0;
+    value *= this.customOneShotEdgeGain(node, phase, baseFrequency);
     for (const modulation of ringMods) {
       const depth = this.clamp(modulation.amount, 0, 1);
       value = this.sanitizeSample(value * (1 - depth) + value * modulation.signal * depth, 4);
@@ -1432,6 +1755,13 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return value;
   }
 
+  modulatedWave(baseWave, modulation) {
+    const baseIndex = OSCILLATOR_WAVE_TYPES.indexOf(baseWave);
+    if (baseIndex === -1 || !Number.isFinite(modulation)) return baseWave;
+    const index = this.clamp(Math.round(baseIndex + modulation), 0, OSCILLATOR_WAVE_TYPES.length - 1);
+    return OSCILLATOR_WAVE_TYPES[index];
+  }
+
   advancePhases(voice) {
     for (const node of this.nodes) {
       if (node.wave === "noise" || node.wave === "audio-input") continue;
@@ -1444,6 +1774,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
         : this.baseFrequency(node, voice);
       const current = voice.phases.get(node.id) || 0;
       const next = current + (baseFrequency * frequencyMultiplier) / sampleRate;
+      if (node.wave === "custom") {
+        this.advanceCustomWavePhase(node, voice, (baseFrequency * frequencyMultiplier) / sampleRate);
+        continue;
+      }
       if (node.wave === "sample-hold" && next >= 1) {
         voice.sampleHolds.set(node.id, this.randomBipolar());
       }

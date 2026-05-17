@@ -1,5 +1,6 @@
 import {
   DEFAULT_AUDIO_DEVICE_ID,
+  DEFAULT_CUSTOM_WAVE,
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_FOLLOWER,
   FREQUENCY_MODES,
@@ -16,6 +17,7 @@ import {
   MIDI_CC_SMOOTH_SECONDS,
   MIN_MAX_VOICES,
   NODE_MODULATION_TARGETS,
+  OSCILLATOR_WAVE_TYPES,
   RECENT_MIDI_CC_WINDOW_MS,
   STORAGE_KEY,
   VELOCITY_SENSITIVITY_MAX,
@@ -26,6 +28,7 @@ import {
 import { parsePatchFile, patchFileText } from "./patch-format.js";
 import {
   linkHasPan,
+  normalizeCustomWave,
   normalizeDefaultPatch,
   normalizeFrequencyMode,
   normalizePatch,
@@ -57,15 +60,15 @@ const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
 const AUDIO_BACKENDS = {
   js: {
     label: "JS AudioWorklet",
-    moduleUrl: "./src/audio-worklet.js?v=link-signal-follower-meter-7",
+    moduleUrl: "./src/audio-worklet.js?v=custom-wave-2",
     processorName: "visual-fm-engine",
   },
   wasm: {
-    label: "WASM spike",
-    moduleUrl: "./src/audio-worklet-wasm.js?v=wasm-engine-spike-7",
+    label: "Rust WASM",
+    moduleUrl: "./src/audio-worklet-wasm.js?v=custom-wave-2",
     processorName: "visual-fm-wasm-engine",
     processorOptions: async () => {
-      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=wasm-engine-spike-7", window.location.href).href;
+      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=custom-wave-2", window.location.href).href;
       const response = await fetch(wasmUrl);
       if (!response.ok) {
         throw new Error(`Could not fetch WASM kernel (${response.status}).`);
@@ -490,10 +493,10 @@ function linkParameterDefinitions(link) {
     },
     {
       id: "filter.resonance",
-      label: "Filter resonance",
+      label: link.filter.type === "formant" ? "Formant intensity" : "Filter resonance",
       type: "number",
       min: 0.1,
-      max: 12,
+      max: link.filter.type === "formant" ? 36 : 12,
       get: () => link.filter.resonance,
       set: (value) => {
         link.filter.resonance = value;
@@ -1125,7 +1128,7 @@ function linkGeometry(link, visited = new Set(), context = null) {
 
 function graphPayload() {
   return {
-    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed, audioInputGain }) => ({
+    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed, audioInputGain, customWave }) => ({
       id,
       wave,
       frequencyMode,
@@ -1133,6 +1136,7 @@ function graphPayload() {
       frequency,
       speed,
       audioInputGain,
+      customWave: normalizeCustomWave(customWave),
     })),
     links: state.links.map((link) => ({
       id: link.id,
@@ -2076,6 +2080,7 @@ function renderPanel() {
     if (!node) return renderEmptyPanel();
     const usesPitchControls = isPitchedWave(node.wave);
     const usesSpeedControl = isSpeedWave(node.wave);
+    const usesCustomWave = node.wave === "custom";
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
@@ -2102,6 +2107,14 @@ function renderPanel() {
           ${WAVE_TYPES.map((wave) => `<option value="${wave}" ${node.wave === wave ? "selected" : ""}>${waveTypeLabel(wave)}</option>`).join("")}
         </select>
       </div>
+      ${usesCustomWave ? `
+        <div class="field">
+          <label>Custom wave</label>
+          <button class="custom-wave-preview" id="customWavePreview" type="button" aria-label="Edit custom wave" title="Edit custom wave">
+            ${customWaveSvg(ensureCustomWave(node).points)}
+          </button>
+        </div>
+      ` : ""}
       ${usesPitchControls ? `
         <div class="field">
           ${parameterLabel("frequencyMode", "Tuning", "node", node.id, "frequencyMode")}
@@ -2159,6 +2172,7 @@ function renderPanel() {
           setAudioStatusLabel("Audio input blocked");
         });
       } else {
+        if (node.wave === "custom") ensureCustomWave(node);
         reconcileAudioInput();
       }
       pruneMidiBindings();
@@ -2200,6 +2214,11 @@ function renderPanel() {
         savePatch();
       });
     }
+    if (usesCustomWave) {
+      panel.querySelector("#customWavePreview").addEventListener("click", () => {
+        openCustomWaveModal(node.id);
+      });
+    }
     attachParameterMidiButtons();
     return;
   }
@@ -2225,6 +2244,14 @@ function renderPanel() {
     const usesFilterControls = link.filter.type !== "none";
     const linkFilterTypes = LINK_FILTER_TYPES.filter((type) => type !== "none");
     const filterType = usesFilterControls ? link.filter.type : "lowpass";
+    const usesFormantFilter = filterType === "formant";
+    const filterCutoffLabel = usesFormantFilter ? "Vowel morph" : "Cutoff (Hz)";
+    const filterCutoffMin = usesFormantFilter ? 0 : 20;
+    const filterCutoffMax = usesFormantFilter ? 1 : 12000;
+    const filterCutoffStep = usesFormantFilter ? 0.001 : 1;
+    const filterCutoffValue = usesFormantFilter ? Math.min(1, Math.max(0, link.filter.cutoff || 0)) : link.filter.cutoff;
+    const filterResonanceLabel = usesFormantFilter ? "Intensity" : "Resonance";
+    const filterResonanceMax = usesFormantFilter ? 36 : 12;
     const filterControls = usesFilterControls ? `
       <div class="field">
         ${parameterLabel("filterType", "Type", "link", link.id, "filter.type")}
@@ -2233,17 +2260,17 @@ function renderPanel() {
         </select>
       </div>
       <div class="field">
-        ${parameterLabel("filterCutoff", "Cutoff (Hz)", "link", link.id, "filter.cutoff")}
+        ${parameterLabel("filterCutoff", filterCutoffLabel, "link", link.id, "filter.cutoff")}
         <div class="field-row">
-          <input id="filterCutoffRange" type="range" min="20" max="12000" step="1" value="${link.filter.cutoff}">
-          <input id="filterCutoff" type="number" min="20" max="12000" step="1" value="${link.filter.cutoff}">
+          <input id="filterCutoffRange" type="range" min="${filterCutoffMin}" max="${filterCutoffMax}" step="${filterCutoffStep}" value="${filterCutoffValue}">
+          <input id="filterCutoff" type="number" min="${filterCutoffMin}" max="${filterCutoffMax}" step="${filterCutoffStep}" value="${filterCutoffValue}">
         </div>
       </div>
       <div class="field">
-        ${parameterLabel("filterResonance", "Resonance", "link", link.id, "filter.resonance")}
+        ${parameterLabel("filterResonance", filterResonanceLabel, "link", link.id, "filter.resonance")}
         <div class="field-row">
-          <input id="filterResonanceRange" type="range" min="0.1" max="12" step="0.001" value="${link.filter.resonance}">
-          <input id="filterResonance" type="number" min="0.1" max="12" step="0.001" value="${link.filter.resonance}">
+          <input id="filterResonanceRange" type="range" min="0.1" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
+          <input id="filterResonance" type="number" min="0.1" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
         </div>
       </div>
     ` : "";
@@ -2454,18 +2481,23 @@ function renderPanel() {
     if (usesFilterControls) {
       panel.querySelector("#filterType").addEventListener("change", (event) => {
         link.filter.type = event.target.value;
+        if (link.filter.type === "formant") {
+          link.filter.cutoff = Math.min(1, Math.max(0, Number(link.filter.cutoff) <= 1 ? Number(link.filter.cutoff) : 0));
+        } else if (Number(link.filter.cutoff) < 20) {
+          link.filter.cutoff = DEFAULT_LINK_FILTER.cutoff;
+        }
         renderPanel();
         sendGraph();
         savePatch();
       });
 
-      bindNumberPair("filterCutoff", "filterCutoffRange", 20, 12000, (value) => {
+      bindNumberPair("filterCutoff", "filterCutoffRange", filterCutoffMin, filterCutoffMax, (value) => {
         link.filter.cutoff = value;
         sendLinkParam(link.id, "filter.cutoff", value);
         schedulePatchSave();
       });
 
-      bindNumberPair("filterResonance", "filterResonanceRange", 0.1, 12, (value) => {
+      bindNumberPair("filterResonance", "filterResonanceRange", 0.1, filterResonanceMax, (value) => {
         link.filter.resonance = value;
         sendLinkParam(link.id, "filter.resonance", value);
         schedulePatchSave();
@@ -2811,6 +2843,7 @@ function filterTypeLabel(type) {
     lowpass: "Low-pass",
     highpass: "High-pass",
     bandpass: "Band-pass",
+    formant: "Formant",
   };
   return labels[type] || type;
 }
@@ -2821,6 +2854,301 @@ function waveTypeLabel(type) {
     "audio-input": "audio input",
   };
   return labels[type] || type;
+}
+
+function ensureCustomWave(node) {
+  node.customWave = normalizeCustomWave(node.customWave || DEFAULT_CUSTOM_WAVE);
+  return node.customWave;
+}
+
+function customWaveSvg(points, width = 260, height = 82) {
+  const padding = 10;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const safePoints = normalizeCustomWave({ points }).points;
+  const path = safePoints
+    .map((point, index) => {
+      const x = padding + point.x * innerWidth;
+      const y = padding + (1 - ((point.y + 1) / 2)) * innerHeight;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+  const pointMarks = safePoints
+    .map((point, index) => {
+      const x = padding + point.x * innerWidth;
+      const y = padding + (1 - ((point.y + 1) / 2)) * innerHeight;
+      const isEndpoint = index === 0 || index === safePoints.length - 1;
+      return `<circle class="${isEndpoint ? "custom-wave-endpoint" : ""}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${isEndpoint ? 4 : 3.25}"></circle>`;
+    })
+    .join("");
+  const zeroY = padding + innerHeight / 2;
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <line class="custom-wave-zero" x1="${padding}" y1="${zeroY}" x2="${width - padding}" y2="${zeroY}"></line>
+      <path class="custom-wave-path" d="${path}"></path>
+      <g class="custom-wave-points">${pointMarks}</g>
+    </svg>
+  `;
+}
+
+function openCustomWaveModal(nodeId) {
+  const node = nodeById(nodeId);
+  if (!node) return;
+  let customWave = normalizeCustomWave(ensureCustomWave(node));
+  const originalCustomWave = normalizeCustomWave(customWave);
+  let dragIndex = null;
+  let lastHandleClick = { index: null, time: 0 };
+  const overlay = document.createElement("div");
+  overlay.className = "modal-backdrop";
+  overlay.innerHTML = `
+    <div class="modal custom-wave-modal" role="dialog" aria-modal="true" aria-labelledby="customWaveTitle">
+      <h2 id="customWaveTitle">Custom wave</h2>
+      <svg class="custom-wave-editor" id="customWaveEditor" viewBox="0 0 640 300" preserveAspectRatio="none" aria-label="Custom wave editor"></svg>
+      <div class="custom-wave-modal-controls" id="customWaveModalControls"></div>
+      <div class="modal-actions">
+        <button class="text-button" id="customWaveCancel" type="button">Cancel</button>
+        <button class="text-button primary" id="customWaveDone" type="button">Done</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const editor = overlay.querySelector("#customWaveEditor");
+  const controls = overlay.querySelector("#customWaveModalControls");
+  const padding = 28;
+  const width = 640;
+  const height = 300;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const toScreen = (point) => ({
+    x: padding + point.x * innerWidth,
+    y: padding + (1 - ((point.y + 1) / 2)) * innerHeight,
+  });
+  const fromPointer = (event) => {
+    const rect = editor.getBoundingClientRect();
+    const x = clamp((event.clientX - rect.left) / rect.width * width, padding, width - padding);
+    const y = clamp((event.clientY - rect.top) / rect.height * height, padding, height - padding);
+    return {
+      x: clamp((x - padding) / innerWidth, 0, 1),
+      y: clamp((1 - ((y - padding) / innerHeight)) * 2 - 1, -1, 1),
+    };
+  };
+  const renderEditor = () => {
+    const safePoints = normalizeCustomWave(customWave).points;
+    customWave = normalizeCustomWave({ ...customWave, points: safePoints });
+    const path = safePoints.map((point, index) => {
+      const screen = toScreen(point);
+      return `${index === 0 ? "M" : "L"} ${screen.x.toFixed(2)} ${screen.y.toFixed(2)}`;
+    }).join(" ");
+    const sustainStartX = padding + customWave.sustainStart * innerWidth;
+    const sustainEndX = padding + customWave.sustainEnd * innerWidth;
+    const showsSustainStart = customWave.mode.startsWith("sustain");
+    const showsSustainEnd = customWave.mode === "sustain-loop" || customWave.mode === "sustain-ping-pong";
+    editor.innerHTML = `
+      <g class="custom-wave-chart-chrome">
+        <line class="custom-wave-grid-line" x1="${padding}" y1="${padding}" x2="${width - padding}" y2="${padding}"></line>
+        <line class="custom-wave-grid-line custom-wave-zero" x1="${padding}" y1="${height / 2}" x2="${width - padding}" y2="${height / 2}"></line>
+        <line class="custom-wave-grid-line" x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}"></line>
+        <text x="8" y="${padding + 5}">1</text>
+        <text x="8" y="${height / 2 + 5}">0</text>
+        <text x="4" y="${height - padding + 5}">-1</text>
+        ${showsSustainStart ? `<line class="custom-wave-sustain-line" x1="${sustainStartX.toFixed(2)}" y1="${padding}" x2="${sustainStartX.toFixed(2)}" y2="${height - padding}"></line>` : ""}
+        ${showsSustainEnd ? `<line class="custom-wave-sustain-line is-end" x1="${sustainEndX.toFixed(2)}" y1="${padding}" x2="${sustainEndX.toFixed(2)}" y2="${height - padding}"></line>` : ""}
+        <path class="custom-wave-path" d="${path}"></path>
+      </g>
+      ${safePoints.map((point, index) => {
+        const screen = toScreen(point);
+        const isEndpoint = index === 0 || index === safePoints.length - 1;
+        return `<circle class="custom-wave-handle ${isEndpoint ? "custom-wave-endpoint is-locked" : ""}" data-index="${index}" cx="${screen.x.toFixed(2)}" cy="${screen.y.toFixed(2)}" r="${isEndpoint ? 7 : 8}"></circle>`;
+      }).join("")}
+    `;
+  };
+  const renderControls = () => {
+    const showsSustainStart = customWave.mode.startsWith("sustain");
+    const showsSustainEnd = customWave.mode === "sustain-loop" || customWave.mode === "sustain-ping-pong";
+    const fieldCount = 1 + (showsSustainStart ? 1 : 0) + (showsSustainEnd ? 1 : 0);
+    controls.style.setProperty("--custom-wave-field-count", fieldCount);
+    controls.innerHTML = `
+      <div class="field">
+        <label for="customWaveMode">Mode</label>
+        <select id="customWaveMode">
+          ${customWaveModeOptions(customWave.mode)}
+        </select>
+      </div>
+      ${showsSustainStart ? `
+        <div class="field">
+          <label for="customSustainStart">Sustain start</label>
+          <div class="field-row">
+            <input id="customSustainStartRange" type="range" min="0" max="1" step="0.001" value="${customWave.sustainStart}">
+            <input id="customSustainStart" type="number" min="0" max="1" step="0.001" value="${customWave.sustainStart}">
+          </div>
+        </div>
+      ` : ""}
+      ${showsSustainEnd ? `
+        <div class="field">
+          <label for="customSustainEnd">Sustain end</label>
+          <div class="field-row">
+            <input id="customSustainEndRange" type="range" min="0" max="1" step="0.001" value="${customWave.sustainEnd}">
+            <input id="customSustainEnd" type="number" min="0" max="1" step="0.001" value="${customWave.sustainEnd}">
+          </div>
+        </div>
+      ` : ""}
+    `;
+  };
+  const renderCustomWaveModal = () => {
+    renderEditor();
+    renderControls();
+    bindNumberPair("customSustainStart", "customSustainStartRange", 0, 1, (value) => {
+      const sustainStart = clamp(value, 0, customWave.sustainEnd - 0.001);
+      customWave = normalizeCustomWave({ ...customWave, sustainStart });
+      renderEditor();
+      commit();
+      return sustainStart;
+    }, { root: controls });
+    bindNumberPair("customSustainEnd", "customSustainEndRange", 0, 1, (value) => {
+      const sustainEnd = clamp(value, customWave.sustainStart + 0.001, 1);
+      customWave = normalizeCustomWave({ ...customWave, sustainEnd });
+      renderEditor();
+      commit();
+      return sustainEnd;
+    }, { root: controls });
+  };
+  const commit = () => {
+    const target = nodeById(nodeId);
+    if (!target) return;
+    target.customWave = normalizeCustomWave(customWave);
+    renderPanel();
+    sendGraph();
+    savePatch();
+  };
+  const removeInteriorPoint = (index) => {
+    if (index <= 0 || index >= customWave.points.length - 1) return false;
+    customWave.points.splice(index, 1);
+    customWave = normalizeCustomWave(customWave);
+    dragIndex = null;
+    renderCustomWaveModal();
+    commit();
+    return true;
+  };
+  const restoreOriginal = () => {
+    const target = nodeById(nodeId);
+    if (!target) return;
+    target.customWave = normalizeCustomWave(originalCustomWave);
+    renderPanel();
+    sendGraph();
+    savePatch();
+  };
+  const close = () => overlay.remove();
+  const cancel = () => {
+    restoreOriginal();
+    close();
+  };
+
+  editor.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.target.closest?.(".custom-wave-handle");
+    if (handle) {
+      const index = Number(handle.dataset.index);
+      const now = performance.now();
+      if (
+        !handle.classList.contains("is-locked")
+        && lastHandleClick.index === index
+        && now - lastHandleClick.time < 360
+      ) {
+        lastHandleClick = { index: null, time: 0 };
+        removeInteriorPoint(index);
+        return;
+      }
+      lastHandleClick = { index, time: now };
+      if (handle.classList.contains("is-locked")) {
+        dragIndex = null;
+        return;
+      }
+      dragIndex = index;
+      editor.setPointerCapture(event.pointerId);
+      return;
+    }
+    const point = fromPointer(event);
+    lastHandleClick = { index: null, time: 0 };
+    customWave.points = [...customWave.points, point].sort((a, b) => a.x - b.x);
+    customWave = normalizeCustomWave(customWave);
+    dragIndex = customWave.points.reduce((bestIndex, item, index) => {
+      const best = customWave.points[bestIndex];
+      const distance = Math.abs(item.x - point.x) + Math.abs(item.y - point.y);
+      const bestDistance = Math.abs(best.x - point.x) + Math.abs(best.y - point.y);
+      return distance < bestDistance ? index : bestIndex;
+    }, 0);
+    renderCustomWaveModal();
+    editor.setPointerCapture(event.pointerId);
+    commit();
+  });
+  editor.addEventListener("click", (event) => {
+    const handle = event.target.closest?.(".custom-wave-handle");
+    if (!handle || event.detail < 2) return;
+    event.preventDefault();
+    removeInteriorPoint(Number(handle.dataset.index));
+  });
+  editor.addEventListener("pointermove", (event) => {
+    if (dragIndex === null) return;
+    event.preventDefault();
+    const point = fromPointer(event);
+    const lastIndex = customWave.points.length - 1;
+    const previous = customWave.points[dragIndex - 1]?.x ?? 0;
+    const next = customWave.points[dragIndex + 1]?.x ?? 1;
+    const x = dragIndex === 0 ? 0 : dragIndex === lastIndex ? 1 : clamp(point.x, previous + 0.001, next - 0.001);
+    customWave.points[dragIndex] = { x, y: point.y };
+    customWave = normalizeCustomWave(customWave);
+    renderEditor();
+    commit();
+  });
+  editor.addEventListener("pointerup", (event) => {
+    dragIndex = null;
+    if (editor.hasPointerCapture(event.pointerId)) editor.releasePointerCapture(event.pointerId);
+  });
+  editor.addEventListener("pointercancel", (event) => {
+    dragIndex = null;
+    if (editor.hasPointerCapture(event.pointerId)) editor.releasePointerCapture(event.pointerId);
+  });
+  editor.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    const handle = event.target.closest?.(".custom-wave-handle");
+    if (!handle) return;
+    removeInteriorPoint(Number(handle.dataset.index));
+  });
+  overlay.querySelector("#customWaveCancel").addEventListener("click", cancel);
+  overlay.querySelector("#customWaveDone").addEventListener("click", () => {
+    commit();
+    close();
+  });
+  controls.addEventListener("change", (event) => {
+    if (event.target.id === "customWaveMode") {
+      customWave = normalizeCustomWave({ ...customWave, mode: event.target.value });
+      renderCustomWaveModal();
+      commit();
+    }
+  });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) cancel();
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") cancel();
+  });
+  renderCustomWaveModal();
+}
+
+function customWaveModeOptions(selectedMode) {
+  const modes = [
+    ["loop", "Loop"],
+    ["once", "Play once"],
+    ["ping-pong", "Ping-pong"],
+    ["sustain", "Sustain"],
+    ["sustain-loop", "Sustain loop"],
+    ["sustain-ping-pong", "Sustain ping-pong"],
+  ];
+  return modes
+    .map(([value, label]) => `<option value="${value}" ${selectedMode === value ? "selected" : ""}>${label}</option>`)
+    .join("");
 }
 
 function nodeFrequencyLabel(node) {
@@ -2842,12 +3170,14 @@ function nodeFrequencyLabel(node) {
 function modulationTargetLabel(target, destination = "") {
   const labels = {
     phase: "Phase (default)",
+    phaseResetTrigger: "Phase reset trigger",
     frequency: "Frequency",
+    wave: "Wave type",
     ring: "Ring",
     fold: "Fold",
     mix: "Mix",
-    filterCutoff: "Filter cutoff",
-    filterResonance: "Filter resonance",
+    filterCutoff: "Filter cutoff / morph",
+    filterResonance: "Filter resonance / intensity",
     amplitude: "Amplitude",
     delay: "Delay buffer",
     noise: "Noise",
@@ -2912,7 +3242,12 @@ function modulationTargetsForLink(link) {
       ? LINK_MODULATION_TARGETS
       : LINK_MODULATION_TARGETS.filter((target) => target !== "pan");
   }
-  if (kind === "node") return NODE_MODULATION_TARGETS;
+  if (kind === "node") {
+    const targetNode = nodeById(link.to);
+    return targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
+      ? NODE_MODULATION_TARGETS
+      : NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
+  }
   return [];
 }
 
@@ -2930,8 +3265,10 @@ function adsrField(name, letter, label, value, min, max, linkId) {
 }
 
 function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
-  const number = panel.querySelector(`#${numberId}`);
-  const range = panel.querySelector(`#${rangeId}`);
+  const root = options.root || panel;
+  const number = root.querySelector(`#${numberId}`);
+  const range = root.querySelector(`#${rangeId}`);
+  if (!number || !range) return;
   const step = valueSliderStep(number, range);
   const inputMax = Number.isFinite(options.inputMax) ? options.inputMax : max;
 
@@ -2947,7 +3284,12 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
     }
     range.value = String(value);
     syncValueSliderProgress(range, min, max);
-    onValue(value);
+    const appliedValue = onValue(value);
+    if (Number.isFinite(appliedValue) && appliedValue !== value) {
+      syncValueSliderNumber(number, range, appliedValue);
+      range.value = String(appliedValue);
+      syncValueSliderProgress(range, min, max);
+    }
   };
 
   enhanceValueSlider(number, range, min, max, step);
@@ -3811,6 +4153,7 @@ function addNode(position = null) {
     frequency: 440,
     speed: 8,
     audioInputGain: 1,
+    customWave: DEFAULT_CUSTOM_WAVE,
   };
   state.nodes.push(node);
   select("node", node.id);
@@ -4061,6 +4404,14 @@ function isEditingValueSliderInput(element = document.activeElement) {
   return element?.classList?.contains("value-slider-input") && !element.readOnly;
 }
 
+function isTextEditingTarget(element = document.activeElement) {
+  if (!element) return false;
+  if (element.isContentEditable) return true;
+  if (element.tagName === "TEXTAREA" || element.tagName === "SELECT") return true;
+  if (element.tagName !== "INPUT") return false;
+  return !element.readOnly;
+}
+
 function trackValueEditExitClick(event) {
   preserveSelectionAfterValueEditClick = Boolean(
     isEditingValueSliderInput()
@@ -4240,6 +4591,15 @@ audioOut.addEventListener("click", (event) => {
 window.addEventListener("resize", onStageResize);
 
 window.addEventListener("keydown", (event) => {
+  const note = keyMap.get(event.key);
+  if (note !== undefined) {
+    if (isTextEditingTarget() || pressedKeys.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return;
+    event.preventDefault();
+    pressedKeys.add(event.key);
+    noteOn(note, 0.82);
+    return;
+  }
+
   if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
   if (event.key === "Backspace" || event.key === "Delete") {
     const removed = removeSelectedElements();
@@ -4247,11 +4607,6 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
-
-  const note = keyMap.get(event.key);
-  if (note === undefined || pressedKeys.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return;
-  pressedKeys.add(event.key);
-  noteOn(note, 0.82);
 });
 
 window.addEventListener("keyup", (event) => {
