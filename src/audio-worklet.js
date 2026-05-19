@@ -245,7 +245,6 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (!voice.renderStack) voice.renderStack = new Set();
     if (!voice.linkStack) voice.linkStack = new Set();
     if (!voice.linkParamCache) voice.linkParamCache = new Map();
-    if (!voice.linkTriggerSigns) voice.linkTriggerSigns = new Map();
     if (!voice.linkTriggerArmed) voice.linkTriggerArmed = new Map();
     if (!voice.linkFollowers) voice.linkFollowers = new Map();
     if (!voice.linkEnvelopeStarts) voice.linkEnvelopeStarts = new Map();
@@ -296,9 +295,6 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
     for (const key of voice.linkParamCache.keys()) {
       if (!linkIds.has(key)) voice.linkParamCache.delete(key);
-    }
-    for (const key of voice.linkTriggerSigns.keys()) {
-      if (!linkIds.has(key)) voice.linkTriggerSigns.delete(key);
     }
     for (const key of voice.linkTriggerArmed.keys()) {
       if (!linkIds.has(key)) voice.linkTriggerArmed.delete(key);
@@ -745,7 +741,6 @@ class VisualFmEngine extends AudioWorkletProcessor {
       renderStack: new Set(),
       linkStack: new Set(),
       linkParamCache: new Map(),
-      linkTriggerSigns: new Map(),
       linkTriggerArmed: new Map(),
       linkFollowers: new Map(),
       linkEnvelopeStarts: new Map(),
@@ -1075,36 +1070,15 @@ class VisualFmEngine extends AudioWorkletProcessor {
   applyEnvelopeTrigger(modLink, targetLink, voice, now, value) {
     if (!Number.isFinite(value)) return;
 
-    if (modLink.signalMode !== "raw") {
-      const previousArmed = voice.linkTriggerArmed.get(modLink.id);
-      if (previousArmed === undefined) {
-        if (value >= ENVELOPE_TRIGGER_THRESHOLD) {
-          this.triggerLinkEnvelope(targetLink, voice, now);
-          voice.linkTriggerArmed.set(modLink.id, false);
-        } else {
-          voice.linkTriggerArmed.set(modLink.id, true);
-        }
-        return;
-      }
-      if (previousArmed && value >= ENVELOPE_TRIGGER_THRESHOLD) {
-        this.triggerLinkEnvelope(targetLink, voice, now);
-        voice.linkTriggerArmed.set(modLink.id, false);
-        return;
-      }
-      if (!previousArmed && value <= ENVELOPE_TRIGGER_REARM) {
-        this.releaseLinkEnvelope(targetLink, voice, now);
-        voice.linkTriggerArmed.set(modLink.id, true);
-      }
+    const previousArmed = voice.linkTriggerArmed.get(modLink.id) ?? true;
+    if (previousArmed && value >= ENVELOPE_TRIGGER_THRESHOLD) {
+      this.triggerLinkEnvelope(targetLink, voice, now);
+      voice.linkTriggerArmed.set(modLink.id, false);
       return;
     }
-
-    if (value === 0) return;
-    const sign = value > 0 ? 1 : -1;
-    const previousSign = voice.linkTriggerSigns.get(modLink.id) || 0;
-    if (previousSign !== 0 && previousSign !== sign) {
-      this.triggerLinkEnvelope(targetLink, voice, now);
+    if (!previousArmed && value <= ENVELOPE_TRIGGER_REARM) {
+      voice.linkTriggerArmed.set(modLink.id, true);
     }
-    voice.linkTriggerSigns.set(modLink.id, sign);
   }
 
   resetNodePhase(node, voice) {
