@@ -14,17 +14,17 @@ docker compose up --build
 
 Then open `http://localhost:8839`.
 
-## Try the WASM engine spike
+## Audio engine
 
-The default engine is still the full JavaScript AudioWorklet. To try the experimental WASM-backed worklet, open:
+The default engine is the Rust WASM-backed AudioWorklet. To force the JavaScript AudioWorklet, open:
 
 ```sh
-http://localhost:8839/?engine=wasm
+http://localhost:8839/?engine=js
 ```
 
-You can also switch between `JS AudioWorklet` and `WASM spike` from the Patch panel. The WASM spike now syncs a compact node/link graph into Rust and renders recursive node modulation for `phase`, `frequency`, `ring`, `fold`, and `mix` targets, plus link-to-link modulation, link ADSR envelopes and triggers, smoothed live link controls, velocity scaling, noise, signal followers, link filters, bounded link delay, extra oscillator waves, audio-input nodes, and the master chorus/delay/reverb effects. The JavaScript engine remains the feature-complete backend.
+You can also switch between `Rust WASM` and `JS AudioWorklet` from the Patch panel. The WASM engine syncs a compact node/link graph into Rust and renders recursive node modulation for `phase`, `frequency`, `ring`, `fold`, and `mix` targets, plus link-to-link modulation, link ADSR envelopes and triggers, smoothed live link controls, velocity scaling, noise, signal followers, link filters, bounded link delay, extra oscillator waves, audio-input nodes, and the master chorus/delay/reverb effects.
 
-The WASM delay pool is intentionally bounded so dense benchmark patches do not allocate huge multi-second buffers for every link; use the JavaScript engine for full-length experimental delay patches while the Rust backend is still a spike.
+The WASM delay pool is intentionally bounded so dense benchmark patches do not allocate huge multi-second buffers for every link; use the JavaScript engine for full-length experimental delay patches.
 
 The WASM kernel source lives in `rust/visual-fm-kernel` and is built in Docker, so no local Rust toolchain is required. Rebuild and smoke-test the checked-in WASM kernel with:
 

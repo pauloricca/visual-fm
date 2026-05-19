@@ -4,6 +4,7 @@ const MAX_LINKS: usize = 1024;
 const MAX_VOICE_SLOTS: usize = 17;
 const DRONE_VOICE_SLOT: usize = MAX_VOICE_SLOTS - 1;
 const MAX_DELAY_SLOTS: usize = 96;
+const MAX_COMB_SLOTS: usize = 96;
 const MAX_DELAY_SAMPLES: usize = 8192;
 const MAX_FORMANT_BANDS: usize = 3;
 const MAX_CUSTOM_WAVE_POINTS: usize = 64;
@@ -45,6 +46,10 @@ struct Node {
     frequency_mode: i32,
     ratio: f64,
     frequency: f64,
+    quantise_enabled: i32,
+    quantise_root: i32,
+    quantise_scale: i32,
+    quantise_glide: f64,
     speed: f64,
     audio_input_gain: f64,
     custom_mode: i32,
@@ -69,6 +74,8 @@ struct Link {
     filter_type: i32,
     filter_cutoff: f64,
     filter_resonance: f64,
+    distortion_type: i32,
+    distortion_gain: f64,
     env_delay: f64,
     env_attack: f64,
     env_decay: f64,
@@ -81,6 +88,10 @@ const EMPTY_NODE: Node = Node {
     frequency_mode: 0,
     ratio: 1.0,
     frequency: 440.0,
+    quantise_enabled: 0,
+    quantise_root: 0,
+    quantise_scale: 0,
+    quantise_glide: 0.0,
     speed: 8.0,
     audio_input_gain: 1.0,
     custom_mode: CUSTOM_MODE_LOOP,
@@ -104,6 +115,8 @@ const EMPTY_LINK: Link = Link {
     filter_type: 0,
     filter_cutoff: 5000.0,
     filter_resonance: 0.7,
+    distortion_type: 0,
+    distortion_gain: 1.5,
     env_delay: 0.0,
     env_attack: 0.01,
     env_decay: 0.16,
@@ -169,6 +182,14 @@ static mut LINKS: [Link; MAX_LINKS] = [EMPTY_LINK; MAX_LINKS];
 static mut NODE_COUNT: usize = 0;
 static mut LINK_COUNT: usize = 0;
 static mut PHASES: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] = [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut QUANTISED_FREQUENCIES: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut QUANTISED_TARGETS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut QUANTISED_STEPS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut QUANTISED_REMAINING: [[u32; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut FEEDBACK: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] = [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut SAMPLE_HOLDS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] = [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut SAMPLE_HOLD_SET: [[bool; MAX_NODES]; MAX_VOICE_SLOTS] =
@@ -188,6 +209,8 @@ static mut CUSTOM_WAVE_DIRECTIONS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
     [[1.0; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut LINK_DELAY_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
 static mut LINK_DELAY_SLOT_COUNT: usize = 0;
+static mut LINK_COMB_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
+static mut LINK_COMB_SLOT_COUNT: usize = 0;
 static mut LINK_FIRST_MODULATOR: [i32; MAX_LINKS] = [-1; MAX_LINKS];
 static mut LINK_NEXT_MODULATOR: [i32; MAX_LINKS] = [-1; MAX_LINKS];
 static mut LINK_HAS_ENVELOPE_TRIGGER: [bool; MAX_LINKS] = [false; MAX_LINKS];
@@ -197,6 +220,12 @@ static mut LINK_DELAY_INDICES: [[usize; MAX_DELAY_SLOTS]; MAX_VOICE_SLOTS] =
     [[0; MAX_DELAY_SLOTS]; MAX_VOICE_SLOTS];
 static mut LINK_DELAY_READY: [[bool; MAX_DELAY_SLOTS]; MAX_VOICE_SLOTS] =
     [[false; MAX_DELAY_SLOTS]; MAX_VOICE_SLOTS];
+static mut LINK_COMB_BUFFERS: [[[f32; MAX_DELAY_SAMPLES]; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS] =
+    [[[0.0; MAX_DELAY_SAMPLES]; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS];
+static mut LINK_COMB_INDICES: [[usize; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS] =
+    [[0; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS];
+static mut LINK_COMB_READY: [[bool; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS] =
+    [[false; MAX_COMB_SLOTS]; MAX_VOICE_SLOTS];
 static mut LINK_TRIGGER_ARMED: [[bool; MAX_LINKS]; MAX_VOICE_SLOTS] =
     [[true; MAX_LINKS]; MAX_VOICE_SLOTS];
 static mut LINK_TRIGGER_START_AGE: [[f64; MAX_LINKS]; MAX_VOICE_SLOTS] =
@@ -292,8 +321,10 @@ pub extern "C" fn clearGraph() {
         NODE_COUNT = 0;
         LINK_COUNT = 0;
         LINK_DELAY_SLOT_COUNT = 0;
+        LINK_COMB_SLOT_COUNT = 0;
         for index in 0..MAX_LINKS {
             LINK_DELAY_SLOTS[index] = -1;
+            LINK_COMB_SLOTS[index] = -1;
             LINK_FIRST_MODULATOR[index] = -1;
             LINK_NEXT_MODULATOR[index] = -1;
             LINK_HAS_ENVELOPE_TRIGGER[index] = false;
@@ -322,6 +353,10 @@ pub extern "C" fn addNode(
     frequency_mode: i32,
     ratio: f64,
     frequency: f64,
+    quantise_enabled: i32,
+    quantise_root: i32,
+    quantise_scale: i32,
+    quantise_glide: f64,
     speed: f64,
     audio_input_gain: f64,
     custom_mode: i32,
@@ -338,6 +373,10 @@ pub extern "C" fn addNode(
             frequency_mode,
             ratio: ratio.clamp(0.0, 16.0),
             frequency: frequency.clamp(0.0, 12_000.0),
+            quantise_enabled: if quantise_enabled != 0 { 1 } else { 0 },
+            quantise_root: quantise_root.clamp(0, 11),
+            quantise_scale: quantise_scale.clamp(0, 8),
+            quantise_glide: quantise_glide.clamp(0.0, 4.0),
             speed: speed.clamp(0.01, 60.0),
             audio_input_gain: audio_input_gain.clamp(0.0, 4.0),
             custom_mode: custom_mode.clamp(CUSTOM_MODE_LOOP, CUSTOM_MODE_SUSTAIN_PING_PONG),
@@ -385,6 +424,8 @@ pub extern "C" fn addLink(
     filter_type: i32,
     filter_cutoff: f64,
     filter_resonance: f64,
+    distortion_type: i32,
+    distortion_gain: f64,
     env_delay: f64,
     env_attack: f64,
     env_decay: f64,
@@ -423,13 +464,23 @@ pub extern "C" fn addLink(
             filter_type,
             filter_cutoff: if filter_type == 4 {
                 filter_cutoff.clamp(0.0, 1.0)
+            } else if filter_type == 5 || filter_type == 6 {
+                filter_cutoff.clamp(20.0, 5_000.0)
             } else {
                 filter_cutoff.clamp(20.0, 12_000.0)
             },
             filter_resonance: filter_resonance.clamp(
-                0.1,
-                if filter_type == 4 { FORMANT_INTENSITY_MAX } else { 12.0 },
+                if filter_type == 5 || filter_type == 6 { -0.98 } else { 0.1 },
+                if filter_type == 4 {
+                    FORMANT_INTENSITY_MAX
+                } else if filter_type == 5 || filter_type == 6 {
+                    0.98
+                } else {
+                    12.0
+                },
             ),
+            distortion_type: distortion_type.clamp(0, 5),
+            distortion_gain: distortion_gain.clamp(0.1, 40.0),
             env_delay: env_delay.clamp(0.0, 4.0),
             env_attack: env_attack.clamp(0.001, 4.0),
             env_decay: env_decay.clamp(0.001, 4.0),
@@ -474,6 +525,8 @@ pub extern "C" fn setLinkFilterCutoff(index: u32, cutoff: f64) {
         if (index as usize) < LINK_COUNT {
             LINKS[index as usize].filter_cutoff = if LINKS[index as usize].filter_type == 4 {
                 cutoff.clamp(0.0, 1.0)
+            } else if LINKS[index as usize].filter_type == 5 || LINKS[index as usize].filter_type == 6 {
+                cutoff.clamp(20.0, 5_000.0)
             } else {
                 cutoff.clamp(20.0, 12_000.0)
             };
@@ -486,13 +539,28 @@ pub extern "C" fn setLinkFilterResonance(index: u32, resonance: f64) {
     unsafe {
         if (index as usize) < LINK_COUNT {
             LINKS[index as usize].filter_resonance = resonance.clamp(
-                0.1,
+                if LINKS[index as usize].filter_type == 5 || LINKS[index as usize].filter_type == 6 {
+                    -0.98
+                } else {
+                    0.1
+                },
                 if LINKS[index as usize].filter_type == 4 {
                     FORMANT_INTENSITY_MAX
+                } else if LINKS[index as usize].filter_type == 5 || LINKS[index as usize].filter_type == 6 {
+                    0.98
                 } else {
                     12.0
                 },
             );
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setLinkDistortionGain(index: u32, gain: f64) {
+    unsafe {
+        if (index as usize) < LINK_COUNT {
+            LINKS[index as usize].distortion_gain = gain.clamp(0.1, 40.0);
         }
     }
 }
@@ -527,6 +595,10 @@ pub extern "C" fn setLinkPan(index: u32, pan: f64) {
 #[no_mangle]
 pub extern "C" fn resetPhases() {
     let phases = core::ptr::addr_of_mut!(PHASES).cast::<f64>();
+    let quantised_frequencies = core::ptr::addr_of_mut!(QUANTISED_FREQUENCIES).cast::<f64>();
+    let quantised_targets = core::ptr::addr_of_mut!(QUANTISED_TARGETS).cast::<f64>();
+    let quantised_steps = core::ptr::addr_of_mut!(QUANTISED_STEPS).cast::<f64>();
+    let quantised_remaining = core::ptr::addr_of_mut!(QUANTISED_REMAINING).cast::<u32>();
     let feedback = core::ptr::addr_of_mut!(FEEDBACK).cast::<f64>();
     let sample_holds = core::ptr::addr_of_mut!(SAMPLE_HOLDS).cast::<f64>();
     let sample_hold_set = core::ptr::addr_of_mut!(SAMPLE_HOLD_SET).cast::<bool>();
@@ -538,6 +610,9 @@ pub extern "C" fn resetPhases() {
     let delay_buffers = core::ptr::addr_of_mut!(LINK_DELAY_BUFFERS).cast::<f32>();
     let delay_indices = core::ptr::addr_of_mut!(LINK_DELAY_INDICES).cast::<usize>();
     let delay_ready = core::ptr::addr_of_mut!(LINK_DELAY_READY).cast::<bool>();
+    let comb_buffers = core::ptr::addr_of_mut!(LINK_COMB_BUFFERS).cast::<f32>();
+    let comb_indices = core::ptr::addr_of_mut!(LINK_COMB_INDICES).cast::<usize>();
+    let comb_ready = core::ptr::addr_of_mut!(LINK_COMB_READY).cast::<bool>();
     let trigger_armed = core::ptr::addr_of_mut!(LINK_TRIGGER_ARMED).cast::<bool>();
     let trigger_start_age = core::ptr::addr_of_mut!(LINK_TRIGGER_START_AGE).cast::<f64>();
     let followers = core::ptr::addr_of_mut!(LINK_FOLLOWERS).cast::<f64>();
@@ -548,6 +623,10 @@ pub extern "C" fn resetPhases() {
     for index in 0..total {
         unsafe {
             *phases.add(index) = 0.0;
+            *quantised_frequencies.add(index) = 0.0;
+            *quantised_targets.add(index) = 0.0;
+            *quantised_steps.add(index) = 0.0;
+            *quantised_remaining.add(index) = 0;
             *feedback.add(index) = 0.0;
             *sample_holds.add(index) = 0.0;
             *sample_hold_set.add(index) = false;
@@ -582,6 +661,17 @@ pub extern "C" fn resetPhases() {
             *delay_buffers.add(index) = 0.0;
         }
     }
+    for index in 0..(MAX_VOICE_SLOTS * MAX_COMB_SLOTS) {
+        unsafe {
+            *comb_indices.add(index) = 0;
+            *comb_ready.add(index) = false;
+        }
+    }
+    for index in 0..(MAX_VOICE_SLOTS * MAX_COMB_SLOTS * MAX_DELAY_SAMPLES) {
+        unsafe {
+            *comb_buffers.add(index) = 0.0;
+        }
+    }
     for index in 0..MAX_LINKS {
         unsafe {
             *link_stack.add(index) = false;
@@ -598,6 +688,10 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
     unsafe {
         for node_index in 0..MAX_NODES {
             PHASES[voice_slot][node_index] = 0.0;
+            QUANTISED_FREQUENCIES[voice_slot][node_index] = 0.0;
+            QUANTISED_TARGETS[voice_slot][node_index] = 0.0;
+            QUANTISED_STEPS[voice_slot][node_index] = 0.0;
+            QUANTISED_REMAINING[voice_slot][node_index] = 0;
             FEEDBACK[voice_slot][node_index] = 0.0;
             SAMPLE_HOLDS[voice_slot][node_index] = 0.0;
             SAMPLE_HOLD_SET[voice_slot][node_index] = false;
@@ -621,6 +715,13 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
             LINK_DELAY_READY[voice_slot][slot_index] = false;
             for sample_index in 0..MAX_DELAY_SAMPLES {
                 LINK_DELAY_BUFFERS[voice_slot][slot_index][sample_index] = 0.0;
+            }
+        }
+        for slot_index in 0..MAX_COMB_SLOTS {
+            LINK_COMB_INDICES[voice_slot][slot_index] = 0;
+            LINK_COMB_READY[voice_slot][slot_index] = false;
+            for sample_index in 0..MAX_DELAY_SAMPLES {
+                LINK_COMB_BUFFERS[voice_slot][slot_index][sample_index] = 0.0;
             }
         }
     }
@@ -792,6 +893,92 @@ fn sanitize_sample(value: f64, limit: f64) -> f64 {
 fn pan_gains(pan: f64) -> (f64, f64) {
     let angle = (pan.clamp(-1.0, 1.0) + 1.0) * core::f64::consts::PI * 0.25;
     (angle.cos(), angle.sin())
+}
+
+fn scale_contains(scale: i32, interval: i32) -> bool {
+    match scale {
+        1 => matches!(interval, 0 | 2 | 4 | 5 | 7 | 9 | 11),
+        2 => matches!(interval, 0 | 2 | 3 | 5 | 7 | 8 | 10),
+        3 => matches!(interval, 0 | 2 | 4 | 7 | 9),
+        4 => matches!(interval, 0 | 3 | 5 | 7 | 10),
+        5 => matches!(interval, 0 | 3 | 5 | 6 | 7 | 10),
+        6 => matches!(interval, 0 | 2 | 3 | 5 | 7 | 9 | 10),
+        7 => matches!(interval, 0 | 2 | 4 | 5 | 7 | 9 | 10),
+        8 => matches!(interval, 0 | 2 | 3 | 5 | 7 | 8 | 11),
+        _ => true,
+    }
+}
+
+fn quantise_frequency(node: Node, frequency: f64) -> f64 {
+    if node.quantise_enabled == 0 || !frequency.is_finite() || frequency <= 0.0 {
+        return frequency;
+    }
+    let midi = 69.0 + 12.0 * (frequency / 440.0).log2();
+    let center = midi.round() as i32;
+    let octave_center = (center.div_euclid(12)) * 12;
+    let root = node.quantise_root.clamp(0, 11);
+    let mut best_midi = center;
+    let mut best_distance = f64::INFINITY;
+    for octave in -2..=2 {
+        let octave_base = octave_center + octave * 12;
+        for interval in 0..12 {
+            if !scale_contains(node.quantise_scale, interval) {
+                continue;
+            }
+            let candidate = octave_base + (root + interval).rem_euclid(12);
+            let distance = ((candidate as f64) - midi).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best_midi = candidate;
+            }
+        }
+    }
+    440.0 * 2.0_f64.powf(((best_midi as f64) - 69.0) / 12.0)
+}
+
+fn glide_frequency(
+    voice_slot: usize,
+    node_index: usize,
+    node: Node,
+    target: f64,
+    sample_rate: f64,
+) -> f64 {
+    if node.quantise_enabled == 0 || !target.is_finite() || target <= 0.0 {
+        return target;
+    }
+    unsafe {
+        let glide = node.quantise_glide.clamp(0.0, 4.0);
+        if glide <= 0.0 {
+            QUANTISED_FREQUENCIES[voice_slot][node_index] = target;
+            QUANTISED_TARGETS[voice_slot][node_index] = target;
+            QUANTISED_STEPS[voice_slot][node_index] = 0.0;
+            QUANTISED_REMAINING[voice_slot][node_index] = 0;
+            return target;
+        }
+        let current = QUANTISED_FREQUENCIES[voice_slot][node_index];
+        if !current.is_finite() || current <= 0.0 {
+            QUANTISED_FREQUENCIES[voice_slot][node_index] = target;
+            QUANTISED_TARGETS[voice_slot][node_index] = target;
+            QUANTISED_STEPS[voice_slot][node_index] = 0.0;
+            QUANTISED_REMAINING[voice_slot][node_index] = 0;
+            return target;
+        }
+        if (target - QUANTISED_TARGETS[voice_slot][node_index]).abs() > 0.000001 {
+            let remaining = (glide * sample_rate).round().max(1.0) as u32;
+            QUANTISED_TARGETS[voice_slot][node_index] = target;
+            QUANTISED_REMAINING[voice_slot][node_index] = remaining;
+            QUANTISED_STEPS[voice_slot][node_index] = (target - current) / remaining as f64;
+        }
+        if QUANTISED_REMAINING[voice_slot][node_index] > 0 {
+            QUANTISED_FREQUENCIES[voice_slot][node_index] += QUANTISED_STEPS[voice_slot][node_index];
+            QUANTISED_REMAINING[voice_slot][node_index] -= 1;
+            if QUANTISED_REMAINING[voice_slot][node_index] == 0 {
+                QUANTISED_FREQUENCIES[voice_slot][node_index] =
+                    QUANTISED_TARGETS[voice_slot][node_index];
+            }
+        }
+        QUANTISED_FREQUENCIES[voice_slot][node_index]
+    }
 }
 
 fn base_frequency(node: Node, note_frequency: f64) -> f64 {
@@ -1046,6 +1233,59 @@ fn apply_formant_filter(
     sanitize_sample(sample * dry_mix + wet * wet_mix, 4.0)
 }
 
+fn comb_slot_for_link(link_index: usize) -> Option<usize> {
+    unsafe {
+        if link_index >= MAX_LINKS {
+            return None;
+        }
+        let existing = LINK_COMB_SLOTS[link_index];
+        if existing >= 0 {
+            return Some(existing as usize);
+        }
+        if LINK_COMB_SLOT_COUNT >= MAX_COMB_SLOTS {
+            return None;
+        }
+        let slot = LINK_COMB_SLOT_COUNT;
+        LINK_COMB_SLOT_COUNT += 1;
+        LINK_COMB_SLOTS[link_index] = slot as i32;
+        Some(slot)
+    }
+}
+
+fn apply_comb_filter(
+    link_index: usize,
+    link: Link,
+    voice_slot: usize,
+    sample_rate: f64,
+    sample: f64,
+) -> f64 {
+    let Some(slot) = comb_slot_for_link(link_index) else {
+        return sanitize_sample(sample, 4.0);
+    };
+    let clean_sample = sanitize_sample(sample, 4.0);
+    let frequency = link.filter_cutoff.clamp(20.0, sample_rate * 0.45).min(5_000.0);
+    let delay_samples = (sample_rate / frequency).clamp(1.0, (MAX_DELAY_SAMPLES - 1) as f64);
+    let feedback = link.filter_resonance.clamp(-0.98, 0.98);
+
+    unsafe {
+        if !LINK_COMB_READY[voice_slot][slot] {
+            LINK_COMB_BUFFERS[voice_slot][slot].fill(0.0);
+            LINK_COMB_INDICES[voice_slot][slot] = 0;
+            LINK_COMB_READY[voice_slot][slot] = true;
+        }
+        let write_index = LINK_COMB_INDICES[voice_slot][slot];
+        let delayed = read_delay(&LINK_COMB_BUFFERS[voice_slot][slot], write_index, delay_samples);
+        let write_value = sanitize_sample(clean_sample + delayed * feedback, 4.0);
+        LINK_COMB_BUFFERS[voice_slot][slot][write_index] = write_value as f32;
+        LINK_COMB_INDICES[voice_slot][slot] = (write_index + 1) % MAX_DELAY_SAMPLES;
+        if link.filter_type == 6 {
+            sanitize_sample(clean_sample - delayed * feedback.abs().max(0.45), 4.0)
+        } else {
+            sanitize_sample(delayed, 4.0)
+        }
+    }
+}
+
 fn apply_link_filter(
     link_index: usize,
     link: Link,
@@ -1059,6 +1299,9 @@ fn apply_link_filter(
     if link.filter_type == 4 {
         return apply_formant_filter(link_index, link, voice_slot, sample_rate, sample);
     }
+    if link.filter_type == 5 || link.filter_type == 6 {
+        return apply_comb_filter(link_index, link, voice_slot, sample_rate, sample);
+    }
 
     let coefficients = filter_coefficients(
         link.filter_type,
@@ -1069,6 +1312,25 @@ fn apply_link_filter(
     unsafe {
         apply_biquad_filter(&mut LINK_FILTERS[voice_slot][link_index], sample, coefficients)
     }
+}
+
+fn apply_link_distortion(sample: f64, link: Link, voice_slot: usize) -> f64 {
+    if link.distortion_type == 0 {
+        return sample;
+    }
+    let gain = link.distortion_gain.clamp(0.1, 40.0);
+    let driven = sanitize_sample(sample * gain, 32.0);
+    let output = match link.distortion_type {
+        1 => driven.clamp(-1.0, 1.0),
+        3 => {
+            let fuzz = driven.signum() * (1.0 - (-driven.abs() * 2.6).exp());
+            fuzz + random_bipolar(voice_slot) * (gain * 0.002).min(0.08)
+        }
+        4 => driven / (1.0 + driven.abs()),
+        5 => fold_sample(sample, gain),
+        _ => driven.tanh(),
+    };
+    sanitize_sample(output / gain.sqrt(), 4.0)
 }
 
 fn delay_slot_for_link(link_index: usize) -> Option<usize> {
@@ -1325,6 +1587,7 @@ fn render_link_signal(
     let signal_source =
         apply_signal_mode(link_index, link, voice_slot, sample_rate, filtered_source);
     let noisy_source = apply_link_noise(signal_source, link, voice_slot);
+    let distorted_source = apply_link_distortion(noisy_source, link, voice_slot);
     let envelope = if ignore_envelope {
         1.0
     } else {
@@ -1335,7 +1598,7 @@ fn render_link_signal(
         link,
         voice_slot,
         sample_rate,
-        noisy_source * envelope * velocity_scale(link.velocity_sensitivity, velocity),
+        distorted_source * envelope * velocity_scale(link.velocity_sensitivity, velocity),
     );
     observe_link_meter(link_index, source, delayed_source * link.amount, envelope);
     LinkSignal {
@@ -1598,7 +1861,17 @@ fn advance_phases(voice_slot: usize, sample_rate: f64, note_frequency: f64, rele
             } else {
                 base_frequency(node, note_frequency)
             };
-            let step = (frequency * multiplier) / sample_rate;
+            let target_frequency = if node.wave == 7 {
+                frequency * multiplier
+            } else {
+                quantise_frequency(node, frequency * multiplier)
+            };
+            let effective_frequency = if node.wave == 7 {
+                target_frequency
+            } else {
+                glide_frequency(voice_slot, node_index, node, target_frequency, sample_rate)
+            };
+            let step = effective_frequency / sample_rate;
             if node.wave == 9 {
                 advance_custom_wave_phase(voice_slot, node_index, node, step, release_age);
                 FREQUENCY_MODS[node_index] = 0.0;

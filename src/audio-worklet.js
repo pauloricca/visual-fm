@@ -22,7 +22,20 @@ const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sam
 const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"]);
 const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"]);
 const SPEED_WAVE_TYPES = new Set(["perlin"]);
+const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const QUANTISE_SCALE_INTERVALS = Object.freeze({
+  chromatic: Object.freeze([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+  major: Object.freeze([0, 2, 4, 5, 7, 9, 11]),
+  minor: Object.freeze([0, 2, 3, 5, 7, 8, 10]),
+  "major-pentatonic": Object.freeze([0, 2, 4, 7, 9]),
+  "minor-pentatonic": Object.freeze([0, 3, 5, 7, 10]),
+  blues: Object.freeze([0, 3, 5, 6, 7, 10]),
+  dorian: Object.freeze([0, 2, 3, 5, 7, 9, 10]),
+  mixolydian: Object.freeze([0, 2, 4, 5, 7, 9, 10]),
+  "harmonic-minor": Object.freeze([0, 2, 3, 5, 7, 8, 11]),
+});
 const LINK_SIGNAL_MODES = new Set(["raw", "envelope", "inverted-envelope"]);
+const LINK_DISTORTION_TYPES = new Set(["hard-clip", "soft-clip", "fuzz", "saturate", "wavefold"]);
 const LINK_ENVELOPE_TARGETS = new Set([
   "envelope.delay",
   "envelope.attack",
@@ -153,6 +166,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       const targetLink = rawLinksById.get(link.to);
       const targetNode = this.nodesById.get(link.to);
       const filter = this.normalizeLinkFilter(link.filter);
+      const distortion = this.normalizeLinkDistortion(link.distortion);
       const normalized = {
         ...link,
         modulationTarget: this.normalizeModulationTarget(link.modulationTarget, link.to, targetLink, targetNode),
@@ -169,6 +183,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
           VELOCITY_SENSITIVITY_MAX,
         ),
         filter,
+        distortion,
       };
       normalized.filter = filter;
       normalized.filterStateKey = `${normalized.id}:${filter.type}`;
@@ -224,6 +239,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
   syncVoiceGraphState(voice, linkStateKeys) {
     if (!voice.nodeFilters) voice.nodeFilters = new Map();
     if (!voice.frequencyMods) voice.frequencyMods = new Map();
+    if (!voice.quantisedFrequencyStates) voice.quantisedFrequencyStates = new Map();
     if (!voice.linkDelays) voice.linkDelays = new Map();
     if (!voice.renderCache) voice.renderCache = new Map();
     if (!voice.renderStack) voice.renderStack = new Set();
@@ -256,6 +272,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
     for (const key of voice.frequencyMods.keys()) {
       if (!nodeIds.has(key)) voice.frequencyMods.delete(key);
+    }
+    for (const key of voice.quantisedFrequencyStates.keys()) {
+      if (!nodeIds.has(key)) voice.quantisedFrequencyStates.delete(key);
     }
     for (const key of voice.sampleHolds.keys()) {
       if (!nodeIds.has(key)) voice.sampleHolds.delete(key);
@@ -328,15 +347,27 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const frequency = Number(node.frequency);
     const speed = Number(node.speed);
     const audioInputGain = Number(node.audioInputGain);
+    const quantise = this.normalizeNodeQuantise(node.quantise);
     return {
       id: node.id,
       wave: WAVE_TYPES.has(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
+      quantise,
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
       customWave: this.normalizeCustomWave(node.customWave),
+    };
+  }
+
+  normalizeNodeQuantise(quantise = {}) {
+    const glide = Number(quantise.glide);
+    return {
+      enabled: Boolean(quantise.enabled),
+      root: QUANTISE_ROOT_NOTES.includes(quantise.root) ? quantise.root : "C",
+      scale: QUANTISE_SCALE_INTERVALS[quantise.scale] ? quantise.scale : "chromatic",
+      glide: Number.isFinite(glide) ? this.clamp(glide, 0, 4) : 0,
     };
   }
 
@@ -401,20 +432,29 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   normalizeLinkFilter(filter = {}) {
-    const type = ["none", "lowpass", "highpass", "bandpass", "formant"].includes(filter.type) ? filter.type : "none";
+    const type = ["none", "lowpass", "highpass", "bandpass", "comb", "comb-notch", "formant"].includes(filter.type) ? filter.type : "none";
+    const isComb = type === "comb" || type === "comb-notch";
     const normalized = {
       type,
       cutoff: type === "formant"
         ? this.clamp(Number.isFinite(Number(filter.cutoff)) ? Number(filter.cutoff) : 0, 0, 1)
-        : this.clamp(Number(filter.cutoff) || 5000, 20, Math.min(12000, sampleRate * 0.45)),
+        : this.clamp(Number(filter.cutoff) || (isComb ? 440 : 5000), 20, Math.min(isComb ? 5000 : 12000, sampleRate * 0.45)),
       resonance: this.clamp(
-        Number(filter.resonance) || 0.7,
-        0.1,
-        type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+        Number.isFinite(Number(filter.resonance)) ? Number(filter.resonance) : isComb ? 0.45 : 0.7,
+        isComb ? -0.98 : 0.1,
+        type === "formant" ? FORMANT_INTENSITY_MAX : isComb ? 0.98 : 12,
       ),
     };
-    normalized.coefficients = type === "none" || type === "formant" ? null : this.filterCoefficients(normalized);
+    normalized.coefficients = type === "none" || type === "formant" || isComb ? null : this.filterCoefficients(normalized);
     return normalized;
+  }
+
+  normalizeLinkDistortion(distortion = {}) {
+    return {
+      enabled: Boolean(distortion.enabled),
+      type: LINK_DISTORTION_TYPES.has(distortion.type) ? distortion.type : "soft-clip",
+      gain: this.clamp(Number(distortion.gain) || 1.5, 0.1, 40),
+    };
   }
 
   normalizeFollower(follower = {}) {
@@ -447,6 +487,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       pan: link.pan,
       filterCutoff: link.filter?.cutoff ?? 5000,
       filterResonance: link.filter?.resonance || 0.7,
+      distortionGain: link.distortion?.gain ?? 1.5,
     };
   }
 
@@ -457,7 +498,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
       && current.noise === target.noise
       && current.pan === target.pan
       && current.filterCutoff === target.filterCutoff
-      && current.filterResonance === target.filterResonance;
+      && current.filterResonance === target.filterResonance
+      && current.distortionGain === target.distortionGain;
   }
 
   syncActiveLinkControlSmoother(smoother) {
@@ -506,15 +548,22 @@ class VisualFmEngine extends AudioWorkletProcessor {
         VELOCITY_SENSITIVITY_MAX,
       );
     } else if (parameter === "filter.cutoff") {
+      const isComb = link.filter.type === "comb" || link.filter.type === "comb-notch";
       link.filter.cutoff = link.filter.type === "formant"
         ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 0, 0, 1)
-        : this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
+        : this.clamp(Number(value) || (isComb ? 440 : 5000), 20, Math.min(isComb ? 5000 : 12000, sampleRate * 0.45));
     } else if (parameter === "filter.resonance") {
+      const isComb = link.filter.type === "comb" || link.filter.type === "comb-notch";
       link.filter.resonance = this.clamp(
-        Number(value) || 0.7,
-        0.1,
-        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+        Number.isFinite(Number(value)) ? Number(value) : isComb ? 0.45 : 0.7,
+        isComb ? -0.98 : 0.1,
+        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : isComb ? 0.98 : 12,
       );
+    } else if (parameter === "distortion.gain") {
+      link.distortion = {
+        ...(link.distortion || this.normalizeLinkDistortion()),
+        gain: this.clamp(Number(value) || 1.5, 0.1, 40),
+      };
     } else {
       return;
     }
@@ -550,6 +599,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       current.pan = this.smoothControlValue(current.pan, target.pan, alpha);
       current.filterCutoff = this.smoothControlValue(current.filterCutoff, target.filterCutoff, alpha);
       current.filterResonance = this.smoothControlValue(current.filterResonance, target.filterResonance, alpha);
+      current.distortionGain = this.smoothControlValue(current.distortionGain, target.distortionGain, alpha);
       link.baseParams = this.createBaseLinkParams(link);
       this.syncActiveLinkControlSmoother(smoother);
     }
@@ -690,6 +740,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       linkDelays: new Map(),
       nodeFilters: new Map(),
       frequencyMods: new Map(),
+      quantisedFrequencyStates: new Map(),
       renderCache: new Map(),
       renderStack: new Set(),
       linkStack: new Set(),
@@ -1375,9 +1426,32 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return this.sanitizeSample(sample * dryMix + wet * wetMix, 4);
   }
 
+  applyCombFilter(link, voice, sample, filter) {
+    const state = this.linkFilterState(voice, link);
+    if (!state.combBuffer) {
+      state.combBuffer = new Float32Array(Math.ceil(sampleRate / 20) + 2);
+      state.combIndex = 0;
+    }
+
+    const frequency = this.clamp(Number(filter.cutoff) || 440, 20, Math.min(5000, sampleRate * 0.45));
+    const delaySamples = this.clamp(sampleRate / frequency, 1, state.combBuffer.length - 1);
+    const delayed = this.readDelay(state.combBuffer, state.combIndex, delaySamples);
+    const feedback = this.clamp(Number.isFinite(Number(filter.resonance)) ? Number(filter.resonance) : 0.45, -0.98, 0.98);
+    const cleanSample = this.sanitizeSample(sample, 4);
+    const writeValue = this.sanitizeSample(cleanSample + delayed * feedback, 4);
+    state.combBuffer[state.combIndex] = writeValue;
+    state.combIndex = (state.combIndex + 1) % state.combBuffer.length;
+
+    if (filter.type === "comb-notch") {
+      return this.sanitizeSample(cleanSample - delayed * Math.abs(feedback || 0.45), 4);
+    }
+    return this.sanitizeSample(delayed, 4);
+  }
+
   applyLinkFilter(link, voice, sample, filter = link.filter || { type: "none" }) {
     if (filter.type === "none") return sample;
     if (filter.type === "formant") return this.applyFormantFilter(link, voice, sample, filter);
+    if (filter.type === "comb" || filter.type === "comb-notch") return this.applyCombFilter(link, voice, sample, filter);
 
     const state = this.linkFilterState(voice, link);
     const coefficients = filter.coefficients || this.filterCoefficients(filter);
@@ -1455,6 +1529,26 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return wrapped <= 2 ? wrapped - 1 : 3 - wrapped;
   }
 
+  applyLinkDistortion(sample, distortion = {}) {
+    if (!distortion.enabled) return sample;
+    const gain = this.clamp(Number(distortion.gain) || 1.5, 0.1, 40);
+    const driven = this.sanitizeSample(sample * gain, 32);
+    let output = driven;
+    if (distortion.type === "hard-clip") {
+      output = this.clamp(driven, -1, 1);
+    } else if (distortion.type === "fuzz") {
+      output = Math.sign(driven) * (1 - Math.exp(-Math.abs(driven) * 2.6));
+      output += (Math.random() * 2 - 1) * Math.min(0.08, gain * 0.002);
+    } else if (distortion.type === "saturate") {
+      output = driven / (1 + Math.abs(driven));
+    } else if (distortion.type === "wavefold") {
+      output = this.foldSample(sample, gain);
+    } else {
+      output = Math.tanh(driven);
+    }
+    return this.sanitizeSample(output / Math.sqrt(gain), 4);
+  }
+
   createBaseLinkParams(link) {
     const controls = link.controlSmoother?.current || this.linkControlTargets(link);
     const panGains = this.panGains(controls.pan);
@@ -1464,6 +1558,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       resonance: controls.filterResonance,
     };
     filter.coefficients = filter.type === "none" || filter.type === "formant" ? null : this.filterCoefficients(filter);
+    if (filter.type === "comb" || filter.type === "comb-notch") filter.coefficients = null;
     return {
       amount: controls.amount,
       delay: controls.delay,
@@ -1471,6 +1566,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
       pan: controls.pan,
       panGains,
       filter,
+      distortion: {
+        ...(link.distortion || this.normalizeLinkDistortion()),
+        gain: controls.distortionGain,
+      },
       envelope: link.envelope || DEFAULT_ENVELOPE,
     };
   }
@@ -1490,6 +1589,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       pan: baseParams.pan,
       panGains: baseParams.panGains,
       filter: baseParams.filter,
+      distortion: baseParams.distortion,
       envelope: baseParams.envelope,
     };
 
@@ -1645,11 +1745,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const shapedSource = this.applyLinkFilter(link, voice, source, params.filter);
     const signalSource = this.applyLinkSignalMode(link, voice, shapedSource);
     const noisySource = this.applyLinkNoise(signalSource, params);
+    const distortedSource = this.applyLinkDistortion(noisySource, params.distortion);
     const envelope = options.ignoreEnvelope ? 1 : this.envelopeValue(link, voice, now, params);
     const delayed = this.applyLinkDelay(
       link,
       voice,
-      noisySource * envelope * this.velocityScale(link, voice),
+      distortedSource * envelope * this.velocityScale(link, voice),
       params,
     );
     this.observeLinkMeter(link, source, delayed * params.amount, envelope);
@@ -1762,6 +1863,55 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return OSCILLATOR_WAVE_TYPES[index];
   }
 
+  quantiseFrequency(frequency, quantise) {
+    if (!quantise?.enabled || frequency <= 0 || !Number.isFinite(frequency)) return frequency;
+    const intervals = QUANTISE_SCALE_INTERVALS[quantise.scale] || QUANTISE_SCALE_INTERVALS.chromatic;
+    const root = QUANTISE_ROOT_NOTES.indexOf(quantise.root);
+    const rootPitchClass = root >= 0 ? root : 0;
+    const midi = 69 + 12 * Math.log2(frequency / 440);
+    const center = Math.round(midi);
+    let bestMidi = center;
+    let bestDistance = Infinity;
+    for (let octave = -2; octave <= 2; octave += 1) {
+      const octaveBase = Math.floor(center / 12) * 12 + octave * 12;
+      for (const interval of intervals) {
+        const candidate = octaveBase + ((rootPitchClass + interval) % 12);
+        const distance = Math.abs(candidate - midi);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestMidi = candidate;
+        }
+      }
+    }
+    return 440 * Math.pow(2, (bestMidi - 69) / 12);
+  }
+
+  glideFrequency(node, voice, target) {
+    if (!node.quantise?.enabled || !PITCHED_WAVE_TYPES.has(node.wave)) return target;
+    const glide = this.clamp(Number(node.quantise.glide) || 0, 0, 4);
+    if (glide <= 0) {
+      voice.quantisedFrequencyStates.set(node.id, { current: target, target, step: 0, remaining: 0 });
+      return target;
+    }
+    let state = voice.quantisedFrequencyStates.get(node.id);
+    if (!state || !Number.isFinite(state.current) || state.current <= 0) {
+      state = { current: target, target, step: 0, remaining: 0 };
+      voice.quantisedFrequencyStates.set(node.id, state);
+      return target;
+    }
+    if (Math.abs(target - state.target) > 0.000001) {
+      state.target = target;
+      state.remaining = Math.max(1, Math.round(glide * sampleRate));
+      state.step = (target - state.current) / state.remaining;
+    }
+    if (state.remaining > 0) {
+      state.current += state.step;
+      state.remaining -= 1;
+      if (state.remaining <= 0) state.current = state.target;
+    }
+    return state.current;
+  }
+
   advancePhases(voice) {
     for (const node of this.nodes) {
       if (node.wave === "noise" || node.wave === "audio-input") continue;
@@ -1772,10 +1922,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
       const baseFrequency = SPEED_WAVE_TYPES.has(node.wave)
         ? this.clamp(Number(node.speed) || 8, 0.01, 60)
         : this.baseFrequency(node, voice);
+      const targetFrequency = PITCHED_WAVE_TYPES.has(node.wave)
+        ? this.quantiseFrequency(baseFrequency * frequencyMultiplier, node.quantise)
+        : baseFrequency * frequencyMultiplier;
+      const effectiveFrequency = this.glideFrequency(node, voice, targetFrequency);
       const current = voice.phases.get(node.id) || 0;
-      const next = current + (baseFrequency * frequencyMultiplier) / sampleRate;
+      const next = current + effectiveFrequency / sampleRate;
       if (node.wave === "custom") {
-        this.advanceCustomWavePhase(node, voice, (baseFrequency * frequencyMultiplier) / sampleRate);
+        this.advanceCustomWavePhase(node, voice, effectiveFrequency / sampleRate);
         continue;
       }
       if (node.wave === "sample-hold" && next >= 1) {

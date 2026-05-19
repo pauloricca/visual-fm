@@ -580,7 +580,7 @@ select {
   position: absolute;
   z-index: 4;
   left: 50%;
-  bottom: 30px;
+  top: calc(100% - 55px);
   display: inline-grid;
   place-items: center;
   width: 140px;
@@ -590,8 +590,9 @@ select {
   background: #232017;
   color: var(--text);
   box-shadow: var(--shadow);
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   cursor: pointer;
+  touch-action: none;
   transition: border-color 220ms ease, box-shadow 220ms ease;
 }
 
@@ -1054,6 +1055,16 @@ select {
 .custom-wave-points .custom-wave-endpoint,
 .custom-wave-handle.custom-wave-endpoint {
   fill: var(--green);
+}
+
+.custom-wave-hit-target {
+  fill: transparent;
+  stroke: transparent;
+  cursor: grab;
+}
+
+.custom-wave-hit-target.is-locked {
+  cursor: default;
 }
 
 .modal-backdrop {

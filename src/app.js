@@ -2,8 +2,11 @@ import {
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
   DEFAULT_LINK_FILTER,
+  DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
+  DEFAULT_NODE_QUANTISE,
   FREQUENCY_MODES,
+  LINK_DISTORTION_TYPES,
   LINK_FILTER_TYPES,
   LINK_INPUT_T,
   LINK_MODULATION_TARGETS,
@@ -18,6 +21,8 @@ import {
   MIN_MAX_VOICES,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
+  QUANTISE_ROOT_NOTES,
+  QUANTISE_SCALES,
   RECENT_MIDI_CC_WINDOW_MS,
   STORAGE_KEY,
   VELOCITY_SENSITIVITY_MAX,
@@ -31,6 +36,7 @@ import {
   normalizeCustomWave,
   normalizeDefaultPatch,
   normalizeFrequencyMode,
+  normalizeNodeQuantise,
   normalizePatch,
   normalizeSignalMode,
 } from "./patch-normalize.js";
@@ -57,6 +63,7 @@ const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
+const DEFAULT_AUDIO_BACKEND = "wasm";
 const AUDIO_BACKENDS = {
   js: {
     label: "JS AudioWorklet",
@@ -85,6 +92,11 @@ const LINK_AMOUNT_SLIDER_MAX = 8;
 const LINK_AMOUNT_INPUT_MAX = 32;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
+const NODE_LAYOUT_HALF_WIDTH = 71;
+const NODE_LAYOUT_HALF_HEIGHT = 43;
+const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
+const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
+const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -98,9 +110,10 @@ function loadAudioBackend() {
   const queryBackend = new URLSearchParams(window.location.search).get("engine");
   if (queryBackend) return normalizeAudioBackend(queryBackend);
   try {
-    return normalizeAudioBackend(localStorage.getItem(AUDIO_BACKEND_STORAGE_KEY));
+    const storedBackend = localStorage.getItem(AUDIO_BACKEND_STORAGE_KEY);
+    return storedBackend ? normalizeAudioBackend(storedBackend) : DEFAULT_AUDIO_BACKEND;
   } catch {
-    return "js";
+    return DEFAULT_AUDIO_BACKEND;
   }
 }
 
@@ -133,6 +146,9 @@ let midiBindingCounter = 1;
 let dragState = null;
 let linkDrag = null;
 let marqueeState = null;
+let canvasPanState = null;
+const canvasPanPointers = new Map();
+let suppressNextCanvasPanClick = false;
 let pressedKeys = new Set();
 let midiAccess = null;
 let pendingPatchSave = null;
@@ -226,6 +242,7 @@ function currentPatchData() {
     maxVoices: state.maxVoices,
     audioInputDeviceId: state.audioInputDeviceId,
     audioOutputDeviceId: state.audioOutputDeviceId,
+    audioOutPosition: state.audioOutPosition,
     linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
@@ -314,6 +331,46 @@ function nodeParameterDefinitions(node) {
       get: () => node.frequency,
       set: (value) => {
         node.frequency = value;
+      },
+    },
+    {
+      id: "quantise.enabled",
+      label: "Quantise",
+      type: "boolean",
+      get: () => Boolean(node.quantise?.enabled),
+      set: (value) => {
+        node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: Boolean(value) };
+      },
+    },
+    {
+      id: "quantise.root",
+      label: "Quantise root",
+      type: "choice",
+      options: QUANTISE_ROOT_NOTES.map((value) => ({ value, label: value })),
+      get: () => normalizeNodeQuantise(node.quantise).root,
+      set: (value) => {
+        node.quantise = { ...normalizeNodeQuantise(node.quantise), root: value };
+      },
+    },
+    {
+      id: "quantise.scale",
+      label: "Quantise scale",
+      type: "choice",
+      options: QUANTISE_SCALES.map((value) => ({ value, label: quantiseScaleLabel(value) })),
+      get: () => normalizeNodeQuantise(node.quantise).scale,
+      set: (value) => {
+        node.quantise = { ...normalizeNodeQuantise(node.quantise), scale: value };
+      },
+    },
+    {
+      id: "quantise.glide",
+      label: "Glide",
+      type: "number",
+      min: 0,
+      max: 4,
+      get: () => normalizeNodeQuantise(node.quantise).glide,
+      set: (value) => {
+        node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
       },
     }] : []),
     ...(isSpeedWave(node.wave) ? [{
@@ -437,6 +494,15 @@ function linkParameterDefinitions(link) {
       },
     },
     {
+      id: "distortion.enabled",
+      label: "Distortion",
+      type: "boolean",
+      get: () => Boolean(link.distortion?.enabled),
+      set: (value) => {
+        link.distortion = { ...(link.distortion || DEFAULT_LINK_DISTORTION), enabled: Boolean(value) };
+      },
+    },
+    {
       id: "signalMode",
       label: "Signal",
       type: "choice",
@@ -482,10 +548,10 @@ function linkParameterDefinitions(link) {
     },
     {
       id: "filter.cutoff",
-      label: "Filter cutoff",
+      label: link.filter.type === "formant" ? "Vowel morph" : link.filter.type?.startsWith("comb") ? "Comb frequency" : "Filter cutoff",
       type: "number",
-      min: 20,
-      max: 12000,
+      min: link.filter.type === "formant" ? 0 : 20,
+      max: link.filter.type === "formant" ? 1 : link.filter.type?.startsWith("comb") ? 5000 : 12000,
       get: () => link.filter.cutoff,
       set: (value) => {
         link.filter.cutoff = value;
@@ -493,13 +559,34 @@ function linkParameterDefinitions(link) {
     },
     {
       id: "filter.resonance",
-      label: link.filter.type === "formant" ? "Formant intensity" : "Filter resonance",
+      label: link.filter.type === "formant" ? "Formant intensity" : link.filter.type?.startsWith("comb") ? "Comb feedback" : "Filter resonance",
       type: "number",
-      min: 0.1,
-      max: link.filter.type === "formant" ? 36 : 12,
+      min: link.filter.type?.startsWith("comb") ? -0.98 : 0.1,
+      max: link.filter.type === "formant" ? 36 : link.filter.type?.startsWith("comb") ? 0.98 : 12,
       get: () => link.filter.resonance,
       set: (value) => {
         link.filter.resonance = value;
+      },
+    },
+    {
+      id: "distortion.type",
+      label: "Distortion type",
+      type: "choice",
+      options: LINK_DISTORTION_TYPES.map((value) => ({ value, label: distortionTypeLabel(value) })),
+      get: () => link.distortion?.type || DEFAULT_LINK_DISTORTION.type,
+      set: (value) => {
+        link.distortion = { ...(link.distortion || DEFAULT_LINK_DISTORTION), type: value };
+      },
+    },
+    {
+      id: "distortion.gain",
+      label: "Distortion gain",
+      type: "number",
+      min: 0.1,
+      max: 40,
+      get: () => link.distortion?.gain ?? DEFAULT_LINK_DISTORTION.gain,
+      set: (value) => {
+        link.distortion = { ...(link.distortion || DEFAULT_LINK_DISTORTION), gain: value };
       },
     },
     ...[
@@ -1059,6 +1146,21 @@ function audioInputPoint() {
   };
 }
 
+function defaultAudioOutPosition() {
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: rect.width / 2,
+    y: Math.max(96, rect.height - 55),
+  };
+}
+
+function audioOutPosition() {
+  if (!state.audioOutPosition) {
+    state.audioOutPosition = defaultAudioOutPosition();
+  }
+  return state.audioOutPosition;
+}
+
 function bezierPath(from, to) {
   const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
   return `M ${from.x} ${from.y} C ${from.x} ${from.y + distance}, ${to.x} ${to.y - distance}, ${to.x} ${to.y}`;
@@ -1128,12 +1230,13 @@ function linkGeometry(link, visited = new Set(), context = null) {
 
 function graphPayload() {
   return {
-    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, speed, audioInputGain, customWave }) => ({
+    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave }) => ({
       id,
       wave,
       frequencyMode,
       ratio,
       frequency,
+      quantise: normalizeNodeQuantise(quantise),
       speed,
       audioInputGain,
       customWave: normalizeCustomWave(customWave),
@@ -1152,6 +1255,7 @@ function graphPayload() {
       signalMode: normalizeSignalMode(link.signalMode),
       follower: { ...(link.follower || DEFAULT_LINK_FOLLOWER) },
       filter: { ...link.filter },
+      distortion: { ...(link.distortion || DEFAULT_LINK_DISTORTION) },
       envelope: { ...link.envelope },
     })),
     maxVoices: state.maxVoices,
@@ -1886,6 +1990,9 @@ function renderNodes() {
 }
 
 function renderAudioOut() {
+  const position = audioOutPosition();
+  audioOut.style.left = `${position.x}px`;
+  audioOut.style.top = `${position.y}px`;
   audioOut.classList.toggle("selected", state.selected.type === "audio");
   audioOut.dataset.midiTargetType = "audio";
   audioOut.dataset.midiTargetId = "audio";
@@ -2086,6 +2193,29 @@ function renderPanel() {
     const frequencyMin = 0;
     const frequencyMax = isFixedFrequency ? 12000 : 16;
     const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
+    const quantise = normalizeNodeQuantise(node.quantise);
+    const usesQuantiseControls = usesPitchControls && quantise.enabled;
+    const quantiseControls = usesQuantiseControls ? `
+      <div class="field">
+        ${parameterLabel("quantiseRoot", "Root", "node", node.id, "quantise.root")}
+        <select id="quantiseRoot">
+          ${QUANTISE_ROOT_NOTES.map((root) => `<option value="${root}" ${quantise.root === root ? "selected" : ""}>${root}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        ${parameterLabel("quantiseScale", "Scale", "node", node.id, "quantise.scale")}
+        <select id="quantiseScale">
+          ${QUANTISE_SCALES.map((scale) => `<option value="${scale}" ${quantise.scale === scale ? "selected" : ""}>${quantiseScaleLabel(scale)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        ${parameterLabel("quantiseGlide", "Glide (s)", "node", node.id, "quantise.glide")}
+        <div class="field-row">
+          <input id="quantiseGlideRange" type="range" min="0" max="4" step="0.001" value="${quantise.glide}">
+          <input id="quantiseGlide" type="number" min="0" max="4" step="0.001" value="${quantise.glide}">
+        </div>
+      </div>
+    ` : "";
     const speedValue = Number.isFinite(Number(node.speed)) ? node.speed : 8;
     const usesAudioInputGain = node.wave === "audio-input";
     const audioInputGainValue = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
@@ -2130,6 +2260,16 @@ function renderPanel() {
             <input id="frequencyValue" type="number" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
           </div>
         </div>
+        <section class="effect-section">
+          <div class="toggle-field">
+            <label class="toggle-row" for="quantiseEnabled">
+              <input id="quantiseEnabled" type="checkbox" ${quantise.enabled ? "checked" : ""}>
+              <span>Quantise</span>
+            </label>
+            ${midiCcButton("node", node.id, "quantise.enabled")}
+          </div>
+          ${quantiseControls}
+        </section>
       ` : ""}
       ${usesSpeedControl ? `
         <div class="field">
@@ -2198,6 +2338,29 @@ function renderPanel() {
         sendGraph();
         savePatch();
       });
+      panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
+        node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
+        renderPanel();
+        sendGraph();
+        savePatch();
+      });
+      if (usesQuantiseControls) {
+        panel.querySelector("#quantiseRoot").addEventListener("change", (event) => {
+          node.quantise = { ...normalizeNodeQuantise(node.quantise), root: event.target.value };
+          sendGraph();
+          savePatch();
+        });
+        panel.querySelector("#quantiseScale").addEventListener("change", (event) => {
+          node.quantise = { ...normalizeNodeQuantise(node.quantise), scale: event.target.value };
+          sendGraph();
+          savePatch();
+        });
+        bindNumberPair("quantiseGlide", "quantiseGlideRange", 0, 4, (value) => {
+          node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
+          sendGraph();
+          savePatch();
+        });
+      }
     }
     if (usesSpeedControl) {
       bindNumberPair("speed", "speedRange", 0.01, 60, (value) => {
@@ -2242,16 +2405,22 @@ function renderPanel() {
     const usesFollowerControls = signalMode !== "raw";
     const follower = link.follower || DEFAULT_LINK_FOLLOWER;
     const usesFilterControls = link.filter.type !== "none";
+    const distortion = link.distortion || DEFAULT_LINK_DISTORTION;
+    const usesDistortionControls = Boolean(distortion.enabled);
     const linkFilterTypes = LINK_FILTER_TYPES.filter((type) => type !== "none");
     const filterType = usesFilterControls ? link.filter.type : "lowpass";
     const usesFormantFilter = filterType === "formant";
-    const filterCutoffLabel = usesFormantFilter ? "Vowel morph" : "Cutoff (Hz)";
+    const usesCombFilter = filterType === "comb" || filterType === "comb-notch";
+    const filterCutoffLabel = usesFormantFilter ? "Vowel morph" : usesCombFilter ? "Frequency (Hz)" : "Cutoff (Hz)";
     const filterCutoffMin = usesFormantFilter ? 0 : 20;
-    const filterCutoffMax = usesFormantFilter ? 1 : 12000;
+    const filterCutoffMax = usesFormantFilter ? 1 : usesCombFilter ? 5000 : 12000;
     const filterCutoffStep = usesFormantFilter ? 0.001 : 1;
-    const filterCutoffValue = usesFormantFilter ? Math.min(1, Math.max(0, link.filter.cutoff || 0)) : link.filter.cutoff;
-    const filterResonanceLabel = usesFormantFilter ? "Intensity" : "Resonance";
-    const filterResonanceMax = usesFormantFilter ? 36 : 12;
+    const filterCutoffValue = usesFormantFilter
+      ? Math.min(1, Math.max(0, link.filter.cutoff || 0))
+      : usesCombFilter ? clamp(link.filter.cutoff || 440, 20, 5000) : link.filter.cutoff;
+    const filterResonanceLabel = usesFormantFilter ? "Intensity" : usesCombFilter ? "Feedback" : "Resonance";
+    const filterResonanceMin = usesCombFilter ? -0.98 : 0.1;
+    const filterResonanceMax = usesFormantFilter ? 36 : usesCombFilter ? 0.98 : 12;
     const filterControls = usesFilterControls ? `
       <div class="field">
         ${parameterLabel("filterType", "Type", "link", link.id, "filter.type")}
@@ -2269,8 +2438,23 @@ function renderPanel() {
       <div class="field">
         ${parameterLabel("filterResonance", filterResonanceLabel, "link", link.id, "filter.resonance")}
         <div class="field-row">
-          <input id="filterResonanceRange" type="range" min="0.1" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
-          <input id="filterResonance" type="number" min="0.1" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
+          <input id="filterResonanceRange" type="range" min="${filterResonanceMin}" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
+          <input id="filterResonance" type="number" min="${filterResonanceMin}" max="${filterResonanceMax}" step="0.001" value="${link.filter.resonance}">
+        </div>
+      </div>
+    ` : "";
+    const distortionControls = usesDistortionControls ? `
+      <div class="field">
+        ${parameterLabel("distortionType", "Type", "link", link.id, "distortion.type")}
+        <select id="distortionType">
+          ${LINK_DISTORTION_TYPES.map((type) => `<option value="${type}" ${distortion.type === type ? "selected" : ""}>${distortionTypeLabel(type)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        ${parameterLabel("distortionGain", "Gain", "link", link.id, "distortion.gain")}
+        <div class="field-row">
+          <input id="distortionGainRange" type="range" min="0.1" max="40" step="0.001" value="${distortion.gain}">
+          <input id="distortionGain" type="number" min="0.1" max="40" step="0.001" value="${distortion.gain}">
         </div>
       </div>
     ` : "";
@@ -2394,6 +2578,16 @@ function renderPanel() {
         </div>
         ${filterControls}
       </section>
+      <section class="effect-section">
+        <div class="toggle-field">
+          <label class="toggle-row" for="distortionEnabled">
+            <input id="distortionEnabled" type="checkbox" ${usesDistortionControls ? "checked" : ""}>
+            <span>Distortion</span>
+          </label>
+          ${midiCcButton("link", link.id, "distortion.enabled")}
+        </div>
+        ${distortionControls}
+      </section>
       ${panelRemoveAction("Remove selected link")}
     `;
     updateSelectedLinkMeter();
@@ -2483,8 +2677,13 @@ function renderPanel() {
         link.filter.type = event.target.value;
         if (link.filter.type === "formant") {
           link.filter.cutoff = Math.min(1, Math.max(0, Number(link.filter.cutoff) <= 1 ? Number(link.filter.cutoff) : 0));
+          link.filter.resonance = clamp(Number(link.filter.resonance) || DEFAULT_LINK_FILTER.resonance, 0.1, 36);
+        } else if (link.filter.type === "comb" || link.filter.type === "comb-notch") {
+          link.filter.cutoff = clamp(Number(link.filter.cutoff) || 440, 20, 5000);
+          link.filter.resonance = clamp(Number(link.filter.resonance) || 0.45, -0.98, 0.98);
         } else if (Number(link.filter.cutoff) < 20) {
           link.filter.cutoff = DEFAULT_LINK_FILTER.cutoff;
+          link.filter.resonance = clamp(Number(link.filter.resonance) || DEFAULT_LINK_FILTER.resonance, 0.1, 12);
         }
         renderPanel();
         sendGraph();
@@ -2497,9 +2696,39 @@ function renderPanel() {
         schedulePatchSave();
       });
 
-      bindNumberPair("filterResonance", "filterResonanceRange", 0.1, filterResonanceMax, (value) => {
+      bindNumberPair("filterResonance", "filterResonanceRange", filterResonanceMin, filterResonanceMax, (value) => {
         link.filter.resonance = value;
         sendLinkParam(link.id, "filter.resonance", value);
+        schedulePatchSave();
+      });
+    }
+
+    panel.querySelector("#distortionEnabled").addEventListener("change", (event) => {
+      link.distortion = {
+        ...(link.distortion || DEFAULT_LINK_DISTORTION),
+        enabled: event.target.checked,
+      };
+      renderPanel();
+      sendGraph();
+      savePatch();
+    });
+
+    if (usesDistortionControls) {
+      panel.querySelector("#distortionType").addEventListener("change", (event) => {
+        link.distortion = {
+          ...(link.distortion || DEFAULT_LINK_DISTORTION),
+          type: event.target.value,
+        };
+        sendGraph();
+        savePatch();
+      });
+
+      bindNumberPair("distortionGain", "distortionGainRange", 0.1, 40, (value) => {
+        link.distortion = {
+          ...(link.distortion || DEFAULT_LINK_DISTORTION),
+          gain: value,
+        };
+        sendLinkParam(link.id, "distortion.gain", value);
         schedulePatchSave();
       });
     }
@@ -2754,6 +2983,7 @@ function applyPatchData(patch) {
   state.maxVoices = normalized.maxVoices;
   state.audioInputDeviceId = normalized.audioInputDeviceId;
   state.audioOutputDeviceId = normalized.audioOutputDeviceId;
+  state.audioOutPosition = normalized.audioOutPosition;
   state.linkSignalGradientMeters = normalized.linkSignalGradientMeters;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
@@ -2790,6 +3020,7 @@ function newPatch() {
   state.maxVoices = normalized.maxVoices;
   state.audioInputDeviceId = audioInputDeviceId;
   state.audioOutputDeviceId = audioOutputDeviceId;
+  state.audioOutPosition = normalized.audioOutPosition;
   state.linkSignalGradientMeters = linkSignalGradientMeters;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
@@ -2843,9 +3074,37 @@ function filterTypeLabel(type) {
     lowpass: "Low-pass",
     highpass: "High-pass",
     bandpass: "Band-pass",
+    comb: "Comb",
+    "comb-notch": "Comb notch",
     formant: "Formant",
   };
   return labels[type] || type;
+}
+
+function distortionTypeLabel(type) {
+  const labels = {
+    "hard-clip": "Hard clip",
+    "soft-clip": "Soft clip",
+    fuzz: "Fuzz",
+    saturate: "Saturate",
+    wavefold: "Wavefold",
+  };
+  return labels[type] || type;
+}
+
+function quantiseScaleLabel(scale) {
+  const labels = {
+    chromatic: "Chromatic",
+    major: "Major",
+    minor: "Minor",
+    "major-pentatonic": "Major pentatonic",
+    "minor-pentatonic": "Minor pentatonic",
+    blues: "Blues",
+    dorian: "Dorian",
+    mixolydian: "Mixolydian",
+    "harmonic-minor": "Harmonic minor",
+  };
+  return labels[scale] || scale;
 }
 
 function waveTypeLabel(type) {
@@ -2959,7 +3218,10 @@ function openCustomWaveModal(nodeId) {
       ${safePoints.map((point, index) => {
         const screen = toScreen(point);
         const isEndpoint = index === 0 || index === safePoints.length - 1;
-        return `<circle class="custom-wave-handle ${isEndpoint ? "custom-wave-endpoint is-locked" : ""}" data-index="${index}" cx="${screen.x.toFixed(2)}" cy="${screen.y.toFixed(2)}" r="${isEndpoint ? 7 : 8}"></circle>`;
+        return `
+          <circle class="custom-wave-hit-target ${isEndpoint ? "is-locked" : ""}" data-index="${index}" cx="${screen.x.toFixed(2)}" cy="${screen.y.toFixed(2)}" r="20"></circle>
+          <circle class="custom-wave-handle ${isEndpoint ? "custom-wave-endpoint is-locked" : ""}" data-index="${index}" cx="${screen.x.toFixed(2)}" cy="${screen.y.toFixed(2)}" r="${isEndpoint ? 7 : 8}"></circle>
+        `;
       }).join("")}
     `;
   };
@@ -3047,7 +3309,7 @@ function openCustomWaveModal(nodeId) {
   editor.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const handle = event.target.closest?.(".custom-wave-handle");
+    const handle = event.target.closest?.(".custom-wave-handle, .custom-wave-hit-target");
     if (handle) {
       const index = Number(handle.dataset.index);
       const now = performance.now();
@@ -3084,7 +3346,7 @@ function openCustomWaveModal(nodeId) {
     commit();
   });
   editor.addEventListener("click", (event) => {
-    const handle = event.target.closest?.(".custom-wave-handle");
+    const handle = event.target.closest?.(".custom-wave-handle, .custom-wave-hit-target");
     if (!handle || event.detail < 2) return;
     event.preventDefault();
     removeInteriorPoint(Number(handle.dataset.index));
@@ -3112,7 +3374,7 @@ function openCustomWaveModal(nodeId) {
   });
   editor.addEventListener("dblclick", (event) => {
     event.preventDefault();
-    const handle = event.target.closest?.(".custom-wave-handle");
+    const handle = event.target.closest?.(".custom-wave-handle, .custom-wave-hit-target");
     if (!handle) return;
     removeInteriorPoint(Number(handle.dataset.index));
   });
@@ -4059,7 +4321,7 @@ function renderEmptyPanel() {
       // The URL flag still carries the backend choice when storage is unavailable.
     }
     const url = new URL(window.location.href);
-    if (audioBackend === "js") {
+    if (audioBackend === DEFAULT_AUDIO_BACKEND) {
       url.searchParams.delete("engine");
     } else {
       url.searchParams.set("engine", audioBackend);
@@ -4129,8 +4391,8 @@ function select(type, id) {
 function render() {
   renderAppTitle();
   renderNodes();
-  renderWires();
   renderAudioOut();
+  renderWires();
   renderPanel();
 }
 
@@ -4151,6 +4413,7 @@ function addNode(position = null) {
     frequencyMode: "ratio",
     ratio: 1,
     frequency: 440,
+    quantise: { ...DEFAULT_NODE_QUANTISE },
     speed: 8,
     audioInputGain: 1,
     customWave: DEFAULT_CUSTOM_WAVE,
@@ -4245,6 +4508,7 @@ function upsertLink(from, to) {
     signalMode: "raw",
     follower: { ...DEFAULT_LINK_FOLLOWER },
     filter: { ...DEFAULT_LINK_FILTER },
+    distortion: { ...DEFAULT_LINK_DISTORTION },
     envelope: to === "audio"
       ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
       : { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
@@ -4253,6 +4517,200 @@ function upsertLink(from, to) {
   select("link", link.id);
   sendGraph();
   savePatch();
+}
+
+function canvasPanCentroid() {
+  const pointers = [...canvasPanPointers.values()].slice(0, 2);
+  if (pointers.length < 2) return null;
+  return {
+    x: (pointers[0].x + pointers[1].x) / 2,
+    y: (pointers[0].y + pointers[1].y) / 2,
+  };
+}
+
+function cancelActiveCanvasInteraction() {
+  const dragPointerId = dragState?.pointerId;
+  const linkPointerId = linkDrag?.pointerId;
+  const marqueePointerId = marqueeState?.pointerId;
+
+  dragState = null;
+  linkDrag = null;
+  marqueeState = null;
+  selectionRect.style.display = "none";
+
+  window.removeEventListener("pointermove", onNodePointerMove);
+  window.removeEventListener("pointerup", onNodePointerEnd);
+  window.removeEventListener("pointercancel", onNodePointerEnd);
+  window.removeEventListener("pointermove", onLinkPointerMove);
+  window.removeEventListener("pointerup", onLinkPointerEnd);
+  window.removeEventListener("pointercancel", onLinkPointerEnd);
+  window.removeEventListener("pointermove", onMarqueePointerMove);
+  window.removeEventListener("pointerup", onMarqueePointerEnd);
+  window.removeEventListener("pointercancel", onMarqueePointerEnd);
+  stage.removeEventListener("lostpointercapture", onNodePointerEnd);
+  stage.removeEventListener("lostpointercapture", onLinkPointerEnd);
+  stage.removeEventListener("lostpointercapture", onMarqueePointerEnd);
+
+  if (dragPointerId !== undefined) releaseStagePointer(dragPointerId);
+  if (linkPointerId !== undefined) releaseStagePointer(linkPointerId);
+  if (marqueePointerId !== undefined) releaseStagePointer(marqueePointerId);
+  renderWires();
+}
+
+function beginCanvasPan() {
+  const centroid = canvasPanCentroid();
+  if (!centroid) return;
+  cancelActiveCanvasInteraction();
+  canvasPanState = {
+    start: centroid,
+    nodes: state.nodes.map((node) => ({ id: node.id, x: node.x, y: node.y })),
+    audioOutPosition: { ...audioOutPosition() },
+    moved: false,
+  };
+}
+
+function patchLayoutBounds() {
+  const position = audioOutPosition();
+  const bounds = {
+    left: position.x - AUDIO_OUT_LAYOUT_HALF_WIDTH,
+    right: position.x + AUDIO_OUT_LAYOUT_HALF_WIDTH,
+    top: position.y - AUDIO_OUT_LAYOUT_HALF_HEIGHT,
+    bottom: position.y + AUDIO_OUT_LAYOUT_HALF_HEIGHT,
+  };
+
+  for (const node of state.nodes) {
+    bounds.left = Math.min(bounds.left, node.x - NODE_LAYOUT_HALF_WIDTH);
+    bounds.right = Math.max(bounds.right, node.x + NODE_LAYOUT_HALF_WIDTH);
+    bounds.top = Math.min(bounds.top, node.y - NODE_LAYOUT_HALF_HEIGHT);
+    bounds.bottom = Math.max(bounds.bottom, node.y + NODE_LAYOUT_HALF_HEIGHT);
+  }
+
+  return bounds;
+}
+
+function clampPatchLayoutDelta(dx, dy) {
+  const rect = stage.getBoundingClientRect();
+  const bounds = patchLayoutBounds();
+  const xMin = rect.width * PATCH_PAN_VISIBILITY_MARGIN - bounds.right;
+  const xMax = rect.width * (1 - PATCH_PAN_VISIBILITY_MARGIN) - bounds.left;
+  const yMin = rect.height * PATCH_PAN_VISIBILITY_MARGIN - bounds.bottom;
+  const yMax = rect.height * (1 - PATCH_PAN_VISIBILITY_MARGIN) - bounds.top;
+  return {
+    dx: clamp(dx, xMin, xMax),
+    dy: clamp(dy, yMin, yMax),
+  };
+}
+
+function translatePatchLayout(dx, dy) {
+  if (!dx && !dy) return;
+  const delta = clampPatchLayoutDelta(dx, dy);
+  dx = delta.dx;
+  dy = delta.dy;
+  if (!dx && !dy) return;
+  const movedIds = [];
+  for (const node of state.nodes) {
+    node.x += dx;
+    node.y += dy;
+    movedIds.push(node.id);
+  }
+  const position = audioOutPosition();
+  state.audioOutPosition = {
+    x: position.x + dx,
+    y: position.y + dy,
+  };
+  renderAudioOut();
+  scheduleNodesAndWiresRender(movedIds);
+  return { dx, dy };
+}
+
+function wheelPixels(event) {
+  const rect = stage.getBoundingClientRect();
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? Math.max(rect.width, rect.height)
+      : 1;
+  return {
+    x: event.deltaX * scale,
+    y: event.deltaY * scale,
+  };
+}
+
+function onStageWheel(event) {
+  if (event.ctrlKey || event.target.closest?.(".topbar, .fine-slider-button, input, select, textarea")) return;
+  const delta = wheelPixels(event);
+  const horizontalShift = event.shiftKey && Math.abs(delta.x) < Math.abs(delta.y);
+  const dx = horizontalShift ? -delta.y : -delta.x;
+  const dy = horizontalShift ? 0 : -delta.y;
+  if (!dx && !dy) return;
+  event.preventDefault();
+  const applied = translatePatchLayout(dx, dy);
+  if (applied) schedulePatchSave();
+}
+
+function onCanvasPanPointerDown(event) {
+  if (event.pointerType !== "touch") return;
+  if (event.target.closest?.(".topbar, .fine-slider-button, input, select, textarea")) return;
+
+  const rect = stage.getBoundingClientRect();
+  canvasPanPointers.set(event.pointerId, {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  });
+  captureStagePointer(event.pointerId);
+
+  if (canvasPanPointers.size >= 2) {
+    event.preventDefault();
+    beginCanvasPan();
+  }
+}
+
+function onCanvasPanPointerMove(event) {
+  if (!canvasPanPointers.has(event.pointerId)) return;
+  const rect = stage.getBoundingClientRect();
+  canvasPanPointers.set(event.pointerId, {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  });
+
+  if (!canvasPanState && canvasPanPointers.size >= 2) beginCanvasPan();
+  if (!canvasPanState) return;
+
+  event.preventDefault();
+  const centroid = canvasPanCentroid();
+  if (!centroid) return;
+  const dx = centroid.x - canvasPanState.start.x;
+  const dy = centroid.y - canvasPanState.start.y;
+  canvasPanState.moved = canvasPanState.moved || Math.abs(dx) > 1 || Math.abs(dy) > 1;
+
+  for (const item of canvasPanState.nodes) {
+    const node = nodeById(item.id);
+    if (!node) continue;
+    node.x = item.x;
+    node.y = item.y;
+  }
+  state.audioOutPosition = { ...canvasPanState.audioOutPosition };
+  translatePatchLayout(dx, dy);
+}
+
+function onCanvasPanPointerEnd(event) {
+  if (!canvasPanPointers.has(event.pointerId)) return;
+  canvasPanPointers.delete(event.pointerId);
+  releaseStagePointer(event.pointerId);
+
+  if (canvasPanPointers.size < 2 && canvasPanState) {
+    const moved = canvasPanState.moved;
+    canvasPanState = null;
+    suppressNextCanvasPanClick = moved;
+    if (moved) savePatch();
+  }
+}
+
+function onCanvasPanClickCapture(event) {
+  if (!suppressNextCanvasPanClick) return;
+  suppressNextCanvasPanClick = false;
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function onNodePointerDown(event) {
@@ -4393,6 +4851,7 @@ function onStageResize() {
   if (dragState) dragState.stageRect = stage.getBoundingClientRect();
   if (linkDrag) linkDrag.stageRect = stage.getBoundingClientRect();
   if (marqueeState) marqueeState.stageRect = stage.getBoundingClientRect();
+  if (!state.audioOutPosition) renderAudioOut();
   scheduleWiresRender();
 }
 
@@ -4407,9 +4866,10 @@ function isEditingValueSliderInput(element = document.activeElement) {
 function isTextEditingTarget(element = document.activeElement) {
   if (!element) return false;
   if (element.isContentEditable) return true;
-  if (element.tagName === "TEXTAREA" || element.tagName === "SELECT") return true;
+  if (element.tagName === "TEXTAREA") return true;
   if (element.tagName !== "INPUT") return false;
-  return !element.readOnly;
+  const textInputTypes = new Set(["", "email", "password", "search", "tel", "text", "url"]);
+  return !element.readOnly && textInputTypes.has((element.getAttribute("type") || "").toLowerCase());
 }
 
 function trackValueEditExitClick(event) {
@@ -4421,6 +4881,7 @@ function trackValueEditExitClick(event) {
 }
 
 function onStagePointerDown(event) {
+  if (event.pointerType === "touch") return;
   if (event.button !== 0 || !isEmptyCanvasTarget(event.target)) return;
   if (!isPrimaryDragPointer(event)) return;
   if (preserveSelectionAfterValueEditClick) return;
@@ -4552,6 +5013,13 @@ document.addEventListener("pointerdown", trackValueEditExitClick, true);
 document.addEventListener("click", () => {
   preserveSelectionAfterValueEditClick = false;
 });
+
+stage.addEventListener("pointerdown", onCanvasPanPointerDown, true);
+stage.addEventListener("click", onCanvasPanClickCapture, true);
+stage.addEventListener("wheel", onStageWheel, { passive: false });
+window.addEventListener("pointermove", onCanvasPanPointerMove, { passive: false });
+window.addEventListener("pointerup", onCanvasPanPointerEnd);
+window.addEventListener("pointercancel", onCanvasPanPointerEnd);
 
 wireLayer.addEventListener("click", (event) => {
   const linkTarget = event.target.closest?.("[data-link-id]");

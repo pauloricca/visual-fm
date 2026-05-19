@@ -1,6 +1,7 @@
 export const STORAGE_KEY = "visual-fm.patch.v1";
 
-export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass", "formant"];
+export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass", "comb", "comb-notch", "formant"];
+export const LINK_DISTORTION_TYPES = ["hard-clip", "soft-clip", "fuzz", "saturate", "wavefold"];
 export const LINK_SIGNAL_MODES = ["raw", "envelope", "inverted-envelope"];
 export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"];
 export const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"];
@@ -16,6 +17,19 @@ export const DEFAULT_CUSTOM_WAVE = Object.freeze({
 });
 export const SPEED_WAVE_TYPES = new Set(["perlin"]);
 export const FREQUENCY_MODES = ["ratio", "fixed"];
+export const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+export const QUANTISE_SCALES = [
+  "chromatic",
+  "major",
+  "minor",
+  "major-pentatonic",
+  "minor-pentatonic",
+  "blues",
+  "dorian",
+  "mixolydian",
+  "harmonic-minor",
+];
+export const DEFAULT_NODE_QUANTISE = { enabled: false, root: "C", scale: "chromatic", glide: 0 };
 export const NODE_MODULATION_TARGETS = ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix"];
 export const LINK_MODULATION_TARGETS = [
   "amplitude",
@@ -33,6 +47,7 @@ export const LINK_MODULATION_TARGETS = [
 ];
 
 export const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
+export const DEFAULT_LINK_DISTORTION = { enabled: false, type: "soft-clip", gain: 1.5 };
 export const DEFAULT_LINK_FOLLOWER = { attack: 0.01, release: 0.12 };
 
 export const MASTER_EFFECTS = {
@@ -82,6 +97,10 @@ export const NODE_MIDI_PARAMETERS = new Set([
   "frequencyMode",
   "ratio",
   "frequency",
+  "quantise.enabled",
+  "quantise.root",
+  "quantise.scale",
+  "quantise.glide",
   "speed",
   "audioInputGain",
 ]);
@@ -94,12 +113,15 @@ export const LINK_MIDI_PARAMETERS = new Set([
   "delay",
   "drone",
   "filter.enabled",
+  "distortion.enabled",
   "signalMode",
   "follower.attack",
   "follower.release",
   "filter.type",
   "filter.cutoff",
   "filter.resonance",
+  "distortion.type",
+  "distortion.gain",
   "envelope.delay",
   "envelope.attack",
   "envelope.decay",
@@ -112,6 +134,7 @@ export const defaultPatch = {
   maxVoices: DEFAULT_MAX_VOICES,
   audioInputDeviceId: DEFAULT_AUDIO_DEVICE_ID,
   audioOutputDeviceId: DEFAULT_AUDIO_DEVICE_ID,
+  audioOutPosition: null,
   midiChannel: "all",
   midiInputId: "all",
   midiBindings: [],
@@ -121,8 +144,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
   ],
   links: [
     {
@@ -138,6 +161,7 @@ export const defaultPatch = {
       signalMode: "raw",
       follower: { ...DEFAULT_LINK_FOLLOWER },
       filter: { ...DEFAULT_LINK_FILTER },
+      distortion: { ...DEFAULT_LINK_DISTORTION },
       envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
     },
     {
@@ -154,6 +178,7 @@ export const defaultPatch = {
       signalMode: "raw",
       follower: { ...DEFAULT_LINK_FOLLOWER },
       filter: { ...DEFAULT_LINK_FILTER },
+      distortion: { ...DEFAULT_LINK_DISTORTION },
       envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },
     },
   ],

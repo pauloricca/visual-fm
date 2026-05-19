@@ -1,11 +1,14 @@
 import {
+  DEFAULT_NODE_QUANTISE,
   DEFAULT_LINK_FILTER,
+  DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
   DEFAULT_MAX_VOICES,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
+  LINK_DISTORTION_TYPES,
   LINK_MIDI_PARAMETERS,
   LINK_MODULATION_TARGETS,
   LINK_SIGNAL_MODES,
@@ -17,6 +20,8 @@ import {
   NODE_MIDI_PARAMETERS,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
+  QUANTISE_ROOT_NOTES,
+  QUANTISE_SCALES,
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
   WAVE_TYPES,
@@ -43,6 +48,7 @@ export function normalizePatch(patch) {
     : "all";
   const audioInputDeviceId = normalizeAudioDeviceId(source.audioInputDeviceId);
   const audioOutputDeviceId = normalizeAudioDeviceId(source.audioOutputDeviceId);
+  const audioOutPosition = normalizePoint(source.audioOutPosition);
   const linkSignalGradientMeters = Boolean(source.linkSignalGradientMeters);
   const nodeIdMap = new Map();
   const linkIdMap = new Map();
@@ -59,6 +65,7 @@ export function normalizePatch(patch) {
       frequencyMode: normalizeFrequencyMode(node.frequencyMode),
       ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
       frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
+      quantise: normalizeNodeQuantise(node.quantise),
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
       audioInputGain: Number.isFinite(Number(node.audioInputGain)) ? clamp(Number(node.audioInputGain), 0, 4) : 1,
       customWave: normalizeCustomWave(node.customWave),
@@ -106,6 +113,7 @@ export function normalizePatch(patch) {
         signalMode: normalizeSignalMode(link.signalMode),
         follower: normalizeFollower(link.follower),
         filter: normalizeLinkFilter(link.filter),
+        distortion: normalizeLinkDistortion(link.distortion),
         envelope: normalizeEnvelope(link.envelope),
       };
     });
@@ -125,6 +133,7 @@ export function normalizePatch(patch) {
     maxVoices,
     audioInputDeviceId,
     audioOutputDeviceId,
+    audioOutPosition,
     linkSignalGradientMeters,
     midiChannel,
     midiInputId,
@@ -141,20 +150,42 @@ function normalizeAudioDeviceId(deviceId) {
     : DEFAULT_AUDIO_DEVICE_ID;
 }
 
+function normalizePoint(point) {
+  if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) return null;
+  return {
+    x: Number(point.x),
+    y: Number(point.y),
+  };
+}
+
 export function normalizeDefaultPatch() {
   return normalizePatch(clonePatch(defaultPatch));
 }
 
 export function normalizeLinkFilter(filter = {}) {
   const type = LINK_FILTER_TYPES.includes(filter.type) ? filter.type : DEFAULT_LINK_FILTER.type;
+  const isFormant = type === "formant";
+  const isComb = type === "comb" || type === "comb-notch";
   return {
     type,
     cutoff: Number.isFinite(Number(filter.cutoff))
-      ? clamp(Number(filter.cutoff), type === "formant" ? 0 : 20, type === "formant" ? 1 : 12000)
-      : type === "formant" ? 0 : DEFAULT_LINK_FILTER.cutoff,
+      ? clamp(Number(filter.cutoff), isFormant ? 0 : 20, isFormant ? 1 : isComb ? 5000 : 12000)
+      : isFormant ? 0 : isComb ? 440 : DEFAULT_LINK_FILTER.cutoff,
     resonance: Number.isFinite(Number(filter.resonance))
-      ? clamp(Number(filter.resonance), 0.1, type === "formant" ? 36 : 12)
-      : DEFAULT_LINK_FILTER.resonance,
+      ? clamp(Number(filter.resonance), isComb ? -0.98 : 0.1, isFormant ? 36 : isComb ? 0.98 : 12)
+      : isComb ? 0.45 : DEFAULT_LINK_FILTER.resonance,
+  };
+}
+
+export function normalizeLinkDistortion(distortion = {}) {
+  return {
+    enabled: Boolean(distortion.enabled),
+    type: LINK_DISTORTION_TYPES.includes(distortion.type)
+      ? distortion.type
+      : DEFAULT_LINK_DISTORTION.type,
+    gain: Number.isFinite(Number(distortion.gain))
+      ? clamp(Number(distortion.gain), 0.1, 40)
+      : DEFAULT_LINK_DISTORTION.gain,
   };
 }
 
@@ -174,6 +205,15 @@ export function normalizeModulationTarget(target, to, targetLink = null, targetN
 
 export function normalizeFrequencyMode(mode) {
   return FREQUENCY_MODES.includes(mode) ? mode : "ratio";
+}
+
+export function normalizeNodeQuantise(quantise = {}) {
+  return {
+    enabled: Boolean(quantise.enabled),
+    root: QUANTISE_ROOT_NOTES.includes(quantise.root) ? quantise.root : DEFAULT_NODE_QUANTISE.root,
+    scale: QUANTISE_SCALES.includes(quantise.scale) ? quantise.scale : DEFAULT_NODE_QUANTISE.scale,
+    glide: Number.isFinite(Number(quantise.glide)) ? clamp(Number(quantise.glide), 0, 4) : DEFAULT_NODE_QUANTISE.glide,
+  };
 }
 
 export function normalizeSignalMode(mode) {

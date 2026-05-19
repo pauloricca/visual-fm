@@ -64,6 +64,15 @@ const FILTER_TYPE_IDS = new Map([
   ["highpass", 2],
   ["bandpass", 3],
   ["formant", 4],
+  ["comb", 5],
+  ["comb-notch", 6],
+]);
+const DISTORTION_TYPE_IDS = new Map([
+  ["hard-clip", 1],
+  ["soft-clip", 2],
+  ["fuzz", 3],
+  ["saturate", 4],
+  ["wavefold", 5],
 ]);
 const CUSTOM_WAVE_MODE_IDS = new Map([
   ["loop", 0],
@@ -82,6 +91,18 @@ const DEFAULT_CUSTOM_WAVE = Object.freeze({
     Object.freeze({ x: 1, y: 0 }),
   ]),
 });
+const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const QUANTISE_SCALE_IDS = new Map([
+  ["chromatic", 0],
+  ["major", 1],
+  ["minor", 2],
+  ["major-pentatonic", 3],
+  ["minor-pentatonic", 4],
+  ["blues", 5],
+  ["dorian", 6],
+  ["mixolydian", 7],
+  ["harmonic-minor", 8],
+]);
 
 class VisualFmWasmEngine extends AudioWorkletProcessor {
   constructor(options = {}) {
@@ -233,12 +254,19 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const frequency = Number(node.frequency);
     const speed = Number(node.speed);
     const audioInputGain = Number(node.audioInputGain);
+    const quantiseGlide = Number(node.quantise?.glide);
     return {
       id: node.id,
       wave: WAVE_IDS.has(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
+      quantise: {
+        enabled: Boolean(node.quantise?.enabled),
+        root: QUANTISE_ROOT_NOTES.includes(node.quantise?.root) ? node.quantise.root : "C",
+        scale: QUANTISE_SCALE_IDS.has(node.quantise?.scale) ? node.quantise.scale : "chromatic",
+        glide: Number.isFinite(quantiseGlide) ? this.clamp(quantiseGlide, 0, 4) : 0,
+      },
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
       customWave: this.normalizeCustomWave(node.customWave),
@@ -294,6 +322,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const followerRelease = Number(link.follower?.release);
     const filterCutoff = Number(link.filter?.cutoff);
     const filterResonance = Number(link.filter?.resonance);
+    const isComb = link.filter?.type === "comb" || link.filter?.type === "comb-notch";
+    const distortionGain = Number(link.distortion?.gain);
     return {
       id: link.id,
       from: link.from,
@@ -314,10 +344,15 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         type: FILTER_TYPE_IDS.has(link.filter?.type) ? link.filter.type : "none",
         cutoff: link.filter?.type === "formant"
           ? this.clamp(Number.isFinite(filterCutoff) ? filterCutoff : 0, 0, 1)
-          : Number.isFinite(filterCutoff) ? this.clamp(filterCutoff, 20, Math.min(12000, sampleRate * 0.45)) : 5000,
+          : Number.isFinite(filterCutoff) ? this.clamp(filterCutoff, 20, Math.min(isComb ? 5000 : 12000, sampleRate * 0.45)) : isComb ? 440 : 5000,
         resonance: Number.isFinite(filterResonance)
-          ? this.clamp(filterResonance, 0.1, link.filter?.type === "formant" ? FORMANT_INTENSITY_MAX : 12)
-          : 0.7,
+          ? this.clamp(filterResonance, isComb ? -0.98 : 0.1, link.filter?.type === "formant" ? FORMANT_INTENSITY_MAX : isComb ? 0.98 : 12)
+          : isComb ? 0.45 : 0.7,
+      },
+      distortion: {
+        enabled: Boolean(link.distortion?.enabled),
+        type: DISTORTION_TYPE_IDS.has(link.distortion?.type) ? link.distortion.type : "soft-clip",
+        gain: Number.isFinite(distortionGain) ? this.clamp(distortionGain, 0.1, 40) : 1.5,
       },
       envelope: {
         delay: Number.isFinite(envelopeDelay) ? this.clamp(envelopeDelay, 0, 4) : 0,
@@ -340,6 +375,10 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.frequencyModeId(node),
         node.ratio,
         node.frequency,
+        node.quantise.enabled ? 1 : 0,
+        QUANTISE_ROOT_NOTES.indexOf(node.quantise.root),
+        QUANTISE_SCALE_IDS.get(node.quantise.scale) ?? 0,
+        node.quantise.glide,
         node.speed,
         node.audioInputGain,
         CUSTOM_WAVE_MODE_IDS.get(node.customWave?.mode) ?? 0,
@@ -389,6 +428,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
           FILTER_TYPE_IDS.get(link.filter?.type) ?? 0,
           link.filter?.cutoff ?? 5000,
           link.filter?.resonance || 0.7,
+          link.distortion?.enabled ? DISTORTION_TYPE_IDS.get(link.distortion?.type) ?? 2 : 0,
+          link.distortion?.gain || 1.5,
           link.envelope?.delay || 0,
           link.envelope?.attack || 0.01,
           link.envelope?.decay || 0.16,
@@ -416,21 +457,28 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.wasm.setLinkVelocitySensitivity(link.wasmIndex, link.velocitySensitivity);
       }
     } else if (parameter === "filter.cutoff") {
+      const isComb = link.filter.type === "comb" || link.filter.type === "comb-notch";
       link.filter.cutoff = link.filter.type === "formant"
         ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 0, 0, 1)
-        : this.clamp(Number(value) || 5000, 20, Math.min(12000, sampleRate * 0.45));
+        : this.clamp(Number(value) || (isComb ? 440 : 5000), 20, Math.min(isComb ? 5000 : 12000, sampleRate * 0.45));
       if (link.filter.type === "formant" && this.wasm?.setLinkFilterCutoff && link.wasmIndex >= 0) {
         this.wasm.setLinkFilterCutoff(link.wasmIndex, link.filter.cutoff);
       }
     } else if (parameter === "filter.resonance") {
+      const isComb = link.filter.type === "comb" || link.filter.type === "comb-notch";
       link.filter.resonance = this.clamp(
-        Number(value) || 0.7,
-        0.1,
-        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : 12,
+        Number.isFinite(Number(value)) ? Number(value) : isComb ? 0.45 : 0.7,
+        isComb ? -0.98 : 0.1,
+        link.filter.type === "formant" ? FORMANT_INTENSITY_MAX : isComb ? 0.98 : 12,
       );
       if (link.filter.type === "formant" && this.wasm?.setLinkFilterResonance && link.wasmIndex >= 0) {
         this.wasm.setLinkFilterResonance(link.wasmIndex, link.filter.resonance);
       }
+    } else if (parameter === "distortion.gain") {
+      link.distortion = {
+        ...(link.distortion || { enabled: false, type: "soft-clip", gain: 1.5 }),
+        gain: this.clamp(Number(value) || 1.5, 0.1, 40),
+      };
     } else {
       return;
     }
@@ -446,6 +494,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       pan: link.pan,
       filterCutoff: link.filter?.cutoff ?? 5000,
       filterResonance: link.filter?.resonance || 0.7,
+      distortionGain: link.distortion?.gain ?? 1.5,
     };
   }
 
@@ -456,7 +505,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       && current.noise === target.noise
       && current.pan === target.pan
       && current.filterCutoff === target.filterCutoff
-      && current.filterResonance === target.filterResonance;
+      && current.filterResonance === target.filterResonance
+      && current.distortionGain === target.distortionGain;
   }
 
   syncActiveLinkControlSmoother(smoother) {
@@ -516,6 +566,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     if (this.wasm?.setLinkFilterResonance && link.wasmIndex >= 0) {
       this.wasm.setLinkFilterResonance(link.wasmIndex, current.filterResonance);
     }
+    if (this.wasm?.setLinkDistortionGain && link.wasmIndex >= 0) {
+      this.wasm.setLinkDistortionGain(link.wasmIndex, current.distortionGain);
+    }
   }
 
   advanceLinkControlSmoothers(frames = this.lastProcessFrames || 128) {
@@ -537,6 +590,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       current.pan = this.smoothControlValue(current.pan, target.pan, alpha);
       current.filterCutoff = this.smoothControlValue(current.filterCutoff, target.filterCutoff, alpha);
       current.filterResonance = this.smoothControlValue(current.filterResonance, target.filterResonance, alpha);
+      current.distortionGain = this.smoothControlValue(current.distortionGain, target.distortionGain, alpha);
       this.applyLinkControlSmoother(link);
       this.syncActiveLinkControlSmoother(smoother);
     }

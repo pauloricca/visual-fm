@@ -463,6 +463,103 @@ if (masterEarlyPeak > 0.0001 || masterLatePeak <= 0) {
   throw new Error("WASM worklet master delay effect did not delay the impulse as expected.");
 }
 
+engine.resetRuntimeState();
+engine.setGraph({
+  maxVoices: 1,
+  nodes: [
+    { id: "comb-distortion-in", wave: "audio-input", audioInputGain: 1 },
+  ],
+  links: [
+    {
+      id: "comb-distortion-out",
+      from: "comb-distortion-in",
+      to: "audio",
+      amount: 1,
+      drone: true,
+      filter: { type: "comb", cutoff: 1000, resonance: 0.55 },
+      distortion: { enabled: true, type: "wavefold", gain: 8 },
+    },
+  ],
+});
+
+const combDistortionLink = engine.linksById.get("comb-distortion-out");
+if (!combDistortionLink || combDistortionLink.wasmIndex < 0) {
+  throw new Error("WASM worklet did not sync a comb/distortion link.");
+}
+
+const distortionGainBeforeSmooth = combDistortionLink.controlSmoother.current.distortionGain;
+engine.setLinkParam({ id: "comb-distortion-out", parameter: "distortion.gain", value: 1 });
+if (combDistortionLink.controlSmoother.current.distortionGain !== distortionGainBeforeSmooth) {
+  throw new Error("WASM worklet link distortion gain jumped instead of smoothing.");
+}
+
+const combImpulse = new Float32Array(128);
+combImpulse[0] = 1;
+let combDistortionPeak = 0;
+for (let block = 0; block < 3; block += 1) {
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  const input = block === 0 ? combImpulse : new Float32Array(128);
+  engine.process([[input, input]], [[left, right]]);
+  combDistortionPeak = Math.max(
+    combDistortionPeak,
+    left.reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+    right.reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+  );
+}
+
+if (combDistortionPeak <= 0 || !(combDistortionLink.controlSmoother.current.distortionGain < distortionGainBeforeSmooth)) {
+  throw new Error("WASM worklet comb filter/distortion path did not render or smooth as expected.");
+}
+
+function estimateFrequency(samples, sampleRate = 48000) {
+  const crossings = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    if (samples[index - 1] <= 0 && samples[index] > 0) crossings.push(index);
+  }
+  if (crossings.length < 3) return 0;
+  const periods = [];
+  for (let index = 1; index < crossings.length; index += 1) {
+    periods.push(crossings[index] - crossings[index - 1]);
+  }
+  const averagePeriod = periods.reduce((sum, value) => sum + value, 0) / periods.length;
+  return sampleRate / averagePeriod;
+}
+
+engine.resetRuntimeState();
+engine.setGraph({
+  maxVoices: 1,
+  nodes: [
+    { id: "quantise-mod", wave: "audio-input", audioInputGain: 1 },
+    {
+      id: "quantise-carrier",
+      wave: "sine",
+      frequencyMode: "fixed",
+      frequency: 440,
+      ratio: 1,
+      quantise: { enabled: true, root: "C", scale: "chromatic", glide: 0 },
+    },
+  ],
+  links: [
+    { id: "quantise-fm", from: "quantise-mod", to: "quantise-carrier", amount: 0.1, modulationTarget: "frequency", drone: true },
+    { id: "quantise-out", from: "quantise-carrier", to: "audio", amount: 1, drone: true },
+  ],
+});
+
+const quantiseSamples = [];
+for (let block = 0; block < 32; block += 1) {
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  const input = new Float32Array(128).fill(1);
+  engine.process([[input, input]], [[left, right]]);
+  if (block >= 2) quantiseSamples.push(...left);
+}
+
+const quantisedFrequency = estimateFrequency(quantiseSamples);
+if (Math.abs(quantisedFrequency - 466.16) > 8) {
+  throw new Error(`WASM worklet quantise did not snap a modulated frequency; estimated ${quantisedFrequency.toFixed(2)}Hz.`);
+}
+
 const reportedReady = messages.some((message) => message.type === "backendStatus" && message.payload?.ready);
 if (!reportedReady) {
   throw new Error("WASM worklet did not post a ready backendStatus message.");
