@@ -45,6 +45,13 @@ select {
   min-height: 620px;
 }
 
+.canvas-column {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
 .stage {
   position: relative;
   overflow: hidden;
@@ -279,7 +286,7 @@ select {
 .icon-button:hover,
 .text-button:hover,
 .audio-out:hover,
-.fine-slider-button:hover {
+.floating-control-button:hover {
   filter: brightness(1.08);
 }
 
@@ -617,11 +624,18 @@ select {
   background: var(--amber);
 }
 
-.fine-slider-button {
+.floating-controls {
   position: absolute;
   z-index: 6;
   left: 18px;
   bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.floating-control-button {
   display: inline-grid;
   place-items: center;
   width: 58px;
@@ -641,10 +655,210 @@ select {
   backdrop-filter: blur(12px);
 }
 
-.fine-slider-button.is-active {
+.floating-control-button.is-active {
   border-color: rgba(117, 208, 164, 0.42);
   background: rgba(117, 208, 164, 0.16);
   color: var(--text);
+}
+
+.bottom-panel-toggle {
+  color: rgba(241, 244, 242, 0.78);
+}
+
+.panel-icon {
+  width: 32px;
+  height: 24px;
+  pointer-events: none;
+}
+
+.dial-icon {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  border: 3px solid currentColor;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.dial-icon::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 13px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translate(-50%, -100%) rotate(34deg);
+  transform-origin: bottom center;
+}
+
+.dial-icon::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.bottom-panel {
+  --bottom-panel-row-height: clamp(130px, 20vh, 220px);
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  overflow: hidden;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  background: #121417;
+}
+
+.midi-keyboard-panel,
+.midi-knob-panel {
+  flex: 0 0 var(--bottom-panel-row-height);
+  height: var(--bottom-panel-row-height);
+  min-height: 0;
+}
+
+.bottom-panel[hidden],
+.midi-keyboard-panel[hidden],
+.midi-knob-panel[hidden] {
+  display: none;
+}
+
+.midi-keyboard-panel {
+  display: flex;
+  align-items: stretch;
+  padding: 16px 18px 18px;
+}
+
+.midi-keyboard {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.midi-key {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 1px solid rgba(15, 17, 20, 0.9);
+  border-radius: 0 0 7px 7px;
+  background: #e7ece9;
+  color: #15171b;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.midi-key:hover,
+.midi-key.is-active {
+  background: #c7ead7;
+}
+
+.midi-key.black {
+  z-index: 2;
+  bottom: auto;
+  height: 62%;
+  border-color: rgba(0, 0, 0, 0.72);
+  border-radius: 0 0 6px 6px;
+  background: #17191d;
+  color: var(--text);
+}
+
+.midi-key.black:hover,
+.midi-key.black.is-active {
+  background: #2f5f49;
+}
+
+.midi-key-label {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 760;
+  pointer-events: none;
+}
+
+.midi-key.black .midi-key-label {
+  bottom: 7px;
+  font-size: 10px;
+}
+
+.midi-knob-panel {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 14px 18px;
+}
+
+.midi-knob-empty {
+  display: grid;
+  gap: 4px;
+  place-items: center;
+  align-content: center;
+  width: 100%;
+  color: var(--muted);
+  text-align: center;
+}
+
+.midi-knob-empty strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.midi-knob-empty span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.midi-knob {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 8px;
+  flex: 1 1 58px;
+  width: clamp(58px, 8vw, 116px);
+  min-width: 58px;
+  max-width: 116px;
+}
+
+.midi-knob .value-slider--vertical {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.midi-knob .value-slider-input {
+  display: none;
+}
+
+.midi-knob-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text);
+  text-align: center;
+}
+
+.midi-knob-label strong,
+.midi-knob-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.midi-knob-label strong {
+  font-size: 11px;
+  line-height: 1.1;
+}
+
+.midi-knob-label span {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .panel {
@@ -1512,8 +1726,31 @@ select {
     grid-template-rows: minmax(0, 1fr) 292px;
   }
 
+  .canvas-column {
+    min-height: 0;
+  }
+
   .panel {
     border-left: 0;
     border-top: 1px solid rgba(255, 255, 255, 0.09);
+  }
+
+  .bottom-panel {
+    --bottom-panel-row-height: 132px;
+  }
+
+  .floating-controls {
+    gap: 8px;
+  }
+
+  .floating-control-button {
+    width: 52px;
+    height: 52px;
+  }
+
+  .midi-keyboard-panel,
+  .midi-knob-panel {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 }

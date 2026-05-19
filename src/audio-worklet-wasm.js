@@ -50,6 +50,7 @@ const MODULATION_TARGET_IDS = new Map([
   ["envelope.release", 19],
   ["filterCutoff", 20],
   ["filterResonance", 21],
+  ["distortionGain", 22],
 ]);
 
 const SIGNAL_MODE_IDS = new Map([

@@ -62,6 +62,11 @@ const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
+const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
+const knobPanelButton = document.querySelector("#knobPanelButton");
+const bottomPanel = document.querySelector("#bottomPanel");
+const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
+const midiKnobPanel = document.querySelector("#midiKnobPanel");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
 const DEFAULT_AUDIO_BACKEND = "wasm";
 const AUDIO_BACKENDS = {
@@ -97,6 +102,8 @@ const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
 const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
 const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
+const MIDI_KEYBOARD_START_NOTE = 48;
+const MIDI_KEYBOARD_WHITE_KEYS = 14;
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -171,8 +178,14 @@ let suppressNextStageClick = false;
 let preserveSelectionAfterValueEditClick = false;
 let touchFineSliderPointerId = null;
 let keyboardFineSliderActive = false;
+const activeBottomPanels = {
+  keyboard: false,
+  knobs: false,
+};
 let availableAudioDevices = { inputs: [], outputs: [] };
 let patchLibrary = null;
+const activeMidiKeyboardPointers = new Map();
+const midiKnobValues = new Map();
 
 syncCounters();
 pruneMidiBindings();
@@ -946,9 +959,12 @@ function applyMidiCc(cc, value) {
   let immediateChanged = false;
   let shouldRenderNodes = false;
   let shouldRenderPanel = false;
+  const knobValue = clamp(Math.round(Number(value) || 0), 0, 127);
 
   for (const binding of state.midiBindings) {
     if (binding.cc !== cc) continue;
+    midiKnobValues.set(binding.id, knobValue);
+    syncMidiKnobElement(binding.id, knobValue);
     flashMidiBindingItem(binding.id);
     flashMidiCanvasTarget(binding);
 
@@ -1893,6 +1909,204 @@ function noteOn(note, velocity = 1) {
 
 function noteOff(note) {
   synthNode?.port.postMessage({ type: "noteOff", payload: { note } });
+}
+
+function noteName(note) {
+  const octave = Math.floor(note / 12) - 1;
+  return `${QUANTISE_ROOT_NOTES[note % 12]}${octave}`;
+}
+
+function isBlackMidiNote(note) {
+  return [1, 3, 6, 8, 10].includes(note % 12);
+}
+
+function midiKeyboardNotes() {
+  const notes = [];
+  let whiteIndex = 0;
+  let note = MIDI_KEYBOARD_START_NOTE;
+  while (whiteIndex < MIDI_KEYBOARD_WHITE_KEYS) {
+    const black = isBlackMidiNote(note);
+    notes.push({
+      note,
+      black,
+      whiteIndex: black ? whiteIndex - 1 : whiteIndex,
+    });
+    if (!black) whiteIndex += 1;
+    note += 1;
+  }
+  return notes;
+}
+
+function midiKeyStyle(item) {
+  const whiteWidth = 100 / MIDI_KEYBOARD_WHITE_KEYS;
+  if (item.black) {
+    return `left: ${(item.whiteIndex + 0.66) * whiteWidth}%; width: ${whiteWidth * 0.66}%;`;
+  }
+  return `left: ${item.whiteIndex * whiteWidth}%; width: ${whiteWidth}%;`;
+}
+
+function renderMidiKeyboardPanel() {
+  if (!midiKeyboardPanel) return;
+  midiKeyboardPanel.innerHTML = `
+    <div class="midi-keyboard">
+      ${midiKeyboardNotes().map((item) => `
+        <button
+          class="midi-key ${item.black ? "black" : "white"}"
+          type="button"
+          style="${midiKeyStyle(item)}"
+          data-midi-key-note="${item.note}"
+          aria-label="${noteName(item.note)}"
+          title="${noteName(item.note)}"
+        >
+          <span class="midi-key-label">${noteName(item.note)}</span>
+        </button>
+      `).join("")}
+    </div>
+  `;
+  for (const key of midiKeyboardPanel.querySelectorAll("[data-midi-key-note]")) {
+    key.addEventListener("pointerdown", onMidiKeyPointerDown);
+    key.addEventListener("pointerup", onMidiKeyPointerEnd);
+    key.addEventListener("pointercancel", onMidiKeyPointerEnd);
+    key.addEventListener("lostpointercapture", onMidiKeyLostCapture);
+  }
+}
+
+function getMidiKnobValue(binding) {
+  const value = midiKnobValues.get(binding.id);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function syncMidiKnobElement(bindingId, value) {
+  const range = midiKnobPanel?.querySelector(`[data-midi-knob-range="${CSS.escape(bindingId)}"]`);
+  const number = midiKnobPanel?.querySelector(`[data-midi-knob-value="${CSS.escape(bindingId)}"]`);
+  const normalizedValue = clamp(Math.round(Number(value) || 0), 0, 127);
+  if (range) {
+    range.value = String(normalizedValue);
+    syncValueSliderProgress(range, 0, 127);
+  }
+  if (number) syncValueSliderNumber(number, range, normalizedValue);
+}
+
+function setMidiKnobValue(binding, rawValue) {
+  const value = clamp(Math.round(Number(rawValue) || 0), 0, 127);
+  midiKnobValues.set(binding.id, value);
+  syncMidiKnobElement(binding.id, value);
+  recordRecentMidiCc(binding.cc, value);
+  applyMidiCc(binding.cc, value);
+  return value;
+}
+
+function renderMidiKnobPanel() {
+  if (!midiKnobPanel) return;
+  if (!state.midiBindings.length) {
+    midiKnobPanel.innerHTML = `
+      <div class="midi-knob-empty">
+        <strong>No sliders yet</strong>
+        <span>Create CC bindings to add MIDI sliders here.</span>
+      </div>
+    `;
+    return;
+  }
+
+  midiKnobPanel.innerHTML = state.midiBindings.map((binding) => {
+    const value = getMidiKnobValue(binding);
+    const inputId = `midiKnobValue-${binding.id}`;
+    const rangeId = `midiKnobRange-${binding.id}`;
+    return `
+      <div class="midi-knob" data-midi-knob="${escapeHtml(binding.id)}">
+        <input
+          class="adsr-slider midi-knob-range"
+          id="${escapeHtml(rangeId)}"
+          type="range"
+          min="0"
+          max="127"
+          step="1"
+          value="${value}"
+          aria-label="${escapeHtml(`${midiElementLabel(binding.targetType, binding.targetId)} ${midiParameterLabel(binding)} CC ${binding.cc}`)}"
+          data-midi-knob-range="${escapeHtml(binding.id)}"
+        >
+        <input
+          class="adsr-value midi-knob-value"
+          id="${escapeHtml(inputId)}"
+          type="number"
+          min="0"
+          max="127"
+          step="1"
+          value="${value}"
+          aria-label="${escapeHtml(`${midiParameterLabel(binding)} CC ${binding.cc} value`)}"
+          data-midi-knob-value="${escapeHtml(binding.id)}"
+        >
+        <div class="midi-knob-label">
+          <strong>${escapeHtml(midiParameterLabel(binding))}</strong>
+          <span>${escapeHtml(midiElementLabel(binding.targetType, binding.targetId))}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  for (const binding of state.midiBindings) {
+    bindNumberPair(
+      `midiKnobValue-${binding.id}`,
+      `midiKnobRange-${binding.id}`,
+      0,
+      127,
+      (value) => setMidiKnobValue(binding, value),
+      { root: midiKnobPanel },
+    );
+  }
+}
+
+function renderBottomPanel() {
+  if (!bottomPanel || !midiKeyboardPanel || !midiKnobPanel) return;
+  const showKeyboard = activeBottomPanels.keyboard;
+  const showKnobs = activeBottomPanels.knobs;
+  bottomPanel.hidden = !showKeyboard && !showKnobs;
+  midiKeyboardPanel.hidden = !showKeyboard;
+  midiKnobPanel.hidden = !showKnobs;
+  keyboardPanelButton?.classList.toggle("is-active", showKeyboard);
+  keyboardPanelButton?.setAttribute("aria-pressed", String(showKeyboard));
+  knobPanelButton?.classList.toggle("is-active", showKnobs);
+  knobPanelButton?.setAttribute("aria-pressed", String(showKnobs));
+
+  if (showKeyboard) renderMidiKeyboardPanel();
+  if (showKnobs) renderMidiKnobPanel();
+}
+
+function toggleBottomPanel(panelName) {
+  if (!(panelName in activeBottomPanels)) return;
+  activeBottomPanels[panelName] = !activeBottomPanels[panelName];
+  renderBottomPanel();
+  onStageResize();
+}
+
+function onMidiKeyPointerDown(event) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const note = Number(event.currentTarget.dataset.midiKeyNote);
+  if (!Number.isFinite(note)) return;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  activeMidiKeyboardPointers.set(event.pointerId, { note, element: event.currentTarget });
+  event.currentTarget.classList.add("is-active");
+  noteOn(note, 0.86);
+}
+
+function releaseMidiKeyPointer(pointerId) {
+  const active = activeMidiKeyboardPointers.get(pointerId);
+  if (!active) return;
+  activeMidiKeyboardPointers.delete(pointerId);
+  active.element.classList.remove("is-active");
+  noteOff(active.note);
+}
+
+function onMidiKeyPointerEnd(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  releaseMidiKeyPointer(event.pointerId);
+}
+
+function onMidiKeyLostCapture(event) {
+  releaseMidiKeyPointer(event.pointerId);
 }
 
 async function setupMidi() {
@@ -3440,6 +3654,7 @@ function modulationTargetLabel(target, destination = "") {
     mix: "Mix",
     filterCutoff: "Filter cutoff / morph",
     filterResonance: "Filter resonance / intensity",
+    distortionGain: "Distortion gain",
     amplitude: "Amplitude",
     delay: "Delay buffer",
     noise: "Noise",
@@ -3699,7 +3914,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     event.preventDefault();
 
     const rect = control.getBoundingClientRect();
-    const vertical = rect.height > rect.width;
+    const vertical = control.classList?.contains("value-slider--vertical") || rect.height > rect.width;
     const currentValue = clamp(Number(range.value), min, max);
     const pointerAxis = vertical ? event.clientY : event.clientX;
     drag = {
@@ -3746,7 +3961,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
   const endDrag = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
     control.releasePointerCapture?.(event.pointerId);
-    if (event.type === "pointerup" && !drag.started && number) {
+    if (event.type === "pointerup" && !drag.started && number && number.offsetParent !== null) {
       focusValueSliderNumber(number);
     }
     control.classList?.remove("is-dragging");
@@ -3957,7 +4172,9 @@ function attachMidiBindingEvents() {
   for (const button of panel.querySelectorAll("[data-midi-remove]")) {
     button.addEventListener("click", () => {
       state.midiBindings = state.midiBindings.filter((binding) => binding.id !== button.dataset.midiRemove);
+      midiKnobValues.delete(button.dataset.midiRemove);
       renderEmptyPanel();
+      if (activeBottomPanels.knobs) renderMidiKnobPanel();
       savePatch();
     });
   }
@@ -4209,6 +4426,7 @@ function openMidiBindingModal(bindingId = null, preset = null) {
 
     close();
     renderPanel();
+    if (activeBottomPanels.knobs) renderMidiKnobPanel();
     savePatch();
   });
   ccInput.focus();
@@ -4394,6 +4612,7 @@ function render() {
   renderAudioOut();
   renderWires();
   renderPanel();
+  renderBottomPanel();
 }
 
 function renderAppTitle() {
@@ -4637,7 +4856,7 @@ function wheelPixels(event) {
 }
 
 function onStageWheel(event) {
-  if (event.ctrlKey || event.target.closest?.(".topbar, .fine-slider-button, input, select, textarea")) return;
+  if (event.ctrlKey || event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
   const delta = wheelPixels(event);
   const horizontalShift = event.shiftKey && Math.abs(delta.x) < Math.abs(delta.y);
   const dx = horizontalShift ? -delta.y : -delta.x;
@@ -4650,7 +4869,7 @@ function onStageWheel(event) {
 
 function onCanvasPanPointerDown(event) {
   if (event.pointerType !== "touch") return;
-  if (event.target.closest?.(".topbar, .fine-slider-button, input, select, textarea")) return;
+  if (event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
 
   const rect = stage.getBoundingClientRect();
   canvasPanPointers.set(event.pointerId, {
@@ -5001,6 +5220,16 @@ fineSliderButton?.addEventListener("keyup", (event) => {
 fineSliderButton?.addEventListener("blur", () => {
   setKeyboardFineSliderActive(false);
 });
+
+for (const button of document.querySelectorAll("[data-bottom-panel-toggle]")) {
+  button?.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  button?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleBottomPanel(event.currentTarget.dataset.bottomPanelToggle);
+  });
+}
 
 audioStatus.addEventListener("click", () => {
   if (audioStatus.disabled || !audioContext || !synthNode) return;

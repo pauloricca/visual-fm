@@ -44,6 +44,7 @@ export const LINK_MODULATION_TARGETS = [
   "envelope.release",
   "filterCutoff",
   "filterResonance",
+  "distortionGain",
 ];
 
 export const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };

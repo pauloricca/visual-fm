@@ -8,35 +8,54 @@
   </head>
   <body>
     <main class="app-shell">
-      <section class="stage" id="stage" aria-label="Visual FM patch canvas">
-        <div class="topbar">
-          <div class="brand">
-            <span class="brand-mark"></span>
-            <span id="appTitle">Visual FM - Visual FM Patch</span>
+      <div class="canvas-column">
+        <section class="stage" id="stage" aria-label="Visual FM patch canvas">
+          <div class="topbar">
+            <div class="brand">
+              <span class="brand-mark"></span>
+              <span id="appTitle">Visual FM - Visual FM Patch</span>
+            </div>
+            <div class="transport">
+              <button class="status-pill audio-status" id="audioStatus" type="button" disabled>Audio idle</button>
+              <span class="status-pill" id="midiStatus">MIDI scanning</span>
+              <button class="icon-button record-button" id="recordButton" type="button" aria-label="Start recording" title="Start recording">
+                <span class="record-dot" aria-hidden="true"></span>
+              </button>
+              <button class="icon-button primary" id="addNodeButton" type="button" aria-label="Add oscillator" title="Add oscillator">+</button>
+            </div>
           </div>
-          <div class="transport">
-            <button class="status-pill audio-status" id="audioStatus" type="button" disabled>Audio idle</button>
-            <span class="status-pill" id="midiStatus">MIDI scanning</span>
-            <button class="icon-button record-button" id="recordButton" type="button" aria-label="Start recording" title="Start recording">
-              <span class="record-dot" aria-hidden="true"></span>
+
+          <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
+          <div class="node-layer" id="nodeLayer"></div>
+          <div class="selection-rect" id="selectionRect" aria-hidden="true"></div>
+          <div class="link-preview" id="linkPreview"></div>
+          <div class="floating-controls" aria-label="Canvas controls">
+            <button class="fine-slider-button floating-control-button" id="fineSliderButton" type="button" aria-label="fine control" aria-pressed="false" title="fine control">
+              fine
             </button>
-            <button class="icon-button primary" id="addNodeButton" type="button" aria-label="Add oscillator" title="Add oscillator">+</button>
+            <button class="bottom-panel-toggle floating-control-button" id="keyboardPanelButton" type="button" aria-label="Toggle MIDI keyboard" aria-pressed="false" title="MIDI keyboard" data-bottom-panel-toggle="keyboard">
+              <svg class="panel-icon" viewBox="0 0 32 24" aria-hidden="true" focusable="false">
+                <rect x="3" y="4" width="26" height="16" rx="5" fill="none" stroke="currentColor" stroke-width="3"/>
+                <path d="M12 4v16M20 4v16" fill="none" stroke="currentColor" stroke-width="2"/>
+                <path d="M9 4h6v10a3 3 0 0 1-6 0V4Zm8 0h6v10a3 3 0 0 1-6 0V4Z" fill="currentColor"/>
+              </svg>
+            </button>
+            <button class="bottom-panel-toggle floating-control-button" id="knobPanelButton" type="button" aria-label="Toggle MIDI knobs" aria-pressed="false" title="MIDI knobs" data-bottom-panel-toggle="knobs">
+              <span class="dial-icon" aria-hidden="true"></span>
+            </button>
           </div>
-        </div>
 
-        <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
-        <div class="node-layer" id="nodeLayer"></div>
-        <div class="selection-rect" id="selectionRect" aria-hidden="true"></div>
-        <div class="link-preview" id="linkPreview"></div>
-        <button class="fine-slider-button" id="fineSliderButton" type="button" aria-label="fine control" aria-pressed="false" title="fine control">
-          fine control
-        </button>
+          <button class="audio-out" id="audioOut" type="button" aria-label="Audio out">
+            <span class="audio-anchor" data-anchor="audio"></span>
+            <span>Audio Out</span>
+          </button>
+        </section>
 
-        <button class="audio-out" id="audioOut" type="button" aria-label="Audio out">
-          <span class="audio-anchor" data-anchor="audio"></span>
-          <span>Audio Out</span>
-        </button>
-      </section>
+        <section class="bottom-panel" id="bottomPanel" aria-label="MIDI performance controls" hidden>
+          <div class="midi-knob-panel" id="midiKnobPanel" hidden></div>
+          <div class="midi-keyboard-panel" id="midiKeyboardPanel" hidden></div>
+        </section>
+      </div>
 
       <aside class="panel" id="panel" aria-label="Selection parameters"></aside>
     </main>

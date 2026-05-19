@@ -465,8 +465,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (targetLink) {
       const envelopeTargets = [...LINK_ENVELOPE_TARGETS];
       const targets = targetLink.to === "audio"
-        ? ["amplitude", "pan", "noise", "delay", "filterCutoff", "filterResonance", "envelopeTrigger", ...envelopeTargets]
-        : ["amplitude", "noise", "delay", "filterCutoff", "filterResonance", "envelopeTrigger", ...envelopeTargets];
+        ? ["amplitude", "pan", "noise", "delay", "filterCutoff", "filterResonance", "distortionGain", "envelopeTrigger", ...envelopeTargets]
+        : ["amplitude", "noise", "delay", "filterCutoff", "filterResonance", "distortionGain", "envelopeTrigger", ...envelopeTargets];
       return targets.includes(target) ? target : "amplitude";
     }
     const targets = targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
@@ -1573,6 +1573,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     let delayMod = 0;
     let noiseMod = 0;
     let panMod = 0;
+    let distortionGainMod = 0;
     const envelopeMods = {
       delay: 0,
       attack: 0,
@@ -1598,6 +1599,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
         noiseMod += modulation.value;
       } else if (modLink.modulationTarget === "pan") {
         panMod += modulation.value;
+      } else if (modLink.modulationTarget === "distortionGain") {
+        distortionGainMod += modulation.value;
       } else if (modLink.modulationTarget === "envelopeTrigger") {
         this.applyEnvelopeTrigger(modLink, link, voice, now, modulation.value);
       } else if (LINK_ENVELOPE_TARGETS.has(modLink.modulationTarget)) {
@@ -1626,6 +1629,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
     };
     if (cutoffMod === 0 && resonanceMod === 0) {
       params.filter = baseParams.filter;
+    }
+    if (distortionGainMod !== 0) {
+      params.distortion = {
+        ...baseParams.distortion,
+        gain: this.clamp((Number(baseParams.distortion?.gain) || 1.5) + distortionGainMod, 0.1, 40),
+      };
     }
     if (
       envelopeMods.delay !== 0

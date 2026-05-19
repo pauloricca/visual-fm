@@ -39,6 +39,7 @@ const TARGET_ENVELOPE_SUSTAIN: i32 = 18;
 const TARGET_ENVELOPE_RELEASE: i32 = 19;
 const TARGET_FILTER_CUTOFF: i32 = 20;
 const TARGET_FILTER_RESONANCE: i32 = 21;
+const TARGET_DISTORTION_GAIN: i32 = 22;
 
 #[derive(Copy, Clone)]
 struct Node {
@@ -1467,6 +1468,7 @@ fn effective_link_params(
         let mut pan_mod = 0.0;
         let mut cutoff_mod = 0.0;
         let mut resonance_mod = 0.0;
+        let mut distortion_gain_mod = 0.0;
         let mut env_delay_mod = 0.0;
         let mut env_attack_mod = 0.0;
         let mut env_decay_mod = 0.0;
@@ -1514,6 +1516,7 @@ fn effective_link_params(
                 TARGET_PAN => pan_mod += modulation.value,
                 TARGET_FILTER_CUTOFF => cutoff_mod += modulation.value,
                 TARGET_FILTER_RESONANCE => resonance_mod += modulation.value,
+                TARGET_DISTORTION_GAIN => distortion_gain_mod += modulation.value,
                 TARGET_ENVELOPE_DELAY => env_delay_mod += modulation.value,
                 TARGET_ENVELOPE_ATTACK => env_attack_mod += modulation.value,
                 TARGET_ENVELOPE_DECAY => env_decay_mod += modulation.value,
@@ -1547,6 +1550,7 @@ fn effective_link_params(
             0.1,
             if base.filter_type == 4 { FORMANT_INTENSITY_MAX } else { 12.0 },
         );
+        effective.distortion_gain = (base.distortion_gain + distortion_gain_mod).clamp(0.1, 40.0);
         effective.env_delay = (base.env_delay + env_delay_mod).clamp(0.0, 4.0);
         effective.env_attack = (base.env_attack + env_attack_mod).clamp(0.001, 4.0);
         effective.env_decay = (base.env_decay + env_decay_mod).clamp(0.001, 4.0);
