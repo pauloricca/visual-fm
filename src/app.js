@@ -51,7 +51,6 @@ import {
 } from "./utils.js";
 
 const stage = document.querySelector("#stage");
-const appShell = document.querySelector(".app-shell");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
@@ -148,10 +147,10 @@ async function toggleFullscreen() {
       } else if (document.webkitExitFullscreen) {
         document.webkitExitFullscreen();
       }
-    } else if (appShell?.requestFullscreen) {
-      await appShell.requestFullscreen();
-    } else if (appShell?.webkitRequestFullscreen) {
-      appShell.webkitRequestFullscreen();
+    } else if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    } else if (document.documentElement.webkitRequestFullscreen) {
+      document.documentElement.webkitRequestFullscreen();
     }
   } catch (error) {
     console.warn("Could not toggle fullscreen", error);
