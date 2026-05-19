@@ -51,6 +51,7 @@ import {
 } from "./utils.js";
 
 const stage = document.querySelector("#stage");
+const appShell = document.querySelector(".app-shell");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
@@ -64,6 +65,7 @@ const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
 const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
 const knobPanelButton = document.querySelector("#knobPanelButton");
+const fullscreenButton = document.querySelector("#fullscreenButton");
 const bottomPanel = document.querySelector("#bottomPanel");
 const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
 const midiKnobPanel = document.querySelector("#midiKnobPanel");
@@ -121,6 +123,40 @@ function loadAudioBackend() {
     return storedBackend ? normalizeAudioBackend(storedBackend) : DEFAULT_AUDIO_BACKEND;
   } catch {
     return DEFAULT_AUDIO_BACKEND;
+  }
+}
+
+function fullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function syncFullscreenButton() {
+  if (!fullscreenButton) return;
+  const inFullscreen = Boolean(fullscreenElement());
+  const label = inFullscreen ? "Exit fullscreen" : "Enter fullscreen";
+  fullscreenButton.classList.toggle("is-active", inFullscreen);
+  fullscreenButton.setAttribute("aria-label", label);
+  fullscreenButton.setAttribute("aria-pressed", inFullscreen ? "true" : "false");
+  fullscreenButton.title = label;
+}
+
+async function toggleFullscreen() {
+  try {
+    if (fullscreenElement()) {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    } else if (appShell?.requestFullscreen) {
+      await appShell.requestFullscreen();
+    } else if (appShell?.webkitRequestFullscreen) {
+      appShell.webkitRequestFullscreen();
+    }
+  } catch (error) {
+    console.warn("Could not toggle fullscreen", error);
+  } finally {
+    syncFullscreenButton();
   }
 }
 
@@ -3911,37 +3947,50 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
   control.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     if (control.classList?.contains("is-editing")) return;
-    event.preventDefault();
 
     const rect = control.getBoundingClientRect();
     const vertical = control.classList?.contains("value-slider--vertical") || rect.height > rect.width;
     const currentValue = clamp(Number(range.value), min, max);
     const pointerAxis = vertical ? event.clientY : event.clientX;
+    const scrollableTouchGesture = event.pointerType === "touch" && !vertical;
+    if (!scrollableTouchGesture) event.preventDefault();
+
     drag = {
       pointerId: event.pointerId,
       rect,
       vertical,
       currentValue,
+      scrollableTouchGesture,
       started: false,
       startX: event.clientX,
       startY: event.clientY,
       lastAxis: pointerAxis,
     };
 
-    control.setPointerCapture?.(event.pointerId);
+    if (!scrollableTouchGesture) control.setPointerCapture?.(event.pointerId);
   });
 
   control.addEventListener("pointermove", (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    event.preventDefault();
 
     const axisSize = drag.vertical ? drag.rect.height : drag.rect.width;
     if (axisSize <= 0) return;
 
-    const totalDelta = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-    if (!drag.started && totalDelta < VALUE_SLIDER_DRAG_THRESHOLD_PX) return;
-    drag.started = true;
-    control.classList?.add("is-dragging");
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    const totalDelta = Math.hypot(dx, dy);
+    if (!drag.started) {
+      if (totalDelta < VALUE_SLIDER_DRAG_THRESHOLD_PX) return;
+      if (drag.scrollableTouchGesture && Math.abs(dy) > Math.abs(dx)) {
+        drag = null;
+        return;
+      }
+      control.setPointerCapture?.(event.pointerId);
+      drag.started = true;
+      control.classList?.add("is-dragging");
+    }
+
+    event.preventDefault();
 
     const axis = drag.vertical ? event.clientY : event.clientX;
     const perpendicular = drag.vertical
@@ -3960,7 +4009,13 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
 
   const endDrag = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    control.releasePointerCapture?.(event.pointerId);
+    try {
+      if (!control.hasPointerCapture || control.hasPointerCapture(event.pointerId)) {
+        control.releasePointerCapture?.(event.pointerId);
+      }
+    } catch {
+      // Touch scrolling can cancel capture before the slider sees pointerup.
+    }
     if (event.type === "pointerup" && !drag.started && number && number.offsetParent !== null) {
       focusValueSliderNumber(number);
     }
@@ -5100,10 +5155,10 @@ function trackValueEditExitClick(event) {
 }
 
 function onStagePointerDown(event) {
-  if (event.pointerType === "touch") return;
   if (event.button !== 0 || !isEmptyCanvasTarget(event.target)) return;
   if (!isPrimaryDragPointer(event)) return;
   if (preserveSelectionAfterValueEditClick) return;
+  event.preventDefault();
 
   const stageRect = stage.getBoundingClientRect();
   const point = stagePointFromRect(event.clientX, event.clientY, stageRect);
@@ -5231,6 +5286,15 @@ for (const button of document.querySelectorAll("[data-bottom-panel-toggle]")) {
   });
 }
 
+fullscreenButton?.addEventListener("pointerdown", (event) => {
+  event.stopPropagation();
+});
+
+fullscreenButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleFullscreen();
+});
+
 audioStatus.addEventListener("click", () => {
   if (audioStatus.disabled || !audioContext || !synthNode) return;
   audioMuted = !audioMuted;
@@ -5241,6 +5305,9 @@ audioStatus.addEventListener("click", () => {
 document.addEventListener("pointerdown", trackValueEditExitClick, true);
 document.addEventListener("click", () => {
   preserveSelectionAfterValueEditClick = false;
+});
+document.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
 });
 
 stage.addEventListener("pointerdown", onCanvasPanPointerDown, true);
@@ -5286,6 +5353,8 @@ audioOut.addEventListener("click", (event) => {
 });
 
 window.addEventListener("resize", onStageResize);
+document.addEventListener("fullscreenchange", syncFullscreenButton);
+document.addEventListener("webkitfullscreenchange", syncFullscreenButton);
 
 window.addEventListener("keydown", (event) => {
   const note = keyMap.get(event.key);
@@ -5318,6 +5387,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 });
 
 render();
+syncFullscreenButton();
 refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 setupMidi();
 requestAnimationFrame(showAudioEnableModal);

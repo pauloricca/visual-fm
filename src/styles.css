@@ -30,6 +30,7 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
+  -webkit-touch-callout: none;
 }
 
 button,
@@ -669,6 +670,24 @@ select {
   width: 32px;
   height: 24px;
   pointer-events: none;
+}
+
+.fullscreen-icon {
+  width: 30px;
+  height: 30px;
+  pointer-events: none;
+}
+
+.fullscreen-icon-exit {
+  display: none;
+}
+
+.floating-control-button.is-active .fullscreen-icon-enter {
+  display: none;
+}
+
+.floating-control-button.is-active .fullscreen-icon-exit {
+  display: block;
 }
 
 .dial-icon {
@@ -1634,6 +1653,7 @@ select {
 .value-slider--horizontal {
   width: 100%;
   height: 36px;
+  touch-action: pan-y;
 }
 
 .value-slider--vertical {
@@ -1641,6 +1661,7 @@ select {
   height: 118px;
   align-items: end;
   cursor: ns-resize;
+  touch-action: none;
 }
 
 .value-slider--vertical::before {
