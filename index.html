@@ -15,14 +15,6 @@
               <span class="brand-mark"></span>
               <span id="appTitle">Visual FM - Visual FM Patch</span>
             </div>
-            <div class="transport">
-              <button class="status-pill audio-status" id="audioStatus" type="button" disabled>Audio idle</button>
-              <span class="status-pill" id="midiStatus">MIDI scanning</span>
-              <button class="icon-button record-button" id="recordButton" type="button" aria-label="Start recording" title="Start recording">
-                <span class="record-dot" aria-hidden="true"></span>
-              </button>
-              <button class="icon-button primary" id="addNodeButton" type="button" aria-label="Add oscillator" title="Add oscillator">+</button>
-            </div>
           </div>
 
           <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
@@ -31,7 +23,26 @@
           <div class="link-preview" id="linkPreview"></div>
           <div class="floating-controls" aria-label="Canvas controls">
             <button class="fine-slider-button floating-control-button" id="fineSliderButton" type="button" aria-label="fine control" aria-pressed="false" title="fine control">
-              fine
+              <svg class="snail-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <path d="M6 21c0-5 4-9 9-9 4.2 0 7.5 3.1 7.5 7 0 3.2-2.5 5.5-5.8 5.5-2.7 0-4.7-1.8-4.7-4.2 0-1.9 1.4-3.3 3.2-3.3 1.4 0 2.4.9 2.4 2.1 0 .9-.6 1.5-1.4 1.5" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M22 19h3.8c2 0 3.2 1.1 3.2 2.8v2.7H8.5c-2.1 0-3.5-1.2-3.5-3.1 0-1.2.6-2.2 1.6-2.8" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M25.2 19l-1.7-4.5M27.9 19l1.6-4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+                <circle cx="23.3" cy="13.7" r="1.3" fill="currentColor"/>
+                <circle cx="29.8" cy="13.7" r="1.3" fill="currentColor"/>
+              </svg>
+              <span class="control-caption">Fine</span>
+            </button>
+            <button class="audio-status floating-control-button" id="audioStatus" type="button" disabled aria-label="Audio idle" title="Audio idle">
+              <svg class="speaker-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <path d="M5 13h6l8-7v20l-8-7H5z" fill="currentColor"/>
+                <path class="speaker-wave" d="M22 11.5c1.7 2.6 1.7 6.4 0 9M25.6 8.5c3.2 4.3 3.2 10.7 0 15" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>
+                <path class="speaker-slash" d="M24 10l-12 12" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
+              </svg>
+              <span class="control-caption">Audio</span>
+            </button>
+            <button class="record-button floating-control-button" id="recordButton" type="button" aria-label="Start recording" title="Start recording">
+              <span class="record-dot" aria-hidden="true"></span>
+              <span class="control-caption">Rec</span>
             </button>
             <button class="bottom-panel-toggle floating-control-button" id="keyboardPanelButton" type="button" aria-label="Toggle MIDI keyboard" aria-pressed="false" title="MIDI keyboard" data-bottom-panel-toggle="keyboard">
               <svg class="panel-icon" viewBox="0 0 32 24" aria-hidden="true" focusable="false">
@@ -39,15 +50,18 @@
                 <path d="M12 4v16M20 4v16" fill="none" stroke="currentColor" stroke-width="2"/>
                 <path d="M9 4h6v10a3 3 0 0 1-6 0V4Zm8 0h6v10a3 3 0 0 1-6 0V4Z" fill="currentColor"/>
               </svg>
+              <span class="control-caption">Keys</span>
             </button>
-            <button class="bottom-panel-toggle floating-control-button" id="knobPanelButton" type="button" aria-label="Toggle MIDI knobs" aria-pressed="false" title="MIDI knobs" data-bottom-panel-toggle="knobs">
+            <button class="bottom-panel-toggle floating-control-button" id="knobPanelButton" type="button" aria-label="Toggle MIDI control" aria-pressed="false" title="MIDI control" data-bottom-panel-toggle="knobs">
               <span class="dial-icon" aria-hidden="true"></span>
+              <span class="control-caption">Control</span>
             </button>
             <button class="floating-control-button" id="fullscreenButton" type="button" aria-label="Enter fullscreen" aria-pressed="false" title="Enter fullscreen">
               <svg class="fullscreen-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
                 <path class="fullscreen-icon-enter" d="M5 13V5h8M5 5l8 8M27 13V5h-8m8 0-8 8M5 19v8h8m-8 0 8-8M27 19v8h-8m8 0-8-8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
                 <path class="fullscreen-icon-exit" d="M13 5v8H5m0 0 8-8M19 5v8h8m0 0-8-8M13 27v-8H5m0 0 8 8M19 27v-8h8m0 0-8 8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
+              <span class="control-caption">Full</span>
             </button>
           </div>
 

@@ -85,8 +85,7 @@ select {
   pointer-events: none;
 }
 
-.brand,
-.transport {
+.brand {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -111,10 +110,6 @@ select {
   border: 2px solid var(--green);
   border-radius: 50%;
   box-shadow: inset 7px 0 0 var(--blue);
-}
-
-.transport {
-  pointer-events: auto;
 }
 
 .text-button {
@@ -229,19 +224,14 @@ select {
   font-weight: 800;
 }
 
-.record-button {
-  background: rgba(20, 22, 26, 0.78);
-  backdrop-filter: blur(14px);
-}
-
 .record-button:disabled {
   cursor: wait;
   opacity: 0.72;
 }
 
 .record-dot {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: #f04f5f;
   box-shadow: 0 0 0 3px rgba(240, 79, 95, 0.14);
@@ -257,13 +247,9 @@ select {
 }
 
 .record-button.saved {
-  width: 58px;
   border-color: rgba(117, 208, 164, 0.54);
   background: rgba(117, 208, 164, 0.18);
   color: var(--green);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0;
 }
 
 .record-button.saved .record-dot {
@@ -272,10 +258,6 @@ select {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-}
-
-.record-button.saved .record-dot::before {
-  content: "Saved";
 }
 
 @keyframes recordBlink {
@@ -588,7 +570,7 @@ select {
   position: absolute;
   z-index: 4;
   left: 50%;
-  top: calc(100% - 55px);
+  top: calc(100% - 104px);
   display: inline-grid;
   place-items: center;
   width: 140px;
@@ -638,22 +620,30 @@ select {
 
 .floating-control-button {
   display: inline-grid;
+  grid-template-rows: 34px 12px;
   place-items: center;
-  width: 58px;
-  height: 58px;
+  align-content: center;
+  gap: 4px;
+  width: 66px;
+  height: 66px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 50%;
+  border-radius: 11px;
   background: rgba(20, 22, 26, 0.56);
-  color: rgba(241, 244, 242, 0.64);
-  padding: 0 8px;
+  color: #c4cac8;
+  padding: 8px;
   font-size: 10px;
   font-weight: 760;
-  line-height: 1.25;
+  line-height: 1;
   letter-spacing: 0;
   text-align: center;
   cursor: pointer;
   touch-action: none;
   backdrop-filter: blur(12px);
+}
+
+.floating-control-button:disabled {
+  cursor: default;
+  color: #a3aaa8;
 }
 
 .floating-control-button.is-active {
@@ -663,18 +653,46 @@ select {
 }
 
 .bottom-panel-toggle {
-  color: rgba(241, 244, 242, 0.78);
+  color: #d2d7d5;
+}
+
+.audio-status {
+  appearance: none;
+  font: inherit;
+}
+
+.audio-status.ready {
+  color: var(--green);
+}
+
+.audio-status.muted {
+  color: #f0a8b4;
+}
+
+.audio-status:not(:disabled) {
+  cursor: pointer;
+}
+
+.control-caption {
+  max-width: 100%;
+  overflow: hidden;
+  color: color-mix(in srgb, currentColor 84%, transparent);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-icon {
-  width: 32px;
-  height: 24px;
+  width: 31px;
+  height: 23px;
   pointer-events: none;
 }
 
 .fullscreen-icon {
-  width: 30px;
-  height: 30px;
+  width: 29px;
+  height: 29px;
   pointer-events: none;
 }
 
@@ -692,9 +710,9 @@ select {
 
 .dial-icon {
   position: relative;
-  width: 28px;
-  height: 28px;
-  border: 3px solid currentColor;
+  width: 27px;
+  height: 27px;
+  border: 2.8px solid currentColor;
   border-radius: 50%;
   pointer-events: none;
 }
@@ -704,8 +722,8 @@ select {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 4px;
-  height: 13px;
+  width: 3.6px;
+  height: 11.5px;
   border-radius: 999px;
   background: currentColor;
   transform: translate(-50%, -100%) rotate(34deg);
@@ -717,11 +735,35 @@ select {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: currentColor;
   transform: translate(-50%, -50%);
+}
+
+.snail-icon {
+  width: 31px;
+  height: 31px;
+  pointer-events: none;
+}
+
+.speaker-icon {
+  width: 31px;
+  height: 31px;
+  pointer-events: none;
+}
+
+.speaker-slash {
+  display: none;
+}
+
+.audio-status.muted .speaker-wave {
+  display: none;
+}
+
+.audio-status.muted .speaker-slash {
+  display: block;
 }
 
 .bottom-panel {
@@ -1765,8 +1807,11 @@ select {
   }
 
   .floating-control-button {
-    width: 52px;
-    height: 52px;
+    width: 60px;
+    height: 60px;
+    grid-template-rows: 31px 12px;
+    gap: 3px;
+    padding: 7px;
   }
 
   .midi-keyboard-panel,

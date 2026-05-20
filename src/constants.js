@@ -153,8 +153,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
   ],
   links: [
     {

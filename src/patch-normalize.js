@@ -77,6 +77,7 @@ export function normalizePatch(patch) {
       frequencyMode: normalizeFrequencyMode(node.frequencyMode),
       ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
       frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
+      frequencySlow: Boolean(node.frequencySlow),
       quantise: normalizeNodeQuantise(node.quantise),
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
       audioInputGain: Number.isFinite(Number(node.audioInputGain)) ? clamp(Number(node.audioInputGain), 0, 4) : 1,

@@ -66,6 +66,8 @@ const recordButton = document.querySelector("#recordButton");
 const audioOut = document.querySelector("#audioOut");
 const audioStatus = document.querySelector("#audioStatus");
 const midiStatus = document.querySelector("#midiStatus");
+const audioStatusCaption = audioStatus?.querySelector(".control-caption");
+const recordButtonCaption = recordButton?.querySelector(".control-caption");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
 const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
@@ -102,8 +104,14 @@ const AUDIO_BACKENDS = {
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const LINK_AMOUNT_SLIDER_MAX = 8;
 const LINK_AMOUNT_INPUT_MAX = 32;
+const FREQUENCY_SLIDER_MAX = 12000;
+const FREQUENCY_SLOW_SLIDER_MAX = 25;
+const RATIO_SLIDER_MAX = 16;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
+const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
+const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
+const VALUE_SLIDER_PRECISION_POWER = 1.45;
 const NODE_LAYOUT_HALF_WIDTH = 71;
 const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
@@ -370,7 +378,7 @@ function nodeParameterDefinitions(node) {
       label: "Ratio",
       type: "number",
       min: 0,
-      max: 16,
+      max: RATIO_SLIDER_MAX,
       get: () => node.ratio,
       set: (value) => {
         node.ratio = value;
@@ -381,7 +389,7 @@ function nodeParameterDefinitions(node) {
       label: "Frequency",
       type: "number",
       min: 0,
-      max: 12000,
+      max: FREQUENCY_SLIDER_MAX,
       get: () => node.frequency,
       set: (value) => {
         node.frequency = value;
@@ -1207,7 +1215,7 @@ function defaultAudioOutPosition() {
   const rect = stage.getBoundingClientRect();
   return {
     x: rect.width / 2,
-    y: Math.max(96, rect.height - 55),
+    y: Math.max(132, rect.height - 104),
   };
 }
 
@@ -1569,7 +1577,7 @@ function syncOutputMute() {
 }
 
 function setAudioStatusLabel(text) {
-  audioStatus.textContent = text;
+  if (audioStatusCaption) audioStatusCaption.textContent = "Audio";
   audioStatus.disabled = true;
   audioStatus.classList.remove("ready", "muted");
   audioStatus.removeAttribute("aria-pressed");
@@ -1578,8 +1586,7 @@ function setAudioStatusLabel(text) {
 }
 
 function updateAudioReadyButton() {
-  const label = audioMuted ? "Unmute" : "Mute";
-  audioStatus.textContent = label;
+  if (audioStatusCaption) audioStatusCaption.textContent = audioMuted ? "Unmute" : "Mute";
   audioStatus.disabled = false;
   audioStatus.classList.toggle("ready", !audioMuted);
   audioStatus.classList.toggle("muted", audioMuted);
@@ -1840,6 +1847,7 @@ function setRecordingButtonState(isRecording) {
     clearTimeout(recordingSavedTimer);
     recordButton.classList.remove("saved");
   }
+  if (recordButtonCaption) recordButtonCaption.textContent = isRecording ? "Stop" : "Rec";
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-label", isRecording ? "Stop recording" : "Start recording");
   recordButton.title = isRecording ? "Stop recording" : "Start recording";
@@ -1849,10 +1857,12 @@ function showRecordingSavedState() {
   clearTimeout(recordingSavedTimer);
   recordButton.classList.remove("recording");
   recordButton.classList.add("saved");
+  if (recordButtonCaption) recordButtonCaption.textContent = "Saved";
   recordButton.setAttribute("aria-label", "Recording saved");
   recordButton.title = "Recording saved";
   recordingSavedTimer = window.setTimeout(() => {
     recordButton.classList.remove("saved");
+    if (recordButtonCaption) recordButtonCaption.textContent = "Rec";
     recordButton.setAttribute("aria-label", "Start recording");
     recordButton.title = "Start recording";
     recordingSavedTimer = null;
@@ -2166,7 +2176,7 @@ function onMidiKeyLostCapture(event) {
 
 async function setupMidi() {
   if (!navigator.requestMIDIAccess) {
-    midiStatus.textContent = "MIDI unavailable";
+    if (midiStatus) midiStatus.textContent = "MIDI unavailable";
     return;
   }
 
@@ -2206,7 +2216,7 @@ async function setupMidi() {
     };
     updateMidiStatus(midi);
   } catch {
-    midiStatus.textContent = "MIDI blocked";
+    if (midiStatus) midiStatus.textContent = "MIDI blocked";
   }
 }
 
@@ -2229,6 +2239,7 @@ function midiInputLabel(id = state.midiInputId, midi = midiAccess) {
 }
 
 function updateMidiStatus(midi = midiAccess) {
+  if (!midiStatus) return;
   const count = midi?.inputs?.size || 0;
   midiStatus.textContent = count ? `${midiInputLabel(state.midiInputId, midi)} · ${midiChannelLabel()}` : "No MIDI input";
   midiStatus.classList.toggle("ready", count > 0);
@@ -2460,7 +2471,11 @@ function renderPanel() {
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
-    const frequencyMax = isFixedFrequency ? 12000 : 16;
+    const usesSlowFrequencyRange = isFixedFrequency && Boolean(node.frequencySlow);
+    const frequencyMax = isFixedFrequency
+      ? usesSlowFrequencyRange ? FREQUENCY_SLOW_SLIDER_MAX : FREQUENCY_SLIDER_MAX
+      : RATIO_SLIDER_MAX;
+    const frequencyInputMax = isFixedFrequency ? FREQUENCY_SLIDER_MAX : RATIO_SLIDER_MAX;
     const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
     const quantise = normalizeNodeQuantise(node.quantise);
     const usesQuantiseControls = usesPitchControls && quantise.enabled;
@@ -2515,6 +2530,12 @@ function renderPanel() {
         </div>
       ` : ""}
       ${usesPitchControls ? `
+        <div class="toggle-field">
+          <label class="toggle-row" for="frequencySlow">
+            <input id="frequencySlow" type="checkbox" ${node.frequencySlow ? "checked" : ""}>
+            <span>Slow</span>
+          </label>
+        </div>
         <div class="field">
           ${parameterLabel("frequencyMode", "Tuning", "node", node.id, "frequencyMode")}
           <select id="frequencyMode">
@@ -2591,6 +2612,11 @@ function renderPanel() {
       savePatch();
     });
     if (usesPitchControls) {
+      panel.querySelector("#frequencySlow").addEventListener("change", (event) => {
+        node.frequencySlow = event.target.checked;
+        renderPanel();
+        savePatch();
+      });
       panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
         node.frequencyMode = event.target.value;
         render();
@@ -2606,7 +2632,7 @@ function renderPanel() {
         renderNodes();
         sendGraph();
         savePatch();
-      });
+      }, { inputMax: frequencyInputMax });
       panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
         renderPanel();
@@ -4021,7 +4047,8 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     const perpendicular = drag.vertical
       ? Math.abs(event.clientX - drag.startX)
       : Math.abs(event.clientY - drag.startY);
-    const precision = 1 / (1 + Math.pow(perpendicular / 90, 1.35));
+    const precisionDistance = Math.max(0, perpendicular - VALUE_SLIDER_PRECISION_THRESHOLD_PX);
+    const precision = 1 / (1 + Math.pow(precisionDistance / VALUE_SLIDER_PRECISION_DISTANCE_PX, VALUE_SLIDER_PRECISION_POWER));
     const axisDelta = drag.vertical
       ? (drag.lastAxis - axis) / axisSize
       : (axis - drag.lastAxis) / axisSize;
@@ -4736,6 +4763,7 @@ function addNode(position = null) {
     frequencyMode: "ratio",
     ratio: 1,
     frequency: 440,
+    frequencySlow: false,
     quantise: { ...DEFAULT_NODE_QUANTISE },
     speed: 8,
     audioInputGain: 1,
@@ -5273,7 +5301,7 @@ function onMarqueePointerEnd(event) {
   }
 }
 
-addNodeButton.addEventListener("click", () => {
+addNodeButton?.addEventListener("click", () => {
   ensureAudio();
   addNode();
 });
