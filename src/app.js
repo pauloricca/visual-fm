@@ -4435,7 +4435,7 @@ function openMidiBindingModal(bindingId = null, preset = null) {
           </div>
         </div>
         <div class="field">
-          <label for="midiBindingCc">CC number</label>
+          <label for="midiBindingCc">CC number${existing ? "" : " (waiting for MIDI CC input)"}</label>
           <input id="midiBindingCc" type="number" min="0" max="127" step="1" value="${existing?.cc ?? 1}">
         </div>
         <div class="modal-actions">
