@@ -851,6 +851,18 @@ function midiBindingCurveValue(binding, normal) {
   return normal;
 }
 
+function midiBindingCurveNormal(binding, curved) {
+  const value = clamp(Number(curved) || 0, 0, 1);
+  const curve = MIDI_CC_CURVES.includes(binding.curve) ? binding.curve : "linear";
+  if (curve === "logarithmic") {
+    return (Math.pow(10, value) - 1) / 9;
+  }
+  if (curve === "exponential") {
+    return Math.log10(1 + value * 9);
+  }
+  return value;
+}
+
 function valueFromCc(definition, value, binding) {
   const normal = clamp(Number(value) || 0, 0, 127) / 127;
   if (definition.type === "choice") {
@@ -863,6 +875,32 @@ function valueFromCc(definition, value, binding) {
   const range = midiBindingRange(binding, definition);
   const curved = midiBindingCurveValue(binding, normal);
   return range.min + curved * (range.max - range.min);
+}
+
+function ccFromValue(definition, binding) {
+  if (!definition) return 0;
+  const currentValue = definition.get();
+
+  if (definition.type === "boolean") {
+    return currentValue ? 127 : 0;
+  }
+
+  if (definition.type === "choice") {
+    const maxIndex = Math.max(0, definition.options.length - 1);
+    if (!maxIndex) return 0;
+    const index = definition.options.findIndex((option) => option.value === currentValue);
+    return clamp(Math.round((Math.max(0, index) / maxIndex) * 127), 0, 127);
+  }
+
+  if (definition.type === "number") {
+    const range = midiBindingRange(binding, definition);
+    const span = range.max - range.min;
+    if (!Number.isFinite(span) || Math.abs(span) <= Number.EPSILON) return 0;
+    const curved = clamp((Number(currentValue) - range.min) / span, 0, 1);
+    return clamp(Math.round(midiBindingCurveNormal(binding, curved) * 127), 0, 127);
+  }
+
+  return 0;
 }
 
 function midiSmoothingKey(binding) {
@@ -2038,6 +2076,9 @@ function renderMidiKeyboardPanel() {
 }
 
 function getMidiKnobValue(binding) {
+  const definition = midiParameterDefinition(binding);
+  if (definition) return ccFromValue(definition, binding);
+
   const value = midiKnobValues.get(binding.id);
   return Number.isFinite(value) ? value : 0;
 }
@@ -3290,6 +3331,7 @@ function applyPatchData(patch) {
   state.nodes = normalized.nodes;
   state.links = normalized.links;
   state.selected = { type: null, id: null };
+  midiKnobValues.clear();
   syncCounters();
   synthNode?.port.postMessage({ type: "panic" });
   pressedKeys.clear();
@@ -3331,6 +3373,7 @@ function newPatch() {
   state.nodes = normalized.nodes;
   state.links = normalized.links;
   state.selected = { type: null, id: null };
+  midiKnobValues.clear();
   syncCounters();
   synthNode?.port.postMessage({ type: "panic" });
   pressedKeys.clear();
@@ -4524,6 +4567,7 @@ function openMidiBindingModal(bindingId = null, preset = null) {
 
     if (existing) {
       Object.assign(existing, binding);
+      midiKnobValues.delete(existing.id);
       if (definition?.type !== "number") {
         delete existing.min;
         delete existing.max;
