@@ -879,7 +879,7 @@ select {
 
 .midi-knob {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
   flex: 1 1 58px;
   width: clamp(58px, 8vw, 116px);

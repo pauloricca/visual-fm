@@ -2080,6 +2080,10 @@ function renderMidiKnobPanel() {
     const rangeId = `midiKnobRange-${binding.id}`;
     return `
       <div class="midi-knob" data-midi-knob="${escapeHtml(binding.id)}">
+        <div class="midi-knob-label">
+          <strong>${escapeHtml(midiParameterLabel(binding))}</strong>
+          <span>${escapeHtml(midiElementLabel(binding.targetType, binding.targetId))}</span>
+        </div>
         <input
           class="adsr-slider midi-knob-range"
           id="${escapeHtml(rangeId)}"
@@ -2102,10 +2106,6 @@ function renderMidiKnobPanel() {
           aria-label="${escapeHtml(`${midiParameterLabel(binding)} CC ${binding.cc} value`)}"
           data-midi-knob-value="${escapeHtml(binding.id)}"
         >
-        <div class="midi-knob-label">
-          <strong>${escapeHtml(midiParameterLabel(binding))}</strong>
-          <span>${escapeHtml(midiElementLabel(binding.targetType, binding.targetId))}</span>
-        </div>
       </div>
     `;
   }).join("");
