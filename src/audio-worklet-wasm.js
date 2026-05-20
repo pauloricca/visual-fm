@@ -439,6 +439,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         )
         : -1;
     }
+    this.wasm.armCustomOnceTriggers?.(DRONE_SLOT);
   }
 
   setLinkParam({ id, parameter, value } = {}) {

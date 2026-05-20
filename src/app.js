@@ -107,6 +107,7 @@ const LINK_AMOUNT_INPUT_MAX = 32;
 const FREQUENCY_SLIDER_MAX = 12000;
 const FREQUENCY_SLOW_SLIDER_MAX = 25;
 const RATIO_SLIDER_MAX = 16;
+const RATIO_SLOW_SLIDER_MAX = 0.1;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
@@ -2471,10 +2472,10 @@ function renderPanel() {
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
-    const usesSlowFrequencyRange = isFixedFrequency && Boolean(node.frequencySlow);
+    const usesSlowFrequencyRange = Boolean(node.frequencySlow);
     const frequencyMax = isFixedFrequency
       ? usesSlowFrequencyRange ? FREQUENCY_SLOW_SLIDER_MAX : FREQUENCY_SLIDER_MAX
-      : RATIO_SLIDER_MAX;
+      : usesSlowFrequencyRange ? RATIO_SLOW_SLIDER_MAX : RATIO_SLIDER_MAX;
     const frequencyInputMax = isFixedFrequency ? FREQUENCY_SLIDER_MAX : RATIO_SLIDER_MAX;
     const frequencyStep = isFixedFrequency ? 0.01 : 0.001;
     const quantise = normalizeNodeQuantise(node.quantise);
@@ -3703,8 +3704,8 @@ function openCustomWaveModal(nodeId) {
 function customWaveModeOptions(selectedMode) {
   const modes = [
     ["loop", "Loop"],
-    ["once", "Play once"],
     ["ping-pong", "Ping-pong"],
+    ["once", "Play once on trigger"],
     ["sustain", "Sustain"],
     ["sustain-loop", "Sustain loop"],
     ["sustain-ping-pong", "Sustain ping-pong"],

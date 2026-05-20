@@ -434,6 +434,38 @@ if (gatedPeak > 0.0001 || triggeredPeak <= 0) {
 engine.resetRuntimeState();
 engine.setGraph({
   maxVoices: 1,
+  nodes: [
+    { id: "custom-trigger", wave: "custom", frequencyMode: "fixed", frequency: 200, ratio: 1, customWave: {
+      mode: "once",
+      points: [
+        { x: 0, y: 0 },
+        { x: 0.25, y: 1 },
+        { x: 0.75, y: -1 },
+        { x: 1, y: 0 },
+      ],
+    } },
+    { id: "custom-trigger-in", wave: "audio-input", audioInputGain: 1 },
+  ],
+  links: [
+    { id: "custom-trigger-out", from: "custom-trigger", to: "audio", amount: 1, drone: true },
+    { id: "custom-trigger-reset", from: "custom-trigger-in", to: "custom-trigger", amount: 1, modulationTarget: "phaseResetTrigger", drone: true },
+  ],
+});
+
+const untriggeredCustomLeft = new Float32Array(128);
+engine.process([[new Float32Array(128), new Float32Array(128)]], [[untriggeredCustomLeft, new Float32Array(128)]]);
+const untriggeredCustomPeak = untriggeredCustomLeft.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+const customTriggerInput = new Float32Array(128).fill(1);
+const triggeredCustomLeft = new Float32Array(128);
+engine.process([[customTriggerInput, customTriggerInput]], [[triggeredCustomLeft, new Float32Array(128)]]);
+const triggeredCustomPeak = triggeredCustomLeft.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+if (untriggeredCustomPeak > 0.0001 || triggeredCustomPeak <= 0) {
+  throw new Error("WASM worklet custom one-shot did not wait for its phase reset trigger.");
+}
+
+engine.resetRuntimeState();
+engine.setGraph({
+  maxVoices: 1,
   masterEffects: {
     delay: { enabled: true, time: 0.02, feedback: 0, mix: 1 },
   },

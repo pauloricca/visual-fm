@@ -209,6 +209,8 @@ static mut CUSTOM_WAVE_DONE: [[bool; MAX_NODES]; MAX_VOICE_SLOTS] =
     [[false; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut CUSTOM_WAVE_DIRECTIONS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
     [[1.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut CUSTOM_WAVE_TRIGGERED: [[bool; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[false; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut LINK_DELAY_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
 static mut LINK_DELAY_SLOT_COUNT: usize = 0;
 static mut LINK_COMB_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
@@ -609,6 +611,7 @@ pub extern "C" fn resetPhases() {
     let perlin_set = core::ptr::addr_of_mut!(PERLIN_SET).cast::<bool>();
     let custom_wave_done = core::ptr::addr_of_mut!(CUSTOM_WAVE_DONE).cast::<bool>();
     let custom_wave_directions = core::ptr::addr_of_mut!(CUSTOM_WAVE_DIRECTIONS).cast::<f64>();
+    let custom_wave_triggered = core::ptr::addr_of_mut!(CUSTOM_WAVE_TRIGGERED).cast::<bool>();
     let delay_buffers = core::ptr::addr_of_mut!(LINK_DELAY_BUFFERS).cast::<f32>();
     let delay_indices = core::ptr::addr_of_mut!(LINK_DELAY_INDICES).cast::<usize>();
     let delay_ready = core::ptr::addr_of_mut!(LINK_DELAY_READY).cast::<bool>();
@@ -637,6 +640,7 @@ pub extern "C" fn resetPhases() {
             *perlin_set.add(index) = false;
             *custom_wave_done.add(index) = false;
             *custom_wave_directions.add(index) = 1.0;
+            *custom_wave_triggered.add(index) = false;
         }
     }
     for index in 0..(MAX_VOICE_SLOTS * MAX_LINKS) {
@@ -707,6 +711,7 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
             PERLIN_SET[voice_slot][node_index] = false;
             CUSTOM_WAVE_DONE[voice_slot][node_index] = false;
             CUSTOM_WAVE_DIRECTIONS[voice_slot][node_index] = 1.0;
+            CUSTOM_WAVE_TRIGGERED[voice_slot][node_index] = false;
         }
         for link_index in 0..MAX_LINKS {
             LINK_TRIGGER_ARMED[voice_slot][link_index] = true;
@@ -729,6 +734,25 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
             LINK_COMB_READY[voice_slot][slot_index] = false;
             for sample_index in 0..MAX_DELAY_SAMPLES {
                 LINK_COMB_BUFFERS[voice_slot][slot_index][sample_index] = 0.0;
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn armCustomOnceTriggers(voice_slot: u32) {
+    let voice_slot = voice_slot as usize;
+    if voice_slot >= MAX_VOICE_SLOTS {
+        return;
+    }
+    unsafe {
+        for node_index in 0..NODE_COUNT {
+            let node = NODES[node_index];
+            if node.wave == 9
+                && node.custom_mode == CUSTOM_MODE_ONCE
+                && !CUSTOM_WAVE_TRIGGERED[voice_slot][node_index]
+            {
+                CUSTOM_WAVE_DONE[voice_slot][node_index] = true;
             }
         }
     }
@@ -1129,6 +1153,7 @@ fn apply_phase_reset_trigger(
             PHASES[voice_slot][target_node_index] = 0.0;
             CUSTOM_WAVE_DONE[voice_slot][target_node_index] = false;
             CUSTOM_WAVE_DIRECTIONS[voice_slot][target_node_index] = 1.0;
+            CUSTOM_WAVE_TRIGGERED[voice_slot][target_node_index] = true;
             LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = false;
         } else if !armed && value <= ENVELOPE_TRIGGER_REARM {
             LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = true;

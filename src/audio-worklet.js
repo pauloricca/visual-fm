@@ -255,6 +255,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (!voice.perlinStates) voice.perlinStates = new Map();
     if (!voice.customWaveDone) voice.customWaveDone = new Map();
     if (!voice.customWaveDirections) voice.customWaveDirections = new Map();
+    if (!voice.customWaveTriggered) voice.customWaveTriggered = new Map();
 
     const nodeIds = new Set(this.nodes.map((node) => node.id));
     const linkIds = new Set(this.links.map((link) => link.id));
@@ -286,6 +287,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
     for (const key of voice.customWaveDirections.keys()) {
       if (!nodeIds.has(key)) voice.customWaveDirections.delete(key);
+    }
+    for (const key of voice.customWaveTriggered.keys()) {
+      if (!nodeIds.has(key)) voice.customWaveTriggered.delete(key);
     }
     for (const key of voice.linkFilters.keys()) {
       if (!linkStateKeys.has(key)) voice.linkFilters.delete(key);
@@ -331,9 +335,14 @@ class VisualFmEngine extends AudioWorkletProcessor {
       if (node.wave === "perlin" && !voice.perlinStates.has(node.id)) {
         voice.perlinStates.set(node.id, this.createPerlinState());
       }
-      if (node.wave !== "custom" || !this.isCustomOneShotMode(node.customWave?.mode)) {
+      if (node.wave === "custom" && this.isCustomTriggerMode(node.customWave?.mode)) {
+        if (voice.isDrone && !voice.customWaveTriggered.get(node.id) && !voice.customWaveDone.has(node.id)) {
+          voice.customWaveDone.set(node.id, true);
+        }
+      } else {
         voice.customWaveDone.delete(node.id);
         voice.customWaveDirections.delete(node.id);
+        voice.customWaveTriggered.delete(node.id);
       }
     }
   }
@@ -751,6 +760,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       perlinStates: new Map(),
       customWaveDone: new Map(),
       customWaveDirections: new Map(),
+      customWaveTriggered: new Map(),
       isDrone,
     };
 
@@ -762,6 +772,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
       }
       if (node.wave === "perlin") {
         voice.perlinStates.set(node.id, this.createPerlinState());
+      }
+      if (isDrone && node.wave === "custom" && this.isCustomTriggerMode(node.customWave?.mode)) {
+        voice.customWaveDone.set(node.id, true);
       }
     }
 
@@ -1085,8 +1098,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (!node?.id || voice.stolenAt !== null) return;
     if (!voice.isDrone && voice.releasedAt !== null) return;
     voice.phases.set(node.id, 0);
-    voice.customWaveDone.delete(node.id);
+    voice.customWaveDone.set(node.id, false);
     voice.customWaveDirections.set(node.id, 1);
+    voice.customWaveTriggered.set(node.id, true);
   }
 
   applyPhaseResetTrigger(modLink, targetNode, voice, value) {
@@ -1187,6 +1201,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
   isCustomFiniteMode(mode) {
     return ["once", "sustain", "sustain-loop", "sustain-ping-pong"].includes(mode);
+  }
+
+  isCustomTriggerMode(mode) {
+    return mode === "once";
   }
 
   advanceCustomWavePhase(node, voice, step) {
