@@ -57,6 +57,7 @@ import {
 } from "./utils.js";
 
 const stage = document.querySelector("#stage");
+const canvasViewport = document.querySelector("#canvasViewport");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
@@ -78,6 +79,8 @@ const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
 const midiKnobPanel = document.querySelector("#midiKnobPanel");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
 const DEFAULT_AUDIO_BACKEND = "wasm";
+const CANVAS_ZOOM_MIN = 0.35;
+const CANVAS_ZOOM_MAX = 2.5;
 const AUDIO_BACKENDS = {
   js: {
     label: "JS AudioWorklet",
@@ -203,8 +206,10 @@ let midiBindingCounter = 1;
 let dragState = null;
 let linkDrag = null;
 let marqueeState = null;
+const canvasView = { x: 0, y: 0, scale: 1 };
 let canvasPanState = null;
 const canvasPanPointers = new Map();
+let canvasGestureStartScale = 1;
 let suppressNextCanvasPanClick = false;
 let pressedKeys = new Set();
 let midiAccess = null;
@@ -1045,25 +1050,35 @@ function processMidiCcSmoothing(timestamp) {
   }
 }
 
-function applyMidiCc(cc, value) {
+function applyMidiCc(cc, value, options = {}) {
   let immediateChanged = false;
   let shouldRenderNodes = false;
   let shouldRenderPanel = false;
   const knobValue = clamp(Number(value) || 0, 0, 127);
+  const smoothNumbers = options.smoothNumbers !== false;
+  const flashTargets = options.flashTargets !== false;
 
   for (const binding of state.midiBindings) {
     if (binding.cc !== cc) continue;
     midiKnobValues.set(binding.id, knobValue);
     syncMidiKnobElement(binding.id, knobValue);
-    flashMidiBindingItem(binding.id);
-    flashMidiCanvasTarget(binding);
+    if (flashTargets) {
+      flashMidiBindingItem(binding.id);
+      flashMidiCanvasTarget(binding);
+    }
 
     const definition = midiParameterDefinition(binding);
     if (!definition) continue;
 
     const nextValue = valueFromCc(definition, value, binding);
     if (definition.type === "number") {
-      queueMidiCcSmoothing(binding, definition, nextValue);
+      if (smoothNumbers) {
+        queueMidiCcSmoothing(binding, definition, nextValue);
+      } else {
+        definition.set(nextValue);
+        updatePanelForMidiNumber(binding, nextValue);
+        immediateChanged = true;
+      }
       continue;
     }
 
@@ -1200,15 +1215,53 @@ function duplicateNodes(ids) {
   return { copies, idMap };
 }
 
+function canvasPointFromStageOffset(x, y) {
+  return {
+    x: (x - canvasView.x) / canvasView.scale,
+    y: (y - canvasView.y) / canvasView.scale,
+  };
+}
+
 function stagePointFromRect(clientX, clientY, rect) {
   return {
-    x: clientX - rect.left,
-    y: clientY - rect.top,
+    ...canvasPointFromStageOffset(clientX - rect.left, clientY - rect.top),
   };
 }
 
 function stagePoint(clientX, clientY) {
   return stagePointFromRect(clientX, clientY, stage.getBoundingClientRect());
+}
+
+function visibleCanvasBounds(rect = stage.getBoundingClientRect()) {
+  return {
+    left: -canvasView.x / canvasView.scale,
+    top: -canvasView.y / canvasView.scale,
+    right: (rect.width - canvasView.x) / canvasView.scale,
+    bottom: (rect.height - canvasView.y) / canvasView.scale,
+  };
+}
+
+function applyCanvasView() {
+  canvasViewport?.style.setProperty("--canvas-view-x", `${canvasView.x}px`);
+  canvasViewport?.style.setProperty("--canvas-view-y", `${canvasView.y}px`);
+  canvasViewport?.style.setProperty("--canvas-view-scale", `${canvasView.scale}`);
+}
+
+function setCanvasZoom(scale, focal = null) {
+  const nextScale = clamp(scale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX);
+  if (nextScale === canvasView.scale) return false;
+  const rect = stage.getBoundingClientRect();
+  const point = focal || { x: rect.width / 2, y: rect.height / 2 };
+  const world = canvasPointFromStageOffset(point.x, point.y);
+  canvasView.scale = nextScale;
+  canvasView.x = point.x - world.x * nextScale;
+  canvasView.y = point.y - world.y * nextScale;
+  applyCanvasView();
+  if (dragState) dragState.stageRect = rect;
+  if (linkDrag) linkDrag.stageRect = rect;
+  if (marqueeState) marqueeState.stageRect = rect;
+  scheduleWiresRender();
+  return true;
 }
 
 function captureStagePointer(pointerId) {
@@ -1244,11 +1297,10 @@ function nodeInputPoint(id) {
 }
 
 function audioInputPoint() {
-  const stageRect = stage.getBoundingClientRect();
-  const rect = audioOut.getBoundingClientRect();
+  const position = audioOutPosition();
   return {
-    x: rect.left + rect.width / 2 - stageRect.left,
-    y: rect.top - stageRect.top,
+    x: position.x,
+    y: position.y - AUDIO_OUT_LAYOUT_HALF_HEIGHT,
   };
 }
 
@@ -2100,8 +2152,7 @@ function setMidiKnobValue(binding, rawValue) {
   const value = clamp(Number(rawValue) || 0, 0, 127);
   midiKnobValues.set(binding.id, value);
   syncMidiKnobElement(binding.id, value);
-  recordRecentMidiCc(binding.cc, value);
-  applyMidiCc(binding.cc, value);
+  applyMidiCc(binding.cc, value, { flashTargets: false, smoothNumbers: false });
   return value;
 }
 
@@ -4932,6 +4983,12 @@ function canvasPanCentroid() {
   };
 }
 
+function canvasPanDistance() {
+  const pointers = [...canvasPanPointers.values()].slice(0, 2);
+  if (pointers.length < 2) return 0;
+  return Math.hypot(pointers[1].x - pointers[0].x, pointers[1].y - pointers[0].y);
+}
+
 function cancelActiveCanvasInteraction() {
   const dragPointerId = dragState?.pointerId;
   const linkPointerId = linkDrag?.pointerId;
@@ -4967,9 +5024,12 @@ function beginCanvasPan() {
   cancelActiveCanvasInteraction();
   canvasPanState = {
     start: centroid,
+    startDistance: canvasPanDistance(),
+    startScale: canvasView.scale,
     nodes: state.nodes.map((node) => ({ id: node.id, x: node.x, y: node.y })),
     audioOutPosition: { ...audioOutPosition() },
     moved: false,
+    layoutMoved: false,
   };
 }
 
@@ -5041,15 +5101,47 @@ function wheelPixels(event) {
 }
 
 function onStageWheel(event) {
-  if (event.ctrlKey || event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
+  if (event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
   const delta = wheelPixels(event);
+  if (event.ctrlKey) {
+    if (!delta.y) return;
+    event.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    setCanvasZoom(canvasView.scale * Math.exp(-delta.y * 0.004), {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    });
+    return;
+  }
   const horizontalShift = event.shiftKey && Math.abs(delta.x) < Math.abs(delta.y);
-  const dx = horizontalShift ? -delta.y : -delta.x;
-  const dy = horizontalShift ? 0 : -delta.y;
+  const dx = (horizontalShift ? -delta.y : -delta.x) / canvasView.scale;
+  const dy = (horizontalShift ? 0 : -delta.y) / canvasView.scale;
   if (!dx && !dy) return;
   event.preventDefault();
   const applied = translatePatchLayout(dx, dy);
   if (applied) schedulePatchSave();
+}
+
+function preventPageZoom(event) {
+  if (event.ctrlKey || event.type.startsWith("gesture")) {
+    event.preventDefault();
+  }
+}
+
+function onStageGestureStart(event) {
+  if (event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
+  event.preventDefault();
+  canvasGestureStartScale = canvasView.scale;
+}
+
+function onStageGestureChange(event) {
+  if (event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
+  event.preventDefault();
+  const rect = stage.getBoundingClientRect();
+  setCanvasZoom(canvasGestureStartScale * event.scale, {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  });
 }
 
 function onCanvasPanPointerDown(event) {
@@ -5083,9 +5175,17 @@ function onCanvasPanPointerMove(event) {
   event.preventDefault();
   const centroid = canvasPanCentroid();
   if (!centroid) return;
-  const dx = centroid.x - canvasPanState.start.x;
-  const dy = centroid.y - canvasPanState.start.y;
-  canvasPanState.moved = canvasPanState.moved || Math.abs(dx) > 1 || Math.abs(dy) > 1;
+  const distance = canvasPanDistance();
+  const nextScale = canvasPanState.startDistance
+    ? canvasPanState.startScale * (distance / canvasPanState.startDistance)
+    : canvasView.scale;
+  const didZoom = setCanvasZoom(nextScale, centroid);
+  const dx = (centroid.x - canvasPanState.start.x) / canvasView.scale;
+  const dy = (centroid.y - canvasPanState.start.y) / canvasView.scale;
+  canvasPanState.moved = canvasPanState.moved
+    || didZoom
+    || Math.abs(dx) > 1
+    || Math.abs(dy) > 1;
 
   for (const item of canvasPanState.nodes) {
     const node = nodeById(item.id);
@@ -5094,7 +5194,7 @@ function onCanvasPanPointerMove(event) {
     node.y = item.y;
   }
   state.audioOutPosition = { ...canvasPanState.audioOutPosition };
-  translatePatchLayout(dx, dy);
+  if (translatePatchLayout(dx, dy)) canvasPanState.layoutMoved = true;
 }
 
 function onCanvasPanPointerEnd(event) {
@@ -5104,9 +5204,10 @@ function onCanvasPanPointerEnd(event) {
 
   if (canvasPanPointers.size < 2 && canvasPanState) {
     const moved = canvasPanState.moved;
+    const layoutMoved = canvasPanState.layoutMoved;
     canvasPanState = null;
     suppressNextCanvasPanClick = moved;
-    if (moved) savePatch();
+    if (layoutMoved) savePatch();
   }
 }
 
@@ -5185,12 +5286,13 @@ function onNodePointerMove(event) {
   if (!dragState || event.pointerId !== dragState.pointerId) return;
   const rect = dragState.stageRect || stage.getBoundingClientRect();
   const point = stagePointFromRect(event.clientX, event.clientY, rect);
+  const visible = visibleCanvasBounds(rect);
   const movedIds = [];
   for (const item of dragState.nodes) {
     const node = nodeById(item.id);
     if (!node) continue;
-    node.x = clamp(point.x - item.offsetX, 90, rect.width - 90);
-    node.y = clamp(point.y - item.offsetY, 96, rect.height - 126);
+    node.x = clamp(point.x - item.offsetX, visible.left + 90, visible.right - 90);
+    node.y = clamp(point.y - item.offsetY, visible.top + 96, visible.bottom - 126);
     movedIds.push(item.id);
   }
   scheduleNodesAndWiresRender(movedIds);
@@ -5260,7 +5362,7 @@ function onStageResize() {
 }
 
 function isEmptyCanvasTarget(target) {
-  return target === stage || target === nodeLayer || target === wireLayer;
+  return target === stage || target === canvasViewport || target === nodeLayer || target === wireLayer;
 }
 
 function isEditingValueSliderInput(element = document.activeElement) {
@@ -5439,10 +5541,16 @@ document.addEventListener("click", () => {
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
+document.addEventListener("wheel", preventPageZoom, { passive: false, capture: true });
+document.addEventListener("gesturestart", preventPageZoom, { passive: false });
+document.addEventListener("gesturechange", preventPageZoom, { passive: false });
+document.addEventListener("gestureend", preventPageZoom, { passive: false });
 
 stage.addEventListener("pointerdown", onCanvasPanPointerDown, true);
 stage.addEventListener("click", onCanvasPanClickCapture, true);
 stage.addEventListener("wheel", onStageWheel, { passive: false });
+stage.addEventListener("gesturestart", onStageGestureStart, { passive: false });
+stage.addEventListener("gesturechange", onStageGestureChange, { passive: false });
 window.addEventListener("pointermove", onCanvasPanPointerMove, { passive: false });
 window.addEventListener("pointerup", onCanvasPanPointerEnd);
 window.addEventListener("pointercancel", onCanvasPanPointerEnd);
@@ -5471,7 +5579,7 @@ stage.addEventListener("click", (event) => {
     suppressNextStageClick = false;
     return;
   }
-  if (event.target === stage || event.target === nodeLayer || event.target === wireLayer) {
+  if (event.target === stage || event.target === canvasViewport || event.target === nodeLayer || event.target === wireLayer) {
     state.selected = { type: null, id: null };
     render();
   }

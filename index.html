@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Visual FM</title>
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
@@ -17,10 +17,16 @@
             </div>
           </div>
 
-          <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
-          <div class="node-layer" id="nodeLayer"></div>
-          <div class="selection-rect" id="selectionRect" aria-hidden="true"></div>
-          <div class="link-preview" id="linkPreview"></div>
+          <div class="canvas-viewport" id="canvasViewport">
+            <svg class="wire-layer" id="wireLayer" aria-hidden="true"></svg>
+            <div class="node-layer" id="nodeLayer"></div>
+            <div class="selection-rect" id="selectionRect" aria-hidden="true"></div>
+            <div class="link-preview" id="linkPreview"></div>
+            <button class="audio-out" id="audioOut" type="button" aria-label="Audio out">
+              <span class="audio-anchor" data-anchor="audio"></span>
+              <span>Audio Out</span>
+            </button>
+          </div>
           <div class="floating-controls" aria-label="Canvas controls">
             <button class="fine-slider-button floating-control-button" id="fineSliderButton" type="button" aria-label="fine control" aria-pressed="false" title="fine control">
               <svg class="snail-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
@@ -65,10 +71,6 @@
             </button>
           </div>
 
-          <button class="audio-out" id="audioOut" type="button" aria-label="Audio out">
-            <span class="audio-anchor" data-anchor="audio"></span>
-            <span>Audio Out</span>
-          </button>
         </section>
 
         <section class="bottom-panel" id="bottomPanel" aria-label="MIDI performance controls" hidden>

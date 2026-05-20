@@ -26,11 +26,22 @@ const serverExtConfigPath = join(certDir, "server-ext.conf");
 const rootConfigPath = join(certDir, "root.conf");
 
 function localIPv4Addresses() {
-  return Object.values(networkInterfaces())
-    .flat()
-    .filter((address) => address?.family === "IPv4" && !address.internal)
-    .map((address) => address.address)
+  const interfaces = Object.entries(networkInterfaces());
+  const addresses = interfaces.flatMap(([name, entries]) => {
+    const priority = /^(en0|wl|wlan|wifi|ath)|wi-?fi|wireless/i.test(name) ? 0 : 1;
+    return (entries || [])
+      .filter((address) => address?.family === "IPv4" && !address.internal)
+      .map((address) => ({ address: address.address, priority }));
+  });
+
+  return addresses
+    .sort((left, right) => left.priority - right.priority)
+    .map((entry) => entry.address)
     .filter(Boolean);
+}
+
+function uniqueAddresses(addresses) {
+  return [...new Set(addresses.filter(Boolean))];
 }
 
 function runOpenSsl(args) {
@@ -183,7 +194,8 @@ function listen(server, serverHost, serverPort) {
   });
 }
 
-const lanAddresses = localIPv4Addresses();
+const publicHost = process.env.PUBLIC_HOST || "";
+const lanAddresses = publicHost ? [publicHost] : uniqueAddresses(localIPv4Addresses());
 ensureCertificates(lanAddresses);
 
 const appHandler = createAppRequestHandler(rootDir);

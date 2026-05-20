@@ -2,6 +2,8 @@ services:
   visual-fm:
     build: .
     command: ["node", "scripts/serve.mjs"]
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
     ports:
       - "8839:8839"
       - "8843:8843"
