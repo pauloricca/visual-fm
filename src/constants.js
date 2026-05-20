@@ -29,6 +29,12 @@ export const QUANTISE_SCALES = [
   "mixolydian",
   "harmonic-minor",
 ];
+export const DEFAULT_KEYBOARD_START_NOTE = 48;
+export const DEFAULT_KEYBOARD_LENGTH = 14;
+export const MIN_KEYBOARD_START_NOTE = 0;
+export const MAX_KEYBOARD_START_NOTE = 120;
+export const MIN_KEYBOARD_LENGTH = 7;
+export const MAX_KEYBOARD_LENGTH = 28;
 export const DEFAULT_NODE_QUANTISE = { enabled: false, root: "C", scale: "chromatic", glide: 0 };
 export const NODE_MODULATION_TARGETS = ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix"];
 export const LINK_MODULATION_TARGETS = [
@@ -138,6 +144,8 @@ export const defaultPatch = {
   audioOutPosition: null,
   midiChannel: "all",
   midiInputId: "all",
+  keyboardStartNote: DEFAULT_KEYBOARD_START_NOTE,
+  keyboardLength: DEFAULT_KEYBOARD_LENGTH,
   midiBindings: [],
   masterEffects: {
     chorus: { enabled: false, rate: 0.8, depth: 0.012, mix: 0.25 },

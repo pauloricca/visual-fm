@@ -5,6 +5,8 @@ import {
   DEFAULT_LINK_FOLLOWER,
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
+  DEFAULT_KEYBOARD_LENGTH,
+  DEFAULT_KEYBOARD_START_NOTE,
   DEFAULT_MAX_VOICES,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
@@ -15,7 +17,11 @@ import {
   MASTER_EFFECT_IDS,
   MASTER_EFFECTS,
   MAX_MAX_VOICES,
+  MAX_KEYBOARD_LENGTH,
+  MAX_KEYBOARD_START_NOTE,
   MIDI_CC_CURVES,
+  MIN_KEYBOARD_LENGTH,
+  MIN_KEYBOARD_START_NOTE,
   MIN_MAX_VOICES,
   NODE_MIDI_PARAMETERS,
   NODE_MODULATION_TARGETS,
@@ -46,6 +52,12 @@ export function normalizePatch(patch) {
   const midiInputId = typeof source.midiInputId === "string" && source.midiInputId.trim()
     ? source.midiInputId
     : "all";
+  const keyboardStartNote = Number.isFinite(Number(source.keyboardStartNote))
+    ? clamp(Math.round(Number(source.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
+    : DEFAULT_KEYBOARD_START_NOTE;
+  const keyboardLength = Number.isFinite(Number(source.keyboardLength))
+    ? clamp(Math.round(Number(source.keyboardLength)), MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH)
+    : DEFAULT_KEYBOARD_LENGTH;
   const audioInputDeviceId = normalizeAudioDeviceId(source.audioInputDeviceId);
   const audioOutputDeviceId = normalizeAudioDeviceId(source.audioOutputDeviceId);
   const audioOutPosition = normalizePoint(source.audioOutPosition);
@@ -137,6 +149,8 @@ export function normalizePatch(patch) {
     linkSignalGradientMeters,
     midiChannel,
     midiInputId,
+    keyboardStartNote,
+    keyboardLength,
     midiBindings: normalizeMidiBindings(source.midiBindings, nodes, links, nodeIdMap, linkIdMap),
     masterEffects: normalizeMasterEffects(source.masterEffects),
     nodes,

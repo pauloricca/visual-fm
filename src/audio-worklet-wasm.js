@@ -879,15 +879,13 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
   }
 
   renderVoice(voice, now, frames) {
-    const lifecycleGain = this.voiceLifecycleGain(voice, now);
-    if (lifecycleGain <= 0) return;
     this.wasm.renderVoiceGraph(
       voice.slot,
       frames,
       sampleRate,
       voice.frequency,
       voice.velocity,
-      lifecycleGain,
+      1,
       now - voice.startedAt,
       voice.releasedAt === null ? -1 : now - voice.releasedAt,
     );

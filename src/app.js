@@ -1,6 +1,8 @@
 import {
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
+  DEFAULT_KEYBOARD_LENGTH,
+  DEFAULT_KEYBOARD_START_NOTE,
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
@@ -14,10 +16,14 @@ import {
   MASTER_EFFECTS,
   MASTER_EFFECT_IDS,
   MAX_MAX_VOICES,
+  MAX_KEYBOARD_LENGTH,
+  MAX_KEYBOARD_START_NOTE,
   MIDI_CC_CURVES,
   MIDI_CC_MAX_SMOOTH_DT,
   MIDI_CC_SETTLE_RATIO,
   MIDI_CC_SMOOTH_SECONDS,
+  MIN_KEYBOARD_LENGTH,
+  MIN_KEYBOARD_START_NOTE,
   MIN_MAX_VOICES,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
@@ -103,8 +109,6 @@ const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
 const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
 const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
-const MIDI_KEYBOARD_START_NOTE = 48;
-const MIDI_KEYBOARD_WHITE_KEYS = 14;
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -294,6 +298,8 @@ function currentPatchData() {
     linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
+    keyboardStartNote: state.keyboardStartNote,
+    keyboardLength: state.keyboardLength,
     midiBindings: state.midiBindings,
     masterEffects: state.masterEffects,
     nodes: state.nodes,
@@ -1958,8 +1964,17 @@ function isBlackMidiNote(note) {
 function midiKeyboardNotes() {
   const notes = [];
   let whiteIndex = 0;
-  let note = MIDI_KEYBOARD_START_NOTE;
-  while (whiteIndex < MIDI_KEYBOARD_WHITE_KEYS) {
+  let note = clamp(
+    Math.round(Number(state.keyboardStartNote) || DEFAULT_KEYBOARD_START_NOTE),
+    MIN_KEYBOARD_START_NOTE,
+    MAX_KEYBOARD_START_NOTE,
+  );
+  const whiteKeyCount = clamp(
+    Math.round(Number(state.keyboardLength) || DEFAULT_KEYBOARD_LENGTH),
+    MIN_KEYBOARD_LENGTH,
+    MAX_KEYBOARD_LENGTH,
+  );
+  while (whiteIndex < whiteKeyCount && note <= 127) {
     const black = isBlackMidiNote(note);
     notes.push({
       note,
@@ -1973,7 +1988,12 @@ function midiKeyboardNotes() {
 }
 
 function midiKeyStyle(item) {
-  const whiteWidth = 100 / MIDI_KEYBOARD_WHITE_KEYS;
+  const whiteKeyCount = clamp(
+    Math.round(Number(state.keyboardLength) || DEFAULT_KEYBOARD_LENGTH),
+    MIN_KEYBOARD_LENGTH,
+    MAX_KEYBOARD_LENGTH,
+  );
+  const whiteWidth = 100 / whiteKeyCount;
   if (item.black) {
     return `left: ${(item.whiteIndex + 0.66) * whiteWidth}%; width: ${whiteWidth * 0.66}%;`;
   }
@@ -3236,6 +3256,8 @@ function applyPatchData(patch) {
   state.linkSignalGradientMeters = normalized.linkSignalGradientMeters;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
+  state.keyboardStartNote = normalized.keyboardStartNote;
+  state.keyboardLength = normalized.keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -3261,6 +3283,8 @@ function newPatch() {
 
   const midiChannel = state.midiChannel;
   const midiInputId = state.midiInputId;
+  const keyboardStartNote = state.keyboardStartNote;
+  const keyboardLength = state.keyboardLength;
   const audioInputDeviceId = state.audioInputDeviceId;
   const audioOutputDeviceId = state.audioOutputDeviceId;
   const linkSignalGradientMeters = state.linkSignalGradientMeters;
@@ -3273,6 +3297,8 @@ function newPatch() {
   state.linkSignalGradientMeters = linkSignalGradientMeters;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
+  state.keyboardStartNote = keyboardStartNote;
+  state.keyboardLength = keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -4566,6 +4592,20 @@ function renderEmptyPanel() {
         <label for="midiChannel">Receive channel</label>
         <select id="midiChannel">${midiChannelOptions}</select>
       </div>
+      <div class="field">
+        <label for="keyboardStartNote">Keyboard start note</label>
+        <div class="field-row">
+          <input id="keyboardStartNoteRange" type="range" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
+          <input id="keyboardStartNote" type="number" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
+        </div>
+      </div>
+      <div class="field">
+        <label for="keyboardLength">Keyboard length</label>
+        <div class="field-row">
+          <input id="keyboardLengthRange" type="range" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
+          <input id="keyboardLength" type="number" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
+        </div>
+      </div>
       ${renderMidiBindingsSection()}
     </div>
   `;
@@ -4650,6 +4690,16 @@ function renderEmptyPanel() {
     synthNode?.port.postMessage({ type: "panic" });
     pressedKeys.clear();
     updateMidiStatus();
+    savePatch();
+  });
+  bindNumberPair("keyboardStartNote", "keyboardStartNoteRange", MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE, (value) => {
+    state.keyboardStartNote = Math.round(value);
+    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
+    savePatch();
+  });
+  bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
+    state.keyboardLength = Math.round(value);
+    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
     savePatch();
   });
   attachMidiBindingEvents();

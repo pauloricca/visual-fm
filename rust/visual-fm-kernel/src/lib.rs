@@ -10,6 +10,7 @@ const MAX_FORMANT_BANDS: usize = 3;
 const MAX_CUSTOM_WAVE_POINTS: usize = 64;
 const FORMANT_INTENSITY_MAX: f64 = 36.0;
 const CUSTOM_ONESHOT_EDGE_FADE_SECONDS: f64 = 0.002;
+const VOICE_START_FADE_SECONDS: f64 = 0.006;
 const CUSTOM_MODE_LOOP: i32 = 0;
 const CUSTOM_MODE_ONCE: i32 = 1;
 const CUSTOM_MODE_PING_PONG: i32 = 2;
@@ -688,7 +689,12 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
     }
     unsafe {
         for node_index in 0..MAX_NODES {
-            PHASES[voice_slot][node_index] = 0.0;
+            PHASES[voice_slot][node_index] =
+                if node_index < NODE_COUNT && NODES[node_index].wave != 9 {
+                    random_unit(voice_slot)
+                } else {
+                    0.0
+                };
             QUANTISED_FREQUENCIES[voice_slot][node_index] = 0.0;
             QUANTISED_TARGETS[voice_slot][node_index] = 0.0;
             QUANTISED_STEPS[voice_slot][node_index] = 0.0;
@@ -1130,14 +1136,18 @@ fn apply_phase_reset_trigger(
     }
 }
 
-fn random_bipolar(voice_slot: usize) -> f64 {
+fn random_unit(voice_slot: usize) -> f64 {
     unsafe {
         let state = RNG_STATES[voice_slot]
             .wrapping_mul(1_664_525)
             .wrapping_add(1_013_904_223);
         RNG_STATES[voice_slot] = state;
-        (state as f64 / u32::MAX as f64) * 2.0 - 1.0
+        state as f64 / u32::MAX as f64
     }
+}
+
+fn random_bipolar(voice_slot: usize) -> f64 {
+    random_unit(voice_slot) * 2.0 - 1.0
 }
 
 fn apply_link_noise(sample: f64, link: Link, voice_slot: usize) -> f64 {
@@ -1920,7 +1930,7 @@ pub extern "C" fn renderVoiceGraph(
     let voice_slot = (slot as usize).min(MAX_VOICE_SLOTS - 1);
     let left = core::ptr::addr_of_mut!(LEFT).cast::<f32>();
     let right = core::ptr::addr_of_mut!(RIGHT).cast::<f32>();
-    let amp = velocity.clamp(0.0, 1.0) * lifecycle_gain.clamp(0.0, 1.0);
+    let base_amp = velocity.clamp(0.0, 1.0) * lifecycle_gain.clamp(0.0, 1.0);
 
     for frame in 0..frames {
         let stamp = next_stamp();
@@ -1933,6 +1943,7 @@ pub extern "C" fn renderVoiceGraph(
         } else {
             release_age + sample_offset
         };
+        let amp = base_amp * smooth_step(age / VOICE_START_FADE_SECONDS);
 
         unsafe {
             for link_index in 0..LINK_COUNT {
