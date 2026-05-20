@@ -1538,7 +1538,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     } else {
       output = Math.tanh(driven);
     }
-    return this.sanitizeSample(output / Math.sqrt(gain), 4);
+    return this.sanitizeSample(output, 4);
   }
 
   createBaseLinkParams(link) {

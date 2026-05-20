@@ -2749,7 +2749,7 @@ function renderPanel() {
       <div class="field">
         ${parameterLabel("distortionGain", "Gain", "link", link.id, "distortion.gain")}
         <div class="field-row">
-          <input id="distortionGainRange" type="range" min="0.1" max="40" step="0.001" value="${distortion.gain}">
+          <input id="distortionGainRange" type="range" min="1" max="40" step="0.001" value="${distortion.gain}">
           <input id="distortionGain" type="number" min="0.1" max="40" step="0.001" value="${distortion.gain}">
         </div>
       </div>
@@ -3019,14 +3019,14 @@ function renderPanel() {
         savePatch();
       });
 
-      bindNumberPair("distortionGain", "distortionGainRange", 0.1, 40, (value) => {
+      bindNumberPair("distortionGain", "distortionGainRange", 1, 40, (value) => {
         link.distortion = {
           ...(link.distortion || DEFAULT_LINK_DISTORTION),
           gain: value,
         };
         sendLinkParam(link.id, "distortion.gain", value);
         schedulePatchSave();
-      });
+      }, { inputMin: 0.1 });
     }
 
     if (usesEnvelopeControls) {
@@ -3835,15 +3835,16 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   const range = root.querySelector(`#${rangeId}`);
   if (!number || !range) return;
   const step = valueSliderStep(number, range);
+  const inputMin = Number.isFinite(options.inputMin) ? options.inputMin : min;
   const inputMax = Number.isFinite(options.inputMax) ? options.inputMax : max;
 
-  const commitValue = (rawValue, { updateNumber = true, valueMax = max } = {}) => {
+  const commitValue = (rawValue, { updateNumber = true, valueMin = min, valueMax = max } = {}) => {
     if (rawValue === "" || rawValue === "." || rawValue === "-") return;
 
     const parsed = Number(rawValue);
     if (!Number.isFinite(parsed)) return;
 
-    const value = snapValueSliderValue(parsed, min, valueMax, step);
+    const value = snapValueSliderValue(parsed, valueMin, valueMax, step);
     if (updateNumber) {
       syncValueSliderNumber(number, range, value);
     }
@@ -3858,15 +3859,15 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   };
 
   enhanceValueSlider(number, range, min, max, step);
-  number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false, valueMax: inputMax }));
+  number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false, valueMin: inputMin, valueMax: inputMax }));
   number.addEventListener("focus", (event) => event.target.select());
   number.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      commitValue(event.currentTarget.value, { valueMax: inputMax });
+      commitValue(event.currentTarget.value, { valueMin: inputMin, valueMax: inputMax });
       event.currentTarget.blur();
     }
   });
-  number.addEventListener("blur", (event) => commitValue(event.target.value, { valueMax: inputMax }));
+  number.addEventListener("blur", (event) => commitValue(event.target.value, { valueMin: inputMin, valueMax: inputMax }));
   range.addEventListener("input", (event) => commitValue(event.target.value));
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }

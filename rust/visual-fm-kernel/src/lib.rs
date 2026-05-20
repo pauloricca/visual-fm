@@ -1366,7 +1366,7 @@ fn apply_link_distortion(sample: f64, link: Link, voice_slot: usize) -> f64 {
         5 => fold_sample(sample, gain),
         _ => driven.tanh(),
     };
-    sanitize_sample(output / gain.sqrt(), 4.0)
+    sanitize_sample(output, 4.0)
 }
 
 fn delay_slot_for_link(link_index: usize) -> Option<usize> {
