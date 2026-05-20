@@ -113,6 +113,8 @@ const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
 const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
 const VALUE_SLIDER_PRECISION_POWER = 1.45;
+const MIDI_KNOB_TOUCH_SCALE = 1.65;
+const MIDI_KNOB_TOUCH_PRECISION_THRESHOLD_PX = 28;
 const NODE_LAYOUT_HALF_WIDTH = 71;
 const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
@@ -889,7 +891,7 @@ function ccFromValue(definition, binding) {
     const maxIndex = Math.max(0, definition.options.length - 1);
     if (!maxIndex) return 0;
     const index = definition.options.findIndex((option) => option.value === currentValue);
-    return clamp(Math.round((Math.max(0, index) / maxIndex) * 127), 0, 127);
+    return clamp((Math.max(0, index) / maxIndex) * 127, 0, 127);
   }
 
   if (definition.type === "number") {
@@ -897,7 +899,7 @@ function ccFromValue(definition, binding) {
     const span = range.max - range.min;
     if (!Number.isFinite(span) || Math.abs(span) <= Number.EPSILON) return 0;
     const curved = clamp((Number(currentValue) - range.min) / span, 0, 1);
-    return clamp(Math.round(midiBindingCurveNormal(binding, curved) * 127), 0, 127);
+    return clamp(midiBindingCurveNormal(binding, curved) * 127, 0, 127);
   }
 
   return 0;
@@ -1047,7 +1049,7 @@ function applyMidiCc(cc, value) {
   let immediateChanged = false;
   let shouldRenderNodes = false;
   let shouldRenderPanel = false;
-  const knobValue = clamp(Math.round(Number(value) || 0), 0, 127);
+  const knobValue = clamp(Number(value) || 0, 0, 127);
 
   for (const binding of state.midiBindings) {
     if (binding.cc !== cc) continue;
@@ -2086,7 +2088,7 @@ function getMidiKnobValue(binding) {
 function syncMidiKnobElement(bindingId, value) {
   const range = midiKnobPanel?.querySelector(`[data-midi-knob-range="${CSS.escape(bindingId)}"]`);
   const number = midiKnobPanel?.querySelector(`[data-midi-knob-value="${CSS.escape(bindingId)}"]`);
-  const normalizedValue = clamp(Math.round(Number(value) || 0), 0, 127);
+  const normalizedValue = clamp(Number(value) || 0, 0, 127);
   if (range) {
     range.value = String(normalizedValue);
     syncValueSliderProgress(range, 0, 127);
@@ -2095,7 +2097,7 @@ function syncMidiKnobElement(bindingId, value) {
 }
 
 function setMidiKnobValue(binding, rawValue) {
-  const value = clamp(Math.round(Number(rawValue) || 0), 0, 127);
+  const value = clamp(Number(rawValue) || 0, 0, 127);
   midiKnobValues.set(binding.id, value);
   syncMidiKnobElement(binding.id, value);
   recordRecentMidiCc(binding.cc, value);
@@ -2131,7 +2133,7 @@ function renderMidiKnobPanel() {
           type="range"
           min="0"
           max="127"
-          step="1"
+          step="0.001"
           value="${value}"
           aria-label="${escapeHtml(`${midiElementLabel(binding.targetType, binding.targetId)} ${midiParameterLabel(binding)} CC ${binding.cc}`)}"
           data-midi-knob-range="${escapeHtml(binding.id)}"
@@ -2142,7 +2144,7 @@ function renderMidiKnobPanel() {
           type="number"
           min="0"
           max="127"
-          step="1"
+          step="0.001"
           value="${value}"
           aria-label="${escapeHtml(`${midiParameterLabel(binding)} CC ${binding.cc} value`)}"
           data-midi-knob-value="${escapeHtml(binding.id)}"
@@ -4039,6 +4041,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
   const control = range.closest(".value-slider") || range;
   const number = control.querySelector?.(".value-slider-input");
   const fineScale = (event) => (event.altKey || isFineSliderActive() ? FINE_SLIDER_SCALE : 1);
+  const isMidiKnob = range.classList.contains("midi-knob-range");
 
   control.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
@@ -4092,12 +4095,16 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     const perpendicular = drag.vertical
       ? Math.abs(event.clientX - drag.startX)
       : Math.abs(event.clientY - drag.startY);
-    const precisionDistance = Math.max(0, perpendicular - VALUE_SLIDER_PRECISION_THRESHOLD_PX);
+    const precisionThreshold = isMidiKnob && event.pointerType === "touch"
+      ? MIDI_KNOB_TOUCH_PRECISION_THRESHOLD_PX
+      : VALUE_SLIDER_PRECISION_THRESHOLD_PX;
+    const precisionDistance = Math.max(0, perpendicular - precisionThreshold);
     const precision = 1 / (1 + Math.pow(precisionDistance / VALUE_SLIDER_PRECISION_DISTANCE_PX, VALUE_SLIDER_PRECISION_POWER));
+    const touchScale = isMidiKnob && event.pointerType === "touch" ? MIDI_KNOB_TOUCH_SCALE : 1;
     const axisDelta = drag.vertical
       ? (drag.lastAxis - axis) / axisSize
       : (axis - drag.lastAxis) / axisSize;
-    const value = drag.currentValue + axisDelta * precision * fineScale(event) * rangeSpan;
+    const value = drag.currentValue + axisDelta * precision * fineScale(event) * touchScale * rangeSpan;
 
     drag.currentValue = clamp(value, min, max);
     drag.lastAxis = axis;
