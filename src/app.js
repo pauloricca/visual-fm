@@ -60,6 +60,7 @@ import {
 } from "./utils.js";
 
 const stage = document.querySelector("#stage");
+const appShell = document.querySelector(".app-shell");
 const canvasViewport = document.querySelector("#canvasViewport");
 const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
@@ -252,6 +253,7 @@ const activeBottomPanels = {
   keyboard: false,
   knobs: false,
 };
+let keyboardWideLayout = false;
 let availableAudioDevices = { inputs: [], outputs: [] };
 let patchLibrary = null;
 let patchSlots = patchSession.slots;
@@ -2494,6 +2496,8 @@ function midiKeyStyle(item) {
 
 function renderMidiKeyboardPanel() {
   if (!midiKeyboardPanel) return;
+  const keyboardWidePressed = String(keyboardWideLayout);
+  const keyboardWideLabel = keyboardWideLayout ? "Shrink keyboard layout" : "Expand keyboard layout";
   midiKeyboardPanel.innerHTML = `
     <div class="midi-keyboard">
       ${midiKeyboardNotes().map((item) => `
@@ -2509,6 +2513,13 @@ function renderMidiKeyboardPanel() {
         </button>
       `).join("")}
     </div>
+    <button
+      class="keyboard-layout-toggle"
+      type="button"
+      aria-label="${keyboardWideLabel}"
+      title="${keyboardWideLabel}"
+      aria-pressed="${keyboardWidePressed}"
+    >${keyboardWideLayout ? "&lt;" : "&gt;"}</button>
   `;
   for (const key of midiKeyboardPanel.querySelectorAll("[data-midi-key-note]")) {
     key.addEventListener("pointerdown", onMidiKeyPointerDown);
@@ -2516,6 +2527,13 @@ function renderMidiKeyboardPanel() {
     key.addEventListener("pointercancel", onMidiKeyPointerEnd);
     key.addEventListener("lostpointercapture", onMidiKeyLostCapture);
   }
+  midiKeyboardPanel.querySelector(".keyboard-layout-toggle")?.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  midiKeyboardPanel.querySelector(".keyboard-layout-toggle")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleKeyboardWideLayout();
+  });
 }
 
 function getMidiKnobValue(binding) {
@@ -2612,6 +2630,7 @@ function renderBottomPanel() {
   bottomPanel.hidden = !showKeyboard && !showKnobs;
   midiKeyboardPanel.hidden = !showKeyboard;
   midiKnobPanel.hidden = !showKnobs;
+  appShell?.classList.toggle("keyboard-wide", showKeyboard && keyboardWideLayout);
   keyboardPanelButton?.classList.toggle("is-active", showKeyboard);
   keyboardPanelButton?.setAttribute("aria-pressed", String(showKeyboard));
   knobPanelButton?.classList.toggle("is-active", showKnobs);
@@ -2619,6 +2638,12 @@ function renderBottomPanel() {
 
   if (showKeyboard) renderMidiKeyboardPanel();
   if (showKnobs) renderMidiKnobPanel();
+}
+
+function toggleKeyboardWideLayout() {
+  keyboardWideLayout = !keyboardWideLayout;
+  renderBottomPanel();
+  onStageResize();
 }
 
 function toggleBottomPanel(panelName) {

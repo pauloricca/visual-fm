@@ -47,6 +47,32 @@ select {
   min-height: 620px;
 }
 
+.app-shell.keyboard-wide {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.app-shell.keyboard-wide .canvas-column {
+  display: contents;
+}
+
+.app-shell.keyboard-wide .stage {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+}
+
+.app-shell.keyboard-wide .bottom-panel {
+  --bottom-panel-row-height: clamp(168px, 26vh, 285px);
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+.app-shell.keyboard-wide .panel {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+}
+
 .canvas-column {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
@@ -931,14 +957,41 @@ select {
 .midi-keyboard-panel {
   display: flex;
   align-items: stretch;
-  padding: 16px 18px 18px;
+  gap: 10px;
+  padding: 16px 12px 18px 18px;
 }
 
 .midi-keyboard {
   position: relative;
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   height: 100%;
+}
+
+.keyboard-layout-toggle {
+  flex: 0 0 28px;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 100%;
+  border: 1px solid rgba(167, 176, 178, 0.55);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(167, 176, 178, 0.86);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.keyboard-layout-toggle:hover,
+.keyboard-layout-toggle:focus-visible {
+  border-color: rgba(167, 176, 178, 0.82);
+  color: var(--text);
+  outline: none;
 }
 
 .midi-key {
@@ -1993,6 +2046,11 @@ select {
     grid-template-rows: minmax(0, 1fr) 292px;
   }
 
+  .app-shell.keyboard-wide {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 42vw);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
   .canvas-column {
     min-height: 0;
   }
@@ -2002,6 +2060,11 @@ select {
     border-top: 1px solid rgba(255, 255, 255, 0.09);
   }
 
+  .app-shell.keyboard-wide .panel {
+    border-left: 1px solid rgba(255, 255, 255, 0.09);
+    border-top: 0;
+  }
+
   .settings-pair {
     grid-template-columns: 1fr;
     gap: 0;
@@ -2009,6 +2072,10 @@ select {
 
   .bottom-panel {
     --bottom-panel-row-height: 132px;
+  }
+
+  .app-shell.keyboard-wide .bottom-panel {
+    --bottom-panel-row-height: clamp(160px, 28vh, 230px);
   }
 
   .floating-controls {
@@ -2027,5 +2094,9 @@ select {
   .midi-knob-panel {
     padding-left: 12px;
     padding-right: 12px;
+  }
+
+  .midi-keyboard-panel {
+    padding-right: 10px;
   }
 }
