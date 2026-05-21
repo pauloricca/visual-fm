@@ -2440,6 +2440,15 @@ function noteName(note) {
   return `${QUANTISE_ROOT_NOTES[note % 12]}${octave}`;
 }
 
+function keyboardStartNoteOptions(selectedNote) {
+  const selected = Math.round(Number(selectedNote) || DEFAULT_KEYBOARD_START_NOTE);
+  const options = [];
+  for (let note = MIN_KEYBOARD_START_NOTE; note <= MAX_KEYBOARD_START_NOTE; note += 1) {
+    options.push(`<option value="${note}" ${note === selected ? "selected" : ""}>${noteName(note)}</option>`);
+  }
+  return options.join("");
+}
+
 function isBlackMidiNote(note) {
   return [1, 3, 6, 8, 10].includes(note % 12);
 }
@@ -4520,6 +4529,25 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }
 
+function bindKeyboardStartNoteControl() {
+  const select = panel.querySelector("#keyboardStartNote");
+  if (!select) return;
+
+  const commitValue = (rawValue) => {
+    const value = clamp(
+      Math.round(Number(rawValue) || DEFAULT_KEYBOARD_START_NOTE),
+      MIN_KEYBOARD_START_NOTE,
+      MAX_KEYBOARD_START_NOTE,
+    );
+    state.keyboardStartNote = value;
+    select.value = String(value);
+    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
+    savePatch();
+  };
+
+  select.addEventListener("change", (event) => commitValue(event.target.value));
+}
+
 function enhanceValueSlider(number, range, min, max, step) {
   if (!number || !range || range.dataset.valueSliderEnhanced) return;
 
@@ -5288,11 +5316,8 @@ function renderEmptyPanel() {
       </div>
       <div class="settings-pair">
         <div class="field">
-          <label for="keyboardStartNote">Start note</label>
-          <div class="field-row">
-            <input id="keyboardStartNoteRange" type="range" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
-            <input id="keyboardStartNote" type="number" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
-          </div>
+          <label for="keyboardStartNote">Keyboard start</label>
+          <select id="keyboardStartNote">${keyboardStartNoteOptions(state.keyboardStartNote)}</select>
         </div>
         <div class="field">
           <label for="keyboardLength">Length</label>
@@ -5391,11 +5416,7 @@ function renderEmptyPanel() {
     updateMidiStatus();
     savePatch();
   });
-  bindNumberPair("keyboardStartNote", "keyboardStartNoteRange", MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE, (value) => {
-    state.keyboardStartNote = Math.round(value);
-    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
-    savePatch();
-  });
+  bindKeyboardStartNoteControl();
   bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
     state.keyboardLength = Math.round(value);
     if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
