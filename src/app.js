@@ -27,7 +27,9 @@ import {
   MIN_MAX_VOICES,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
+  QUANTISE_MIDI_ROOT,
   QUANTISE_ROOT_NOTES,
+  QUANTISE_ROOT_OPTIONS,
   QUANTISE_SCALES,
   RECENT_MIDI_CC_WINDOW_MS,
   STORAGE_KEY,
@@ -42,6 +44,7 @@ import {
   normalizeCustomWave,
   normalizeDefaultPatch,
   normalizeFrequencyMode,
+  normalizeModulationTarget,
   normalizeNodeQuantise,
   normalizePatch,
   normalizeSignalMode,
@@ -62,15 +65,19 @@ const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
 const appTitle = document.querySelector("#appTitle");
+const patchTabs = document.querySelector("#patchTabs");
 const addNodeButton = document.querySelector("#addNodeButton");
 const recordButton = document.querySelector("#recordButton");
 const audioOut = document.querySelector("#audioOut");
 const audioStatus = document.querySelector("#audioStatus");
+const undoButton = document.querySelector("#undoButton");
+const redoButton = document.querySelector("#redoButton");
 const midiStatus = document.querySelector("#midiStatus");
 const audioStatusCaption = audioStatus?.querySelector(".control-caption");
 const recordButtonCaption = recordButton?.querySelector(".control-caption");
 const selectionRect = document.querySelector("#selectionRect");
 const fineSliderButton = document.querySelector("#fineSliderButton");
+const cloneModifierButton = document.querySelector("#cloneModifierButton");
 const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
 const knobPanelButton = document.querySelector("#knobPanelButton");
 const fullscreenButton = document.querySelector("#fullscreenButton");
@@ -79,6 +86,9 @@ const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
 const midiKnobPanel = document.querySelector("#midiKnobPanel");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
 const DEFAULT_AUDIO_BACKEND = "wasm";
+const MULTITOUCH_CAPABLE = (navigator.maxTouchPoints || navigator.msMaxTouchPoints || 0) >= 2
+  && window.matchMedia?.("(any-pointer: coarse)")?.matches;
+const PATCH_HISTORY_LIMIT = 80;
 const CANVAS_ZOOM_MIN = 0.35;
 const CANVAS_ZOOM_MAX = 2.5;
 const AUDIO_BACKENDS = {
@@ -177,13 +187,15 @@ async function toggleFullscreen() {
   }
 }
 
+const patchSession = loadPatchSession();
 const state = {
-  ...loadPatch(),
+  ...patchSession.activePatch,
   selected: { type: null, id: null },
 };
 
 let audioContext = null;
 let synthNode = null;
+const synthSlots = new Map();
 let outputGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
@@ -192,6 +204,7 @@ let audioOutputSinkElement = null;
 let audioOutputRouteError = "";
 let recorderDestination = null;
 let audioReadyPromise = null;
+let audioWorkletModulePromise = null;
 let mediaRecorder = null;
 let recordingChunks = [];
 let recordingStartedAt = null;
@@ -233,12 +246,18 @@ let suppressNextStageClick = false;
 let preserveSelectionAfterValueEditClick = false;
 let touchFineSliderPointerId = null;
 let keyboardFineSliderActive = false;
+let touchCloneModifierPointerId = null;
+let cloneModifierActive = false;
 const activeBottomPanels = {
   keyboard: false,
   knobs: false,
 };
 let availableAudioDevices = { inputs: [], outputs: [] };
 let patchLibrary = null;
+let patchSlots = patchSession.slots;
+let activePatchSlotId = patchSession.activeSlotId;
+const patchHistories = new Map();
+let suppressPatchHistory = false;
 const activeMidiKeyboardPointers = new Map();
 const midiKnobValues = new Map();
 
@@ -261,47 +280,129 @@ function nodeName(node) {
   return node?.name?.trim() || node?.id?.replace("op-", "Operator ") || "Operator";
 }
 
-function linkTargetKind(link) {
+function nodeByIdInPatch(patch, id) {
+  return patch.nodes.find((node) => node.id === id);
+}
+
+function linkByIdInPatch(patch, id) {
+  return patch.links.find((link) => link.id === id);
+}
+
+function linkTargetKind(link, patch = state) {
   if (!link) return "none";
   if (link.to === "audio") return "audio";
-  return linkById(link.to) ? "link" : "node";
+  return linkByIdInPatch(patch, link.to) ? "link" : "node";
 }
 
-function targetName(to, seen = new Set()) {
+function linkTargetKindForId(to) {
+  if (to === "audio") return "audio";
+  if (linkById(to)) return "link";
+  if (nodeById(to)) return "node";
+  return "none";
+}
+
+function defaultModulationTargetForTarget(to) {
+  return to === "audio" || linkById(to) ? "amplitude" : "phase";
+}
+
+function targetName(to, seen = new Set(), patch = state) {
   if (to === "audio") return "Audio Out";
-  const targetLink = linkById(to);
-  if (targetLink) return linkName(targetLink, seen);
-  return nodeName(nodeById(to));
+  const targetLink = linkByIdInPatch(patch, to);
+  if (targetLink) return linkName(targetLink, seen, patch);
+  return nodeName(nodeByIdInPatch(patch, to));
 }
 
-function linkName(link, seen = new Set()) {
+function linkName(link, seen = new Set(), patch = state) {
   if (!link) return "Link";
   if (seen.has(link.id)) return "Link";
   seen.add(link.id);
-  const name = `${nodeName(nodeById(link.from))} -> ${targetName(link.to, seen)}`;
+  const name = `${nodeName(nodeByIdInPatch(patch, link.from))} -> ${targetName(link.to, seen, patch)}`;
   seen.delete(link.id);
   return name;
 }
 
-function patchUsesAudioInput() {
-  return state.nodes.some((node) => node.wave === "audio-input");
+function patchDataUsesAudioInput(patch) {
+  return (patch?.nodes || []).some((node) => node.wave === "audio-input");
 }
 
-function loadPatch() {
+function patchUsesAudioInput() {
+  return patchDataUsesAudioInput(state);
+}
+
+function sessionUsesAudioInput() {
+  syncActivePatchSlot();
+  return patchSlots.some((slot) => patchDataUsesAudioInput(slot.patch));
+}
+
+function patchSlotUid() {
+  if (window.crypto?.randomUUID) return `slot-${window.crypto.randomUUID()}`;
+  return `slot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizePatchSlot(slot, fallbackPatch = null) {
+  const normalized = normalizePatch(slot?.patch || fallbackPatch || normalizeDefaultPatch());
+  return {
+    id: typeof slot?.id === "string" && slot.id.trim() ? slot.id : patchSlotUid(),
+    patch: normalized,
+  };
+}
+
+function loadPatchSession() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? normalizePatch(JSON.parse(saved)) : normalizeDefaultPatch();
+    if (!saved) {
+      const activePatch = normalizeDefaultPatch();
+      const slot = normalizePatchSlot(null, activePatch);
+      return { activePatch, slots: [slot], activeSlotId: slot.id };
+    }
+
+    const parsed = JSON.parse(saved);
+    if (Array.isArray(parsed?.patchSlots)) {
+      const slots = parsed.patchSlots.map((slot) => normalizePatchSlot(slot));
+      const safeSlots = slots.length ? slots : [normalizePatchSlot(null, normalizeDefaultPatch())];
+      const activeSlotId = safeSlots.some((slot) => slot.id === parsed.activePatchSlotId)
+        ? parsed.activePatchSlotId
+        : safeSlots[0].id;
+      const activePatch = clonePatch(safeSlots.find((slot) => slot.id === activeSlotId)?.patch || safeSlots[0].patch);
+      return { activePatch, slots: safeSlots, activeSlotId };
+    }
+
+    const activePatch = normalizePatch(parsed);
+    const slot = normalizePatchSlot(null, activePatch);
+    return { activePatch, slots: [slot], activeSlotId: slot.id };
   } catch {
-    return normalizeDefaultPatch();
+    const activePatch = normalizeDefaultPatch();
+    const slot = normalizePatchSlot(null, activePatch);
+    return { activePatch, slots: [slot], activeSlotId: slot.id };
   }
 }
 
 function savePatch() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchData()));
+    const nextPatch = clonePatch(currentPatchData());
+    recordPatchHistory(nextPatch);
+    syncActivePatchSlot();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchSessionData()));
+    syncHistoryButtons();
   } catch {
     // Storage can fail in private browsing or restricted contexts; the synth should keep running.
   }
+}
+
+function currentPatchSessionData() {
+  return {
+    version: 2,
+    activePatchSlotId,
+    patchSlots: patchSlots.map((slot) => ({
+      id: slot.id,
+      patch: slot.id === activePatchSlotId ? currentPatchData() : slot.patch,
+    })),
+  };
+}
+
+function syncActivePatchSlot() {
+  const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+  if (slot) slot.patch = clonePatch(currentPatchData());
 }
 
 function currentPatchData() {
@@ -323,6 +424,103 @@ function currentPatchData() {
   };
 }
 
+function patchHistoryForSlot(slotId = activePatchSlotId) {
+  let history = patchHistories.get(slotId);
+  if (!history) {
+    const patch = slotId === activePatchSlotId
+      ? currentPatchData()
+      : patchSlots.find((slot) => slot.id === slotId)?.patch || normalizeDefaultPatch();
+    history = {
+      undo: [],
+      redo: [],
+      current: clonePatch(patch),
+    };
+    patchHistories.set(slotId, history);
+  }
+  return history;
+}
+
+function patchDataEquals(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function resetPatchHistory(slotId, patch) {
+  patchHistories.set(slotId, {
+    undo: [],
+    redo: [],
+    current: clonePatch(patch),
+  });
+  syncHistoryButtons();
+}
+
+function recordPatchHistory(nextPatch) {
+  if (suppressPatchHistory) return;
+
+  const history = patchHistoryForSlot();
+  if (patchDataEquals(history.current, nextPatch)) return;
+
+  history.undo.push(clonePatch(history.current));
+  if (history.undo.length > PATCH_HISTORY_LIMIT) history.undo.shift();
+  history.redo = [];
+  history.current = clonePatch(nextPatch);
+}
+
+function persistPatchSession() {
+  try {
+    syncActivePatchSlot();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchSessionData()));
+  } catch {
+    // Storage can fail in private browsing or restricted contexts; the synth should keep running.
+  }
+}
+
+function applyPatchHistorySnapshot(patch) {
+  suppressPatchHistory = true;
+  applyPatchData(patch, { preserveSave: false });
+  persistPatchSession();
+  suppressPatchHistory = false;
+  syncHistoryButtons();
+}
+
+function undoPatch() {
+  flushPendingPatchSave();
+  const history = patchHistoryForSlot();
+  const previous = history.undo.pop();
+  if (!previous) return;
+
+  history.redo.push(clonePatch(history.current));
+  history.current = clonePatch(previous);
+  applyPatchHistorySnapshot(previous);
+}
+
+function redoPatch() {
+  flushPendingPatchSave();
+  const history = patchHistoryForSlot();
+  const next = history.redo.pop();
+  if (!next) return;
+
+  history.undo.push(clonePatch(history.current));
+  if (history.undo.length > PATCH_HISTORY_LIMIT) history.undo.shift();
+  history.current = clonePatch(next);
+  applyPatchHistorySnapshot(next);
+}
+
+function syncHistoryButtons() {
+  const history = patchHistoryForSlot();
+  if (undoButton) undoButton.disabled = history.undo.length === 0;
+  if (redoButton) redoButton.disabled = history.redo.length === 0;
+}
+
+function initializePatchHistories() {
+  for (const slot of patchSlots) {
+    patchHistories.set(slot.id, {
+      undo: [],
+      redo: [],
+      current: clonePatch(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
+    });
+  }
+}
+
 function syncCounters() {
   const maxNodeId = state.nodes.reduce((max, node) => {
     const match = /^op-(\d+)$/.exec(node.id);
@@ -342,11 +540,11 @@ function syncCounters() {
 }
 
 function nodeById(id) {
-  return state.nodes.find((node) => node.id === id);
+  return nodeByIdInPatch(state, id);
 }
 
 function linkById(id) {
-  return state.links.find((link) => link.id === id);
+  return linkByIdInPatch(state, id);
 }
 
 function nodeParameterDefinitions(node) {
@@ -416,7 +614,7 @@ function nodeParameterDefinitions(node) {
       id: "quantise.root",
       label: "Quantise root",
       type: "choice",
-      options: QUANTISE_ROOT_NOTES.map((value) => ({ value, label: value })),
+      options: QUANTISE_ROOT_OPTIONS.map((value) => ({ value, label: quantiseRootLabel(value) })),
       get: () => normalizeNodeQuantise(node.quantise).root,
       set: (value) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), root: value };
@@ -470,9 +668,9 @@ function nodeParameterDefinitions(node) {
   return definitions;
 }
 
-function linkParameterDefinitions(link) {
-  const targetNameLabel = targetName(link.to);
-  const modulationTargets = modulationTargetsForLink(link);
+function linkParameterDefinitions(link, patch = state) {
+  const targetNameLabel = targetName(link.to, new Set(), patch);
+  const modulationTargets = modulationTargetsForLink(link, patch);
   const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
   const definitions = [
     ...(modulationTargets.length ? [{
@@ -697,8 +895,8 @@ function hasEffectMidiParameter(effectId, parameter) {
     || effectParameterSpecs(effectId).some(([key]) => key === parameter);
 }
 
-function effectParameterDefinitions(effectId) {
-  const effect = state.masterEffects[effectId];
+function effectParameterDefinitions(effectId, patch = state) {
+  const effect = patch.masterEffects[effectId];
   if (!effect) return [];
 
   return [
@@ -725,22 +923,22 @@ function effectParameterDefinitions(effectId) {
   ];
 }
 
-function midiParameterDefinitions(targetType, targetId) {
+function midiParameterDefinitions(targetType, targetId, patch = state) {
   if (targetType === "effect") {
-    return effectParameterDefinitions(targetId);
+    return effectParameterDefinitions(targetId, patch);
   }
 
   if (targetType === "link") {
-    const link = linkById(targetId);
-    return link ? linkParameterDefinitions(link) : [];
+    const link = linkByIdInPatch(patch, targetId);
+    return link ? linkParameterDefinitions(link, patch) : [];
   }
 
-  const node = nodeById(targetId);
+  const node = nodeByIdInPatch(patch, targetId);
   return node ? nodeParameterDefinitions(node) : [];
 }
 
-function midiParameterDefinition(binding) {
-  return midiParameterDefinitions(binding.targetType, binding.targetId)
+function midiParameterDefinition(binding, patch = state) {
+  return midiParameterDefinitions(binding.targetType, binding.targetId, patch)
     .find((definition) => definition.id === binding.parameter);
 }
 
@@ -836,6 +1034,13 @@ function schedulePatchSave() {
   }, 180);
 }
 
+function flushPendingPatchSave() {
+  if (!pendingPatchSave) return;
+  clearTimeout(pendingPatchSave);
+  pendingPatchSave = null;
+  savePatch();
+}
+
 function midiBindingRange(binding, definition) {
   if (definition.type !== "number") return null;
   const min = Number.isFinite(Number(binding.min))
@@ -910,8 +1115,8 @@ function ccFromValue(definition, binding) {
   return 0;
 }
 
-function midiSmoothingKey(binding) {
-  return `${binding.targetType}:${binding.targetId}:${binding.parameter}`;
+function midiSmoothingKey(binding, slotId = activePatchSlotId) {
+  return `${slotId}:${binding.targetType}:${binding.targetId}:${binding.parameter}`;
 }
 
 function scheduleMidiCcSmoothing() {
@@ -919,8 +1124,9 @@ function scheduleMidiCcSmoothing() {
   pendingMidiCcSmoothingFrame = requestAnimationFrame(processMidiCcSmoothing);
 }
 
-function queueMidiCcSmoothing(binding, definition, targetValue) {
-  const key = midiSmoothingKey(binding);
+function queueMidiCcSmoothing(binding, definition, targetValue, options = {}) {
+  const slotId = options.slotId || activePatchSlotId;
+  const key = midiSmoothingKey(binding, slotId);
   const existing = midiCcSmoothing.get(key);
   const currentValue = Number(definition.get());
   const current = existing?.current ?? (Number.isFinite(currentValue) ? currentValue : targetValue);
@@ -931,6 +1137,7 @@ function queueMidiCcSmoothing(binding, definition, targetValue) {
     targetType: binding.targetType,
     targetId: binding.targetId,
     parameter: binding.parameter,
+    slotId,
     target: clamp(Number(targetValue), definition.min, definition.max),
     current,
     span: Math.max(0.000001, Math.abs(range.max - range.min)),
@@ -1008,11 +1215,13 @@ function updatePanelForMidiNumber(smoothing, value) {
 function processMidiCcSmoothing(timestamp) {
   pendingMidiCcSmoothingFrame = null;
   let changed = false;
+  const changedSlotIds = new Set();
   let shouldRenderNodesWhenSettled = false;
   let shouldRenderPanelWhenSettled = false;
 
   for (const [key, smoothing] of midiCcSmoothing) {
-    const definition = midiParameterDefinition(smoothing);
+    const patch = patchForSlotId(smoothing.slotId);
+    const definition = patch ? midiParameterDefinition(smoothing, patch) : null;
     if (!definition || definition.type !== "number") {
       midiCcSmoothing.delete(key);
       continue;
@@ -1028,20 +1237,27 @@ function processMidiCcSmoothing(timestamp) {
     smoothing.current = clamp(value, definition.min, definition.max);
     smoothing.lastTime = timestamp;
     definition.set(smoothing.current);
-    updatePanelForMidiNumber(smoothing, smoothing.current);
+    if (smoothing.slotId === activePatchSlotId) {
+      updatePanelForMidiNumber(smoothing, smoothing.current);
+    }
     changed = true;
+    changedSlotIds.add(smoothing.slotId);
 
     if (settled) {
       midiCcSmoothing.delete(key);
-      shouldRenderNodesWhenSettled = shouldRenderNodesWhenSettled || smoothing.targetType === "node";
-      shouldRenderPanelWhenSettled = shouldRenderPanelWhenSettled || midiBindingTouchesSelection(smoothing);
+      if (smoothing.slotId === activePatchSlotId) {
+        shouldRenderNodesWhenSettled = shouldRenderNodesWhenSettled || smoothing.targetType === "node";
+        shouldRenderPanelWhenSettled = shouldRenderPanelWhenSettled || midiBindingTouchesSelection(smoothing);
+      }
     }
   }
 
   if (changed) {
     if (shouldRenderNodesWhenSettled) renderNodes();
     if (shouldRenderPanelWhenSettled) renderPanel();
-    sendGraph({ immediate: true });
+    for (const slotId of changedSlotIds) {
+      postGraph(slotId, patchForSlotId(slotId));
+    }
     schedulePatchSave();
   }
 
@@ -1057,26 +1273,31 @@ function applyMidiCc(cc, value, options = {}) {
   const knobValue = clamp(Number(value) || 0, 0, 127);
   const smoothNumbers = options.smoothNumbers !== false;
   const flashTargets = options.flashTargets !== false;
+  const patch = options.patch || state;
+  const slotId = options.slotId || activePatchSlotId;
+  const updateUi = options.updateUi !== false && slotId === activePatchSlotId;
 
-  for (const binding of state.midiBindings) {
+  for (const binding of patch.midiBindings) {
     if (binding.cc !== cc) continue;
-    midiKnobValues.set(binding.id, knobValue);
-    syncMidiKnobElement(binding.id, knobValue);
-    if (flashTargets) {
+    if (updateUi) {
+      midiKnobValues.set(binding.id, knobValue);
+      syncMidiKnobElement(binding.id, knobValue);
+    }
+    if (updateUi && flashTargets) {
       flashMidiBindingItem(binding.id);
       flashMidiCanvasTarget(binding);
     }
 
-    const definition = midiParameterDefinition(binding);
+    const definition = midiParameterDefinition(binding, patch);
     if (!definition) continue;
 
     const nextValue = valueFromCc(definition, value, binding);
     if (definition.type === "number") {
       if (smoothNumbers) {
-        queueMidiCcSmoothing(binding, definition, nextValue);
+        queueMidiCcSmoothing(binding, definition, nextValue, { slotId });
       } else {
         definition.set(nextValue);
-        updatePanelForMidiNumber(binding, nextValue);
+        if (updateUi) updatePanelForMidiNumber(binding, nextValue);
         immediateChanged = true;
       }
       continue;
@@ -1084,15 +1305,17 @@ function applyMidiCc(cc, value, options = {}) {
 
     definition.set(nextValue);
     immediateChanged = true;
-    shouldRenderNodes = shouldRenderNodes || binding.targetType === "node";
-    shouldRenderPanel = shouldRenderPanel || midiBindingTouchesSelection(binding);
+    if (updateUi) {
+      shouldRenderNodes = shouldRenderNodes || binding.targetType === "node";
+      shouldRenderPanel = shouldRenderPanel || midiBindingTouchesSelection(binding);
+    }
   }
 
   if (!immediateChanged) return;
 
   if (shouldRenderNodes) renderNodes();
   if (shouldRenderPanel) renderPanel();
-  sendGraph();
+  postGraph(slotId, patch);
   schedulePatchSave();
 }
 
@@ -1168,7 +1391,7 @@ function removeNodeFromSelection(id) {
   selectNodes(selectedNodeIds().filter((selectedId) => selectedId !== id));
 }
 
-function duplicateNodes(ids) {
+function duplicateNodes(ids, { selectCopies = true, sync = true } = {}) {
   const uniqueIds = [...new Set(ids)].filter((id) => nodeById(id));
   const idMap = new Map();
   const copies = uniqueIds.map((id) => {
@@ -1209,10 +1432,12 @@ function duplicateNodes(ids) {
 
   state.nodes.push(...copies);
   state.links.push(...links, ...linkTargetLinks);
-  selectNodes(copies.map((node) => node.id));
-  sendGraph();
-  savePatch();
-  return { copies, idMap };
+  if (selectCopies) selectNodes(copies.map((node) => node.id));
+  if (sync) {
+    sendGraph();
+    savePatch();
+  }
+  return { copies, idMap, links: [...links, ...linkTargetLinks] };
 }
 
 function canvasPointFromStageOffset(x, y) {
@@ -1283,7 +1508,62 @@ function releaseStagePointer(pointerId) {
 }
 
 function isPrimaryDragPointer(event) {
-  return event.isPrimary || !event.pointerType || event.pointerType === "mouse";
+  return event.isPrimary || !event.pointerType || event.pointerType === "mouse" || (event.pointerType === "touch" && cloneModifierActive);
+}
+
+function isAltModifierActive(event) {
+  return Boolean(cloneModifierActive || event.altKey || event.getModifierState?.("Alt"));
+}
+
+function syncRelinkDuplicateModifier(event) {
+  if (!linkDrag || linkDrag.mode !== "relink" || event.key !== "Alt") return;
+  const duplicate = isAltModifierActive(event);
+  if (linkDrag.duplicate === duplicate) return;
+  linkDrag.duplicate = duplicate;
+  scheduleWiresRender();
+}
+
+function syncNodeDragDuplicateModifier(event = {}) {
+  if (!dragState || event.key && event.key !== "Alt") return;
+  setNodeDragDuplicateActive(isAltModifierActive(event));
+}
+
+function syncCloneModifierButton() {
+  cloneModifierButton?.classList.toggle("is-active", cloneModifierActive);
+  cloneModifierButton?.setAttribute("aria-pressed", String(cloneModifierActive));
+}
+
+function syncTouchModifierControlsVisibility() {
+  if (fineSliderButton) fineSliderButton.hidden = !MULTITOUCH_CAPABLE;
+  if (cloneModifierButton) cloneModifierButton.hidden = !MULTITOUCH_CAPABLE;
+  if (!MULTITOUCH_CAPABLE) {
+    releaseTouchFineSlider();
+    releaseTouchCloneModifier();
+  }
+}
+
+function setCloneModifierActive(active) {
+  if (cloneModifierActive === active) return;
+  cloneModifierActive = active;
+  syncCloneModifierButton();
+  if (linkDrag?.mode === "relink") {
+    linkDrag.duplicate = isAltModifierActive({});
+    scheduleWiresRender();
+  }
+  syncNodeDragDuplicateModifier();
+}
+
+function releaseTouchCloneModifier(pointerId = touchCloneModifierPointerId) {
+  if (pointerId === null) return;
+  if (touchCloneModifierPointerId !== pointerId) return;
+  try {
+    cloneModifierButton?.releasePointerCapture?.(pointerId);
+  } catch {
+    // Pointer capture can already be gone after touch cancellation.
+  }
+  touchCloneModifierPointerId = null;
+  setCloneModifierActive(false);
+  cloneModifierButton?.blur();
 }
 
 function nodeOutputPoint(id) {
@@ -1386,9 +1666,9 @@ function linkGeometry(link, visited = new Set(), context = null) {
   return { from, to, path, midpoint };
 }
 
-function graphPayload() {
+function graphPayload(patch = state) {
   return {
-    nodes: state.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave }) => ({
+    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave }) => ({
       id,
       wave,
       frequencyMode,
@@ -1399,7 +1679,7 @@ function graphPayload() {
       audioInputGain,
       customWave: normalizeCustomWave(customWave),
     })),
-    links: state.links.map((link) => ({
+    links: patch.links.map((link) => ({
       id: link.id,
       from: link.from,
       to: link.to,
@@ -1416,21 +1696,26 @@ function graphPayload() {
       distortion: { ...(link.distortion || DEFAULT_LINK_DISTORTION) },
       envelope: { ...link.envelope },
     })),
-    maxVoices: state.maxVoices,
-    masterEffects: state.masterEffects,
+    maxVoices: patch.maxVoices,
+    masterEffects: patch.masterEffects,
   };
 }
 
-function postGraph() {
-  if (!synthNode) return;
-  synthNode.port.postMessage({
+function activeSynthSlot() {
+  return synthSlots.get(activePatchSlotId) || null;
+}
+
+function postGraph(slotId = activePatchSlotId, patch = state) {
+  const slot = synthSlots.get(slotId);
+  if (!slot?.node || !patch) return;
+  slot.node.port.postMessage({
     type: "graph",
-    payload: graphPayload(),
+    payload: graphPayload(patch),
   });
 }
 
 function sendGraph({ immediate = false } = {}) {
-  if (!synthNode) return;
+  if (!activeSynthSlot()) return;
 
   if (immediate) {
     if (pendingGraphFrame) {
@@ -1519,6 +1804,7 @@ function connectOutputRoute(destination) {
   if (!outputGainNode || !destination) return;
   disconnectOutputRoutes();
   outputGainNode.connect(destination);
+  if (recorderDestination) outputGainNode.connect(recorderDestination);
 }
 
 function stopOutputSinkElement() {
@@ -1590,11 +1876,21 @@ async function syncAudioOutputDevice() {
 }
 
 function sendLinkParam(id, parameter, value) {
-  synthNode?.port.postMessage({
+  activeSynthSlot()?.node.port.postMessage({
     type: "linkParam",
     payload: { id, parameter, value },
   });
   scheduleLinkParamGraphSync();
+}
+
+function panicSynths(slotId = null) {
+  if (slotId) {
+    synthSlots.get(slotId)?.node.port.postMessage({ type: "panic" });
+    return;
+  }
+  for (const slot of synthSlots.values()) {
+    slot.node.port.postMessage({ type: "panic" });
+  }
 }
 
 function scheduleLinkMeterPaint() {
@@ -1606,13 +1902,17 @@ function scheduleLinkMeterPaint() {
   });
 }
 
-function handleWorkletMessage(event) {
+function handleWorkletMessageForSlot(slotId, event) {
   const { type, payload } = event.data || {};
   if (type === "backendStatus") {
-    audioBackendStatus = payload || { backend: audioBackend, ready: false };
+    const slot = synthSlots.get(slotId);
+    if (slot) slot.status = payload || { backend: audioBackend, ready: false };
+    const activeStatus = activeSynthSlot()?.status;
+    audioBackendStatus = activeStatus || payload || { backend: audioBackend, ready: false };
     updateAudioStatus();
     return;
   }
+  if (slotId !== activePatchSlotId) return;
   if (type !== "linkMeters" || !Array.isArray(payload?.levels)) return;
 
   for (const [id, inputLevel, outputLevel, envelopeLevel] of payload.levels) {
@@ -1623,6 +1923,10 @@ function handleWorkletMessage(event) {
     });
   }
   scheduleLinkMeterPaint();
+}
+
+function handleWorkletMessage(event) {
+  handleWorkletMessageForSlot(activePatchSlotId, event);
 }
 
 function updateSelectedLinkMeter() {
@@ -1793,7 +2097,12 @@ async function setupAudio() {
 
   await resumeAudioContext();
 
-  if (!synthNode) {
+  if (!outputGainNode) {
+    outputGainNode = audioContext.createGain();
+    syncOutputMute();
+  }
+
+  if (!audioWorkletModulePromise) {
     if (!audioContext.audioWorklet?.addModule) {
       throw new Error("AudioWorklet is not supported in this browser.");
     }
@@ -1801,31 +2110,20 @@ async function setupAudio() {
     audioBackendStatus = audioBackend === "wasm"
       ? { backend: "wasm", ready: false }
       : { backend: "js", ready: true };
-    await audioContext.audioWorklet.addModule(backend.moduleUrl);
-    const processorOptions = await backend.processorOptions?.() || {};
-    synthNode = new AudioWorkletNode(audioContext, backend.processorName, {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      inputChannelCount: [2],
-      outputChannelCount: [2],
-      processorOptions,
-    });
-    outputGainNode = audioContext.createGain();
-    syncOutputMute();
-    synthNode.connect(outputGainNode);
-    synthNode.port.onmessage = handleWorkletMessage;
-    sendGraph({ immediate: true });
+    audioWorkletModulePromise = audioContext.audioWorklet.addModule(backend.moduleUrl);
   }
+  await audioWorkletModulePromise;
+  await ensureSynthSlots();
 
-  if (synthNode && !recorderDestination) {
+  if (outputGainNode && !recorderDestination) {
     recorderDestination = audioContext.createMediaStreamDestination();
-    synthNode.connect(recorderDestination);
+    outputGainNode.connect(recorderDestination);
   }
 
   await resumeAudioContext();
   await syncAudioOutputDevice();
   let inputBlocked = false;
-  if (patchUsesAudioInput()) {
+  if (sessionUsesAudioInput()) {
     try {
       await ensureAudioInput();
     } catch {
@@ -1837,8 +2135,58 @@ async function setupAudio() {
   updateAudioStatus({ inputBlocked });
 }
 
+async function ensureSynthSlots() {
+  syncActivePatchSlot();
+  for (const slot of patchSlots) {
+    await ensureSynthSlot(slot);
+  }
+
+  for (const [slotId, synthSlot] of synthSlots) {
+    if (patchSlots.some((slot) => slot.id === slotId)) continue;
+    try {
+      synthSlot.node.disconnect();
+    } catch {
+      // The node may already be disconnected.
+    }
+    synthSlots.delete(slotId);
+  }
+
+  synthNode = activeSynthSlot()?.node || null;
+}
+
+async function ensureSynthSlot(slot) {
+  if (!audioContext || !outputGainNode) return null;
+  const existing = synthSlots.get(slot.id);
+  if (existing) {
+    postGraph(slot.id, slot.patch);
+    return existing;
+  }
+
+  const backend = AUDIO_BACKENDS[audioBackend] || AUDIO_BACKENDS.js;
+  const processorOptions = await backend.processorOptions?.() || {};
+  const node = new AudioWorkletNode(audioContext, backend.processorName, {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    inputChannelCount: [2],
+    outputChannelCount: [2],
+    processorOptions,
+  });
+  const synthSlot = { id: slot.id, node, status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true } };
+  synthSlots.set(slot.id, synthSlot);
+  node.connect(outputGainNode);
+  node.port.onmessage = (event) => handleWorkletMessageForSlot(slot.id, event);
+  if (audioInputSource) audioInputSource.connect(node);
+  postGraph(slot.id, slot.patch);
+  if (slot.id === activePatchSlotId) {
+    synthNode = node;
+    audioBackendStatus = synthSlot.status;
+    updateAudioStatus();
+  }
+  return synthSlot;
+}
+
 async function ensureAudioInput() {
-  if (audioInputSource || !audioContext || !synthNode) return;
+  if (audioInputSource || !audioContext || !synthSlots.size) return;
   if (!navigator.mediaDevices?.getUserMedia) {
     setAudioStatusLabel("Audio input unavailable");
     throw new Error("Audio input unavailable");
@@ -1856,7 +2204,9 @@ async function ensureAudioInput() {
 
   audioInputStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   audioInputSource = audioContext.createMediaStreamSource(audioInputStream);
-  audioInputSource.connect(synthNode);
+  for (const slot of synthSlots.values()) {
+    audioInputSource.connect(slot.node);
+  }
   refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 }
 
@@ -1868,13 +2218,13 @@ function stopAudioInput() {
 }
 
 async function reconcileAudioInput() {
-  if (!patchUsesAudioInput()) {
+  if (!sessionUsesAudioInput()) {
     stopAudioInput();
     updateAudioStatus();
     return;
   }
 
-  if (!audioContext || !synthNode) return;
+  if (!audioContext || !synthSlots.size) return;
 
   try {
     await ensureAudioInput();
@@ -2045,14 +2395,44 @@ function toggleRecording() {
   }
 }
 
-function noteOn(note, velocity = 1) {
+function patchMatchesMidiEvent(patch, eventMeta = {}) {
+  const inputId = eventMeta.inputId || "keyboard";
+  const channel = eventMeta.channel || "keyboard";
+  const patchInputId = patch.midiInputId || "all";
+  const patchChannel = patch.midiChannel || "all";
+  const inputMatches = inputId === "keyboard" || patchInputId === "all" || patchInputId === inputId;
+  const channelMatches = channel === "keyboard" || patchChannel === "all" || Number(patchChannel) === Number(channel);
+  return inputMatches && channelMatches;
+}
+
+function patchForSlotId(slotId) {
+  if (slotId === activePatchSlotId) return state;
+  return patchSlots.find((slot) => slot.id === slotId)?.patch || null;
+}
+
+function matchingPatchSlots(eventMeta = {}) {
+  syncActivePatchSlot();
+  return patchSlots.filter((slot) => patchMatchesMidiEvent(slot.patch, eventMeta));
+}
+
+function matchingSynthSlots(eventMeta = {}) {
+  return matchingPatchSlots(eventMeta)
+    .map((slot) => synthSlots.get(slot.id))
+    .filter(Boolean);
+}
+
+function noteOn(note, velocity = 1, eventMeta = {}) {
   ensureAudio().then(() => {
-    synthNode?.port.postMessage({ type: "noteOn", payload: { note, velocity } });
+    for (const slot of matchingSynthSlots(eventMeta)) {
+      slot.node.port.postMessage({ type: "noteOn", payload: { note, velocity } });
+    }
   });
 }
 
-function noteOff(note) {
-  synthNode?.port.postMessage({ type: "noteOff", payload: { note } });
+function noteOff(note, eventMeta = {}) {
+  for (const slot of matchingSynthSlots(eventMeta)) {
+    slot.node.port.postMessage({ type: "noteOff", payload: { note } });
+  }
 }
 
 function noteName(note) {
@@ -2280,23 +2660,29 @@ async function setupMidi() {
     midiAccess = midi;
     const wireInput = (input) => {
       input.onmidimessage = (event) => {
-        if (!isMidiInputSelected(input)) return;
-
         const [status, data1, value] = event.data;
         const command = status & 0xf0;
         const channel = (status & 0x0f) + 1;
-        if (state.midiChannel !== "all" && channel !== Number(state.midiChannel)) {
+        const eventMeta = { inputId: input.id, channel };
+        const matchedSlots = matchingPatchSlots(eventMeta);
+        if (!matchedSlots.length) {
           return;
         }
 
         if (command === 0x90 && value > 0) {
-          noteOn(data1, value / 127);
+          noteOn(data1, value / 127, eventMeta);
         } else if (command === 0x80 || (command === 0x90 && value === 0)) {
-          noteOff(data1);
+          noteOff(data1, eventMeta);
         } else if (command === 0xb0) {
           recordRecentMidiCc(data1, value);
           capturePendingMidiCc(data1);
-          applyMidiCc(data1, value);
+          for (const slot of matchedSlots) {
+            applyMidiCc(data1, value, {
+              slotId: slot.id,
+              patch: slot.id === activePatchSlotId ? state : slot.patch,
+              updateUi: slot.id === activePatchSlotId,
+            });
+          }
         }
       };
     };
@@ -2374,7 +2760,11 @@ function renderAudioOut() {
 }
 
 function renderWires() {
+  const selectedLinkId = state.selected.type === "link" ? state.selected.id : null;
   stage.classList.toggle("link-dragging", Boolean(linkDrag));
+  stage.classList.toggle("link-selected", Boolean(selectedLinkId));
+  stage.classList.toggle("link-relinking-start", linkDrag?.mode === "relink" && linkDrag.endpoint === "start");
+  stage.classList.toggle("link-relinking-end", linkDrag?.mode === "relink" && linkDrag.endpoint === "end");
   wireLayer.innerHTML = "";
   const geometryContext = {};
   const defs = state.linkSignalGradientMeters
@@ -2383,6 +2773,8 @@ function renderWires() {
   if (defs) wireLayer.appendChild(defs);
 
   for (const link of state.links) {
+    if (linkDrag?.mode === "relink" && !linkDrag.duplicate && linkDrag.sourceLinkId === link.id) continue;
+
     const geometry = linkGeometry(link, new Set(), geometryContext);
     if (!geometry) continue;
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -2391,12 +2783,13 @@ function renderWires() {
       ? document.createElementNS("http://www.w3.org/2000/svg", "path")
       : null;
     const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const selected = selectedLinkId === link.id;
     const anchor = document.createElementNS("http://www.w3.org/2000/svg", "g");
     const anchorHit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     const anchorDot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
 
     visible.setAttribute("d", geometry.path);
-    visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${link.from === link.to ? "feedback" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    visible.setAttribute("class", `wire ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${link.from === link.to ? "feedback" : ""} ${selected ? "selected" : ""}`);
     if (defs) {
       const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
       const inputStop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
@@ -2428,7 +2821,7 @@ function renderWires() {
 
     if (flow) {
       flow.setAttribute("d", geometry.path);
-      flow.setAttribute("class", `wire-flow ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+      flow.setAttribute("class", `wire-flow ${link.to === "audio" ? "output" : ""} ${linkById(link.to) ? "link-mod" : ""} ${selected ? "selected" : ""}`);
       flow.style.stroke = `url(#${wireMeterGradientId(link.id)})`;
     }
 
@@ -2436,7 +2829,10 @@ function renderWires() {
     hit.setAttribute("class", "wire-hit");
     hit.dataset.linkId = link.id;
 
-    anchor.setAttribute("class", `link-anchor input ${state.selected.type === "link" && state.selected.id === link.id ? "selected" : ""}`);
+    const invalidRelinkInput = linkDrag?.mode === "relink"
+      && linkDrag.endpoint === "end"
+      && (linkDrag.sourceLinkId === link.id || linkTargetWouldCycle(linkDrag.sourceLinkId, link.id));
+    anchor.setAttribute("class", `link-anchor input ${selected ? "selected" : ""} ${invalidRelinkInput ? "relink-disabled" : ""}`);
     anchor.dataset.linkId = link.id;
     anchor.dataset.midiTargetType = "link";
     anchor.dataset.midiTargetId = link.id;
@@ -2453,13 +2849,42 @@ function renderWires() {
     group.append(visible);
     if (flow) group.appendChild(flow);
     group.append(hit, anchor);
+
+    if (selected) {
+      const endpointHandles = [
+        { endpoint: "start", point: geometry.from },
+        { endpoint: "end", point: geometry.to },
+      ].map(({ endpoint, point }) => {
+        const handle = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        const handleHit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        const handleDot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        handle.setAttribute("class", `link-endpoint ${endpoint}`);
+        handle.dataset.linkId = link.id;
+        handle.dataset.linkEndpoint = endpoint;
+        handleHit.setAttribute("cx", point.x);
+        handleHit.setAttribute("cy", point.y);
+        handleHit.setAttribute("r", "24");
+        handleHit.setAttribute("class", "link-endpoint-hit");
+        handleDot.setAttribute("cx", point.x);
+        handleDot.setAttribute("cy", point.y);
+        handleDot.setAttribute("r", "9");
+        handleDot.setAttribute("class", "link-endpoint-dot");
+        handle.append(handleHit, handleDot);
+        return handle;
+      });
+      group.append(...endpointHandles);
+    }
+
     wireLayer.appendChild(group);
     if (defs) updateWireSignalMeter(link);
   }
 
   if (linkDrag) {
     const preview = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    preview.setAttribute("d", bezierPath(nodeOutputPoint(linkDrag.from), linkDrag.to));
+    const from = linkDrag.endpoint === "start" ? linkDrag.to : nodeOutputPoint(linkDrag.from);
+    const to = linkDrag.endpoint === "start" ? linkEndpointPoint(linkDrag.fixedTo) : linkDrag.to;
+    if (!from || !to) return;
+    preview.setAttribute("d", bezierPath(from, to));
     preview.setAttribute("class", "wire selected wire-preview");
     preview.setAttribute("stroke-dasharray", "7 7");
     wireLayer.appendChild(preview);
@@ -2523,11 +2948,12 @@ function drawAdsr(envelope) {
   `;
 }
 
-function panelRemoveAction(label) {
+function panelRemoveAction(label, text = "Remove", id = "") {
+  const idAttribute = id ? ` id="${escapeHtml(id)}"` : "";
   return `
     <div class="panel-remove-footer">
-      <button class="panel-remove-action" type="button" aria-label="${escapeHtml(label)}">
-        Remove
+      <button class="panel-remove-action" type="button"${idAttribute} aria-label="${escapeHtml(label)}">
+        ${escapeHtml(text)}
       </button>
     </div>
   `;
@@ -2578,7 +3004,7 @@ function renderPanel() {
       <div class="field">
         ${parameterLabel("quantiseRoot", "Root", "node", node.id, "quantise.root")}
         <select id="quantiseRoot">
-          ${QUANTISE_ROOT_NOTES.map((root) => `<option value="${root}" ${quantise.root === root ? "selected" : ""}>${root}</option>`).join("")}
+          ${QUANTISE_ROOT_OPTIONS.map((root) => `<option value="${root}" ${quantise.root === root ? "selected" : ""}>${quantiseRootLabel(root)}</option>`).join("")}
         </select>
       </div>
       <div class="field">
@@ -3219,6 +3645,11 @@ async function fetchSavedPatches() {
 }
 
 async function loadSavedPatch(patchName, timestamp) {
+  const patch = await fetchSavedPatchData(patchName, timestamp);
+  applyPatchData(patch);
+}
+
+async function fetchSavedPatchData(patchName, timestamp) {
   const response = await fetch(`/api/patches/${encodeURIComponent(patchName)}/${encodeURIComponent(timestamp)}`, {
     cache: "no-store",
   });
@@ -3232,14 +3663,16 @@ async function loadSavedPatch(patchName, timestamp) {
     }
     throw new Error(error || `Could not load patch (${response.status}).`);
   }
-  applyPatchData(parsePatchFile(text));
+  return parsePatchFile(text);
 }
 
-async function openPatchLibrary() {
+async function openPatchLibrary(options = {}) {
   patchLibrary = {
+    mode: options.mode === "new-slot" ? "new-slot" : "replace",
     patches: [],
     selectedPatchName: null,
     selectedTimestamp: null,
+    newPatchName: nextUntitledPatchName(),
     loading: true,
     error: "",
   };
@@ -3247,11 +3680,13 @@ async function openPatchLibrary() {
 
   try {
     const patches = await fetchSavedPatches();
+    if (!patchLibrary) return;
     patchLibrary.patches = patches;
     patchLibrary.selectedPatchName = patches[0]?.name || null;
     patchLibrary.selectedTimestamp = patches[0]?.timestamps?.[0] || null;
     patchLibrary.loading = false;
   } catch (error) {
+    if (!patchLibrary) return;
     patchLibrary.loading = false;
     patchLibrary.error = error.message;
   }
@@ -3280,6 +3715,8 @@ function renderPatchLibraryModal() {
   const selectedPatch = patchLibrary.patches.find((patch) => patch.name === patchLibrary.selectedPatchName);
   const timestamps = selectedPatch?.timestamps || [];
   const canLoad = Boolean(patchLibrary.selectedPatchName && patchLibrary.selectedTimestamp);
+  const isNewSlotMode = patchLibrary.mode === "new-slot";
+  const newPatchName = patchLibrary.newPatchName || "Untitled Patch";
   const patchRows = patchLibrary.patches.length
     ? patchLibrary.patches.map((patch) => `
       <button
@@ -3307,10 +3744,19 @@ function renderPatchLibraryModal() {
   backdrop.innerHTML = `
     <div class="modal patch-library-modal" role="dialog" aria-modal="true" aria-labelledby="patchLibraryTitle">
       <div class="patch-library-heading">
-        <h2 id="patchLibraryTitle">Load Patch</h2>
+        <h2 id="patchLibraryTitle">${isNewSlotMode ? "Add Patch Tab" : "Load Patch"}</h2>
         <button class="icon-button compact" id="closePatchLibraryButton" type="button" aria-label="Close" title="Close">x</button>
       </div>
       ${patchLibrary.error ? `<p class="modal-error">${escapeHtml(patchLibrary.error)}</p>` : ""}
+      ${isNewSlotMode ? `
+        <section class="patch-library-new">
+          <h3>New patch</h3>
+          <div class="patch-library-new-row">
+            <input id="newPatchTabName" type="text" value="${escapeHtml(newPatchName)}" autocomplete="off" aria-label="New patch name">
+            <button class="text-button primary" id="createPatchTabButton" type="button">Create</button>
+          </div>
+        </section>
+      ` : ""}
       ${patchLibrary.loading ? `<p class="patch-library-empty">Loading saved patches...</p>` : `
         <div class="patch-library-grid">
           <section class="patch-library-column" aria-label="Patch names">
@@ -3332,6 +3778,15 @@ function renderPatchLibraryModal() {
 
   backdrop.querySelector("#closePatchLibraryButton").addEventListener("click", closePatchLibrary);
   backdrop.querySelector("#cancelPatchLibraryButton").addEventListener("click", closePatchLibrary);
+  backdrop.querySelector("#newPatchTabName")?.addEventListener("input", (event) => {
+    patchLibrary.newPatchName = event.target.value;
+  });
+  backdrop.querySelector("#newPatchTabName")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    createPatchSlotFromDefault();
+  });
+  backdrop.querySelector("#createPatchTabButton")?.addEventListener("click", createPatchSlotFromDefault);
   backdrop.querySelectorAll("[data-patch-name]").forEach((button) => {
     button.addEventListener("click", () => {
       const patchName = button.dataset.patchName;
@@ -3352,7 +3807,12 @@ function renderPatchLibraryModal() {
     event.currentTarget.disabled = true;
     event.currentTarget.textContent = "Loading";
     try {
-      await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
+      if (patchLibrary.mode === "new-slot") {
+        const patch = await fetchSavedPatchData(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
+        addPatchSlot(patch);
+      } else {
+        await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
+      }
       closePatchLibrary();
     } catch (error) {
       patchLibrary.error = error.message;
@@ -3367,7 +3827,95 @@ function formatSavedPatchTimestamp(timestamp) {
   return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}${match[7] || ""}`;
 }
 
-function applyPatchData(patch) {
+function nextUntitledPatchName() {
+  const base = "Untitled Patch";
+  const names = new Set(patchSlots.map((slot) => slot.patch.patchName));
+  if (!names.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!names.has(candidate)) return candidate;
+  }
+  return `${base} ${patchSlots.length + 1}`;
+}
+
+function addPatchSlot(patch) {
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  const slot = normalizePatchSlot(null, patch);
+  patchSlots.push(slot);
+  resetPatchHistory(slot.id, slot.patch);
+  switchPatchSlot(slot.id);
+  if (audioContext) {
+    ensureSynthSlot(slot)
+      .then(() => reconcileAudioInput())
+      .catch((error) => console.warn("Could not start patch tab audio", error));
+  }
+  savePatch();
+}
+
+function createPatchSlotFromDefault() {
+  const normalized = normalizeDefaultPatch();
+  normalized.patchName = (patchLibrary?.newPatchName || "").trim() || nextUntitledPatchName();
+  addPatchSlot(normalized);
+  closePatchLibrary();
+}
+
+function switchPatchSlot(slotId) {
+  if (slotId === activePatchSlotId) return;
+  const slot = patchSlots.find((item) => item.id === slotId);
+  if (!slot) return;
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  activePatchSlotId = slot.id;
+  synthNode = activeSynthSlot()?.node || null;
+  audioBackendStatus = activeSynthSlot()?.status || audioBackendStatus;
+  applyPatchData(slot.patch, { preserveSave: false });
+  savePatch();
+}
+
+function disconnectSynthSlot(slotId) {
+  const synthSlot = synthSlots.get(slotId);
+  if (!synthSlot) return;
+  try {
+    audioInputSource?.disconnect(synthSlot.node);
+  } catch {
+    // The input source may not have been connected to this node.
+  }
+  try {
+    synthSlot.node.disconnect();
+  } catch {
+    // The node may already be disconnected.
+  }
+  synthSlots.delete(slotId);
+}
+
+function removeActivePatchSlot() {
+  if (patchSlots.length <= 1) return;
+
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  const index = patchSlots.findIndex((slot) => slot.id === activePatchSlotId);
+  if (index === -1) return;
+
+  const removed = patchSlots[index];
+  const name = removed.patch.patchName?.trim() || "Untitled Patch";
+  if (!confirm(`Remove "${name}" from this set? Saved patch files will not be deleted.`)) {
+    return;
+  }
+
+  const nextSlot = patchSlots[index + 1] || patchSlots[index - 1];
+  patchSlots.splice(index, 1);
+  patchHistories.delete(removed.id);
+  disconnectSynthSlot(removed.id);
+  activePatchSlotId = nextSlot.id;
+  synthNode = activeSynthSlot()?.node || null;
+  audioBackendStatus = activeSynthSlot()?.status || audioBackendStatus;
+  applyPatchData(nextSlot.patch, { preserveSave: false });
+  reconcileAudioInput();
+  savePatch();
+}
+
+function applyPatchData(patch, options = {}) {
   const normalized = normalizePatch(patch);
   state.patchName = normalized.patchName;
   state.maxVoices = normalized.maxVoices;
@@ -3386,7 +3934,7 @@ function applyPatchData(patch) {
   state.selected = { type: null, id: null };
   midiKnobValues.clear();
   syncCounters();
-  synthNode?.port.postMessage({ type: "panic" });
+  panicSynths(activePatchSlotId);
   pressedKeys.clear();
   updateMidiStatus();
   render();
@@ -3395,7 +3943,7 @@ function applyPatchData(patch) {
     .then(() => reconcileAudioInput())
     .then(() => updateAudioStatus())
     .catch(() => updateAudioStatus({ inputBlocked: true }));
-  savePatch();
+  if (options.preserveSave !== false) savePatch();
 }
 
 function newPatch() {
@@ -3428,7 +3976,7 @@ function newPatch() {
   state.selected = { type: null, id: null };
   midiKnobValues.clear();
   syncCounters();
-  synthNode?.port.postMessage({ type: "panic" });
+  panicSynths(activePatchSlotId);
   pressedKeys.clear();
   updateMidiStatus();
   render();
@@ -3503,6 +4051,10 @@ function quantiseScaleLabel(scale) {
     "harmonic-minor": "Harmonic minor",
   };
   return labels[scale] || scale;
+}
+
+function quantiseRootLabel(root) {
+  return root === QUANTISE_MIDI_ROOT ? "midi note" : root;
 }
 
 function waveTypeLabel(type) {
@@ -3895,16 +4447,16 @@ function envelopeMeter(linkId) {
   `;
 }
 
-function modulationTargetsForLink(link) {
-  const kind = linkTargetKind(link);
+function modulationTargetsForLink(link, patch = state) {
+  const kind = linkTargetKind(link, patch);
   if (kind === "link") {
-    const targetLink = linkById(link.to);
+    const targetLink = linkByIdInPatch(patch, link.to);
     return linkHasPan(targetLink)
       ? LINK_MODULATION_TARGETS
       : LINK_MODULATION_TARGETS.filter((target) => target !== "pan");
   }
   if (kind === "node") {
-    const targetNode = nodeById(link.to);
+    const targetNode = nodeByIdInPatch(patch, link.to);
     return targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
       ? NODE_MODULATION_TARGETS
       : NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
@@ -4198,8 +4750,13 @@ function setKeyboardFineSliderActive(active) {
 }
 
 function releaseTouchFineSlider(pointerId = touchFineSliderPointerId) {
+  if (pointerId === null) return;
   if (touchFineSliderPointerId !== pointerId) return;
-  fineSliderButton?.releasePointerCapture?.(pointerId);
+  try {
+    fineSliderButton?.releasePointerCapture?.(pointerId);
+  } catch {
+    // Pointer capture can already be gone after touch cancellation.
+  }
   touchFineSliderPointerId = null;
   syncFineSliderButton();
 }
@@ -4692,58 +5249,68 @@ function renderEmptyPanel() {
         <button class="text-button" id="savePatchButton" type="button">Save</button>
         <button class="text-button" id="loadPatchButton" type="button">Load</button>
       </div>
-      <div class="field">
-        <label for="maxVoices">Max voices</label>
-        <div class="field-row">
-          <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
-          <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+      <div class="settings-pair">
+        <div class="field">
+          <label for="maxVoices">Max voices</label>
+          <div class="field-row">
+            <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+            <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+          </div>
         </div>
-      </div>
-      <div class="field">
-        <label for="audioEngine">Audio engine</label>
-        <select id="audioEngine">${audioBackendOptions}</select>
+        <div class="field">
+          <label for="audioEngine">Audio engine</label>
+          <select id="audioEngine">${audioBackendOptions}</select>
+        </div>
       </div>
       <label class="toggle-row">
         <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
         <span>Visualise signal flow</span>
       </label>
-      <div class="field">
-        <label for="audioInputDevice">Audio input</label>
-        <select id="audioInputDevice">${audioInputOptions}</select>
-      </div>
-      <div class="field">
-        <label for="audioOutputDevice">Audio output</label>
-        <select id="audioOutputDevice">${audioOutputOptions}</select>
-      </div>
-      <div class="field">
-        <label for="midiInput">MIDI input</label>
-        <select id="midiInput">${midiInputOptions}</select>
-      </div>
-      <div class="field">
-        <label for="midiChannel">Receive channel</label>
-        <select id="midiChannel">${midiChannelOptions}</select>
-      </div>
-      <div class="field">
-        <label for="keyboardStartNote">Keyboard start note</label>
-        <div class="field-row">
-          <input id="keyboardStartNoteRange" type="range" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
-          <input id="keyboardStartNote" type="number" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
+      <div class="settings-pair">
+        <div class="field">
+          <label for="audioInputDevice">Audio input</label>
+          <select id="audioInputDevice">${audioInputOptions}</select>
+        </div>
+        <div class="field">
+          <label for="audioOutputDevice">Audio output</label>
+          <select id="audioOutputDevice">${audioOutputOptions}</select>
         </div>
       </div>
-      <div class="field">
-        <label for="keyboardLength">Keyboard length</label>
-        <div class="field-row">
-          <input id="keyboardLengthRange" type="range" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
-          <input id="keyboardLength" type="number" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
+      <div class="settings-pair">
+        <div class="field">
+          <label for="midiInput">MIDI input</label>
+          <select id="midiInput">${midiInputOptions}</select>
+        </div>
+        <div class="field">
+          <label for="midiChannel">Channel</label>
+          <select id="midiChannel">${midiChannelOptions}</select>
+        </div>
+      </div>
+      <div class="settings-pair">
+        <div class="field">
+          <label for="keyboardStartNote">Start note</label>
+          <div class="field-row">
+            <input id="keyboardStartNoteRange" type="range" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
+            <input id="keyboardStartNote" type="number" min="${MIN_KEYBOARD_START_NOTE}" max="${MAX_KEYBOARD_START_NOTE}" step="1" value="${state.keyboardStartNote}">
+          </div>
+        </div>
+        <div class="field">
+          <label for="keyboardLength">Length</label>
+          <div class="field-row">
+            <input id="keyboardLengthRange" type="range" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
+            <input id="keyboardLength" type="number" min="${MIN_KEYBOARD_LENGTH}" max="${MAX_KEYBOARD_LENGTH}" step="1" value="${state.keyboardLength}">
+          </div>
         </div>
       </div>
       ${renderMidiBindingsSection()}
+      ${patchSlots.length > 1 ? panelRemoveAction("Remove current patch tab from this set", "Remove patch", "removePatchTabButton") : ""}
     </div>
   `;
 
   panel.querySelector("#patchName").addEventListener("input", (event) => {
     state.patchName = event.target.value;
     renderAppTitle();
+    renderPatchTabs();
     savePatch();
   });
   panel.querySelector("#patchName").addEventListener("keydown", (event) => {
@@ -4779,7 +5346,7 @@ function renderEmptyPanel() {
   });
   panel.querySelector("#audioInputDevice").addEventListener("change", (event) => {
     state.audioInputDeviceId = event.target.value;
-    if (patchUsesAudioInput()) {
+    if (sessionUsesAudioInput()) {
       stopAudioInput();
       reconcileAudioInput();
     }
@@ -4809,16 +5376,17 @@ function renderEmptyPanel() {
   panel.querySelector("#savePatchButton").addEventListener("click", savePatchToServer);
   panel.querySelector("#newPatchButton").addEventListener("click", newPatch);
   panel.querySelector("#loadPatchButton").addEventListener("click", openPatchLibrary);
+  panel.querySelector("#removePatchTabButton")?.addEventListener("click", removeActivePatchSlot);
   panel.querySelector("#midiInput").addEventListener("change", (event) => {
     state.midiInputId = event.target.value;
-    synthNode?.port.postMessage({ type: "panic" });
+    panicSynths();
     pressedKeys.clear();
     updateMidiStatus();
     savePatch();
   });
   panel.querySelector("#midiChannel").addEventListener("change", (event) => {
     state.midiChannel = event.target.value;
-    synthNode?.port.postMessage({ type: "panic" });
+    panicSynths();
     pressedKeys.clear();
     updateMidiStatus();
     savePatch();
@@ -4843,17 +5411,51 @@ function select(type, id) {
 
 function render() {
   renderAppTitle();
+  renderPatchTabs();
   renderNodes();
   renderAudioOut();
   renderWires();
   renderPanel();
   renderBottomPanel();
+  syncHistoryButtons();
 }
 
 function renderAppTitle() {
   const patchName = state.patchName?.trim() || "Untitled Patch";
-  appTitle.textContent = `Visual FM - ${patchName}`;
+  appTitle.textContent = "Visual FM";
   document.title = `Visual FM - ${patchName}`;
+}
+
+function renderPatchTabs() {
+  if (!patchTabs) return;
+  patchTabs.innerHTML = `
+    ${patchSlots.map((slot) => {
+      const name = slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName;
+      return `
+        <button
+          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""}"
+          type="button"
+          data-patch-slot-id="${escapeHtml(slot.id)}"
+          title="${escapeHtml(name || "Untitled Patch")}"
+        >${escapeHtml(name || "Untitled Patch")}</button>
+      `;
+    }).join("")}
+    <button class="patch-tab patch-tab-add" id="addPatchTabButton" type="button" aria-label="Add patch tab" title="Add patch tab">+</button>
+  `;
+  patchTabs.querySelectorAll("[data-patch-slot-id]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      switchPatchSlot(button.dataset.patchSlotId);
+    });
+  });
+  patchTabs.querySelector("#addPatchTabButton")?.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  patchTabs.querySelector("#addPatchTabButton")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openPatchLibrary({ mode: "new-slot" });
+  });
 }
 
 function addNode(position = null) {
@@ -4941,6 +5543,66 @@ function removeSelectedElements() {
   return false;
 }
 
+function applyLinkTargetDefaults(link, previousTo, nextTo) {
+  const previousKind = linkTargetKindForId(previousTo);
+  const nextKind = linkTargetKindForId(nextTo);
+  if (previousKind !== nextKind) {
+    link.modulationTarget = defaultModulationTargetForTarget(nextTo);
+    return;
+  }
+
+  link.modulationTarget = normalizeModulationTarget(
+    link.modulationTarget,
+    nextTo,
+    linkById(nextTo),
+    nodeById(nextTo),
+  );
+}
+
+function linkTargetWouldCycle(linkId, to) {
+  const seen = new Set([linkId]);
+  let cursor = to;
+  while (cursor && cursor !== "audio") {
+    if (seen.has(cursor)) return true;
+    const link = linkById(cursor);
+    if (!link) return false;
+    seen.add(cursor);
+    cursor = link.to;
+  }
+  return false;
+}
+
+function duplicateLinkWithEndpoint(link, endpoint, targetId) {
+  const copy = {
+    ...clonePatch(link),
+    id: uid("link"),
+  };
+  if (endpoint === "start") {
+    copy.from = targetId;
+  } else {
+    const previousTo = copy.to;
+    copy.to = targetId;
+    applyLinkTargetDefaults(copy, previousTo, targetId);
+  }
+  state.links.push(copy);
+  select("link", copy.id);
+  sendGraph();
+  savePatch();
+}
+
+function relinkSelectedLink(link, endpoint, targetId) {
+  if (endpoint === "start") {
+    link.from = targetId;
+  } else {
+    const previousTo = link.to;
+    link.to = targetId;
+    applyLinkTargetDefaults(link, previousTo, targetId);
+  }
+  select("link", link.id);
+  sendGraph();
+  savePatch();
+}
+
 function upsertLink(from, to) {
   const existing = state.links.find((link) => link.from === from && link.to === to);
   if (existing) {
@@ -4994,6 +5656,7 @@ function cancelActiveCanvasInteraction() {
   const linkPointerId = linkDrag?.pointerId;
   const marqueePointerId = marqueeState?.pointerId;
 
+  removeNodeDragDuplicates();
   dragState = null;
   linkDrag = null;
   marqueeState = null;
@@ -5147,6 +5810,7 @@ function onStageGestureChange(event) {
 function onCanvasPanPointerDown(event) {
   if (event.pointerType !== "touch") return;
   if (event.target.closest?.(".topbar, .floating-controls, input, select, textarea")) return;
+  if (cloneModifierActive || isFineSliderActive()) return;
 
   const rect = stage.getBoundingClientRect();
   canvasPanPointers.set(event.pointerId, {
@@ -5232,6 +5896,7 @@ function onNodePointerDown(event) {
     event.stopPropagation();
     const stageRect = stage.getBoundingClientRect();
     linkDrag = {
+      mode: "create",
       pointerId: event.pointerId,
       from: nodeId,
       stageRect,
@@ -5259,42 +5924,119 @@ function onNodePointerDown(event) {
   const stageRect = stage.getBoundingClientRect();
   const start = stagePointFromRect(event.clientX, event.clientY, stageRect);
   const sourceIds = isNodeSelected(nodeId) ? selectedNodeIds() : [nodeId];
-  const ids = event.altKey ? duplicateNodes(sourceIds).copies.map((node) => node.id) : sourceIds;
   dragState = {
     pointerId: event.pointerId,
     stageRect,
-    nodes: ids.map((id) => {
+    sourceIds,
+    duplicateActive: false,
+    duplicateNodeIds: [],
+    duplicateLinkIds: [],
+    duplicateIdMap: new Map(),
+    currentPoint: start,
+    sourceItems: sourceIds.map((id) => {
       const node = nodeById(id);
       return {
         id,
         offsetX: start.x - node.x,
         offsetY: start.y - node.y,
+        startX: node.x,
+        startY: node.y,
       };
     }),
   };
+  setNodeDragDuplicateActive(isAltModifierActive(event));
   captureStagePointer(event.pointerId);
   window.addEventListener("pointermove", onNodePointerMove);
   window.addEventListener("pointerup", onNodePointerEnd);
   window.addEventListener("pointercancel", onNodePointerEnd);
   stage.addEventListener("lostpointercapture", onNodePointerEnd);
-  if (!event.altKey && !isNodeSelected(nodeId)) {
+  if (!dragState.duplicateActive && !isNodeSelected(nodeId)) {
     select("node", nodeId);
   }
 }
 
-function onNodePointerMove(event) {
-  if (!dragState || event.pointerId !== dragState.pointerId) return;
+function nodeDragItems() {
+  if (!dragState) return [];
+  return dragState.sourceItems.map((item) => ({
+    ...item,
+    id: dragState.duplicateActive
+      ? dragState.duplicateIdMap.get(item.id)
+      : item.id,
+  })).filter((item) => item.id);
+}
+
+function removeNodeDragDuplicates() {
+  if (!dragState?.duplicateNodeIds?.length && !dragState?.duplicateLinkIds?.length) return;
+  const nodeIds = new Set(dragState.duplicateNodeIds);
+  const linkIds = new Set(dragState.duplicateLinkIds);
+  state.nodes = state.nodes.filter((node) => !nodeIds.has(node.id));
+  state.links = state.links.filter((link) => (
+    !linkIds.has(link.id)
+      && !nodeIds.has(link.from)
+      && !nodeIds.has(link.to)
+  ));
+  dragState.duplicateNodeIds = [];
+  dragState.duplicateLinkIds = [];
+  dragState.duplicateIdMap = new Map();
+}
+
+function moveNodeDragItems(point = dragState?.currentPoint) {
+  if (!dragState || !point) return [];
   const rect = dragState.stageRect || stage.getBoundingClientRect();
-  const point = stagePointFromRect(event.clientX, event.clientY, rect);
   const visible = visibleCanvasBounds(rect);
   const movedIds = [];
-  for (const item of dragState.nodes) {
+  for (const item of nodeDragItems()) {
     const node = nodeById(item.id);
     if (!node) continue;
     node.x = clamp(point.x - item.offsetX, visible.left + 90, visible.right - 90);
     node.y = clamp(point.y - item.offsetY, visible.top + 96, visible.bottom - 126);
     movedIds.push(item.id);
   }
+  return movedIds;
+}
+
+function setNodeDragDuplicateActive(active) {
+  if (!dragState || dragState.duplicateActive === active) return;
+
+  const point = dragState.currentPoint;
+  const affectedIds = new Set([...dragState.sourceIds, ...dragState.duplicateNodeIds]);
+  if (active) {
+    for (const item of dragState.sourceItems) {
+      const node = nodeById(item.id);
+      if (!node) continue;
+      node.x = item.startX;
+      node.y = item.startY;
+    }
+    const { copies, idMap, links } = duplicateNodes(dragState.sourceIds, { selectCopies: false, sync: false });
+    dragState.duplicateNodeIds = copies.map((node) => node.id);
+    dragState.duplicateLinkIds = links.map((link) => link.id);
+    dragState.duplicateIdMap = idMap;
+    dragState.duplicateActive = true;
+    for (const id of dragState.duplicateNodeIds) affectedIds.add(id);
+    state.selected = dragState.duplicateNodeIds.length === 1
+      ? { type: "node", id: dragState.duplicateNodeIds[0] }
+      : { type: "nodes", ids: dragState.duplicateNodeIds };
+  } else {
+    removeNodeDragDuplicates();
+    dragState.duplicateActive = false;
+    state.selected = dragState.sourceIds.length === 1
+      ? { type: "node", id: dragState.sourceIds[0] }
+      : { type: "nodes", ids: dragState.sourceIds };
+  }
+
+  for (const id of moveNodeDragItems(point)) affectedIds.add(id);
+  renderNodes();
+  renderPanel();
+  scheduleWiresRender();
+  sendGraph();
+}
+
+function onNodePointerMove(event) {
+  if (!dragState || event.pointerId !== dragState.pointerId) return;
+  const rect = dragState.stageRect || stage.getBoundingClientRect();
+  dragState.currentPoint = stagePointFromRect(event.clientX, event.clientY, rect);
+  setNodeDragDuplicateActive(isAltModifierActive(event));
+  const movedIds = moveNodeDragItems(dragState.currentPoint);
   scheduleNodesAndWiresRender(movedIds);
 }
 
@@ -5312,8 +6054,70 @@ function onNodePointerEnd(event) {
   releaseStagePointer(pointerId);
 }
 
+function linkEndpointDropTarget(clientX, clientY, endpoint, sourceLinkId) {
+  const targets = document.elementsFromPoint(clientX, clientY);
+
+  if (endpoint === "start") {
+    const outputAnchor = targets
+      .map((item) => item.closest?.(".anchor.output"))
+      .find(Boolean);
+    return outputAnchor?.dataset.nodeId || null;
+  }
+
+  const inputAnchor = targets
+    .map((item) => item.closest?.(".anchor.input"))
+    .find(Boolean);
+  if (inputAnchor?.dataset.nodeId) return inputAnchor.dataset.nodeId;
+
+  const linkAnchor = targets
+    .map((item) => item.closest?.(".link-anchor.input"))
+    .find((item) => item?.dataset.linkId && item.dataset.linkId !== sourceLinkId);
+  if (linkAnchor?.dataset.linkId) return linkAnchor.dataset.linkId;
+
+  const audioAnchor = targets
+    .map((item) => item.closest?.(".audio-anchor, .audio-out"))
+    .find(Boolean);
+  return audioAnchor ? "audio" : null;
+}
+
+function onLinkEndpointPointerDown(event) {
+  if (event.button !== 0 || !isPrimaryDragPointer(event)) return;
+
+  const handle = event.target.closest?.("[data-link-endpoint]");
+  if (!handle || !wireLayer.contains(handle)) return;
+
+  const link = linkById(handle.dataset.linkId);
+  if (!link || state.selected.type !== "link" || state.selected.id !== link.id) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  ensureAudio();
+
+  const stageRect = stage.getBoundingClientRect();
+  linkDrag = {
+    mode: "relink",
+    pointerId: event.pointerId,
+    sourceLinkId: link.id,
+    endpoint: handle.dataset.linkEndpoint,
+    duplicate: isAltModifierActive(event),
+    from: link.from,
+    fixedTo: link.to,
+    stageRect,
+    to: stagePointFromRect(event.clientX, event.clientY, stageRect),
+  };
+  captureStagePointer(event.pointerId);
+  window.addEventListener("pointermove", onLinkPointerMove);
+  window.addEventListener("pointerup", onLinkPointerEnd);
+  window.addEventListener("pointercancel", onLinkPointerEnd);
+  stage.addEventListener("lostpointercapture", onLinkPointerEnd);
+  renderWires();
+}
+
 function onLinkPointerMove(event) {
   if (!linkDrag || event.pointerId !== linkDrag.pointerId) return;
+  if (linkDrag.mode === "relink") {
+    linkDrag.duplicate = isAltModifierActive(event);
+  }
   linkDrag.to = stagePointFromRect(
     event.clientX,
     event.clientY,
@@ -5327,20 +6131,39 @@ function onLinkPointerEnd(event) {
   const pointerId = linkDrag.pointerId;
 
   if (event.type === "pointerup") {
-    const targets = document.elementsFromPoint(event.clientX, event.clientY);
-    const target = targets[0];
-    const inputAnchor = target?.closest?.(".anchor.input");
-    const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
-    const linkAnchor = targets
-      .map((item) => item.closest?.(".link-anchor.input"))
-      .find(Boolean);
+    if (linkDrag.mode === "relink") {
+      const link = linkById(linkDrag.sourceLinkId);
+      const targetId = linkEndpointDropTarget(event.clientX, event.clientY, linkDrag.endpoint, linkDrag.sourceLinkId);
+      const duplicate = isAltModifierActive(event);
+      const valid = link && targetId && (
+        linkDrag.endpoint === "start"
+          ? Boolean(nodeById(targetId))
+          : (targetId === "audio" || Boolean(nodeById(targetId)) || (Boolean(linkById(targetId)) && !linkTargetWouldCycle(link.id, targetId)))
+      );
 
-    if (inputAnchor?.dataset.nodeId) {
-      upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
-    } else if (linkAnchor?.dataset.linkId) {
-      upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
-    } else if (audioAnchor) {
-      upsertLink(linkDrag.from, "audio");
+      if (valid) {
+        if (duplicate) {
+          duplicateLinkWithEndpoint(link, linkDrag.endpoint, targetId);
+        } else {
+          relinkSelectedLink(link, linkDrag.endpoint, targetId);
+        }
+      }
+    } else {
+      const targets = document.elementsFromPoint(event.clientX, event.clientY);
+      const target = targets[0];
+      const inputAnchor = target?.closest?.(".anchor.input");
+      const audioAnchor = target?.closest?.(".audio-anchor, .audio-out");
+      const linkAnchor = targets
+        .map((item) => item.closest?.(".link-anchor.input"))
+        .find(Boolean);
+
+      if (inputAnchor?.dataset.nodeId) {
+        upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+      } else if (linkAnchor?.dataset.linkId) {
+        upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
+      } else if (audioAnchor) {
+        upsertLink(linkDrag.from, "audio");
+      }
     }
   }
 
@@ -5376,6 +6199,21 @@ function isTextEditingTarget(element = document.activeElement) {
   if (element.tagName !== "INPUT") return false;
   const textInputTypes = new Set(["", "email", "password", "search", "tel", "text", "url"]);
   return !element.readOnly && textInputTypes.has((element.getAttribute("type") || "").toLowerCase());
+}
+
+function handleUndoRedoShortcut(event) {
+  if (!event.metaKey && !event.ctrlKey) return false;
+
+  const key = event.key.toLowerCase();
+  const undo = key === "z" && !event.shiftKey;
+  const redo = key === "y" || (key === "z" && event.shiftKey);
+  if (!undo && !redo) return false;
+  if (isTextEditingTarget() || ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName)) return false;
+
+  event.preventDefault();
+  if (undo) undoPatch();
+  if (redo) redoPatch();
+  return true;
 }
 
 function trackValueEditExitClick(event) {
@@ -5508,6 +6346,55 @@ fineSliderButton?.addEventListener("blur", () => {
   setKeyboardFineSliderActive(false);
 });
 
+cloneModifierButton?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || touchCloneModifierPointerId !== null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  touchCloneModifierPointerId = event.pointerId;
+  cloneModifierButton.setPointerCapture?.(event.pointerId);
+  setCloneModifierActive(true);
+});
+
+cloneModifierButton?.addEventListener("pointerup", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  releaseTouchCloneModifier(event.pointerId);
+});
+
+cloneModifierButton?.addEventListener("pointercancel", (event) => {
+  event.stopPropagation();
+  releaseTouchCloneModifier(event.pointerId);
+});
+
+cloneModifierButton?.addEventListener("lostpointercapture", () => {
+  touchCloneModifierPointerId = null;
+  setCloneModifierActive(false);
+});
+
+cloneModifierButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  cloneModifierButton.blur();
+});
+
+cloneModifierButton?.addEventListener("keydown", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  setCloneModifierActive(true);
+});
+
+cloneModifierButton?.addEventListener("keyup", (event) => {
+  if (event.key !== " " && event.key !== "Enter") return;
+  event.preventDefault();
+  setCloneModifierActive(false);
+  cloneModifierButton.blur();
+});
+
+cloneModifierButton?.addEventListener("blur", () => {
+  touchCloneModifierPointerId = null;
+  setCloneModifierActive(false);
+});
+
 for (const button of document.querySelectorAll("[data-bottom-panel-toggle]")) {
   button?.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
@@ -5528,10 +6415,32 @@ fullscreenButton?.addEventListener("click", (event) => {
 });
 
 audioStatus.addEventListener("click", () => {
-  if (audioStatus.disabled || !audioContext || !synthNode) return;
+  if (audioStatus.disabled || !audioContext || !synthSlots.size) return;
   audioMuted = !audioMuted;
   syncOutputMute();
   updateAudioReadyButton();
+});
+
+undoButton?.addEventListener("pointerdown", (event) => {
+  event.stopPropagation();
+});
+
+undoButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  undoPatch();
+  undoButton.blur();
+});
+
+redoButton?.addEventListener("pointerdown", (event) => {
+  event.stopPropagation();
+});
+
+redoButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  redoPatch();
+  redoButton.blur();
 });
 
 document.addEventListener("pointerdown", trackValueEditExitClick, true);
@@ -5554,6 +6463,8 @@ stage.addEventListener("gesturechange", onStageGestureChange, { passive: false }
 window.addEventListener("pointermove", onCanvasPanPointerMove, { passive: false });
 window.addEventListener("pointerup", onCanvasPanPointerEnd);
 window.addEventListener("pointercancel", onCanvasPanPointerEnd);
+
+wireLayer.addEventListener("pointerdown", onLinkEndpointPointerDown);
 
 wireLayer.addEventListener("click", (event) => {
   const linkTarget = event.target.closest?.("[data-link-id]");
@@ -5595,6 +6506,10 @@ document.addEventListener("fullscreenchange", syncFullscreenButton);
 document.addEventListener("webkitfullscreenchange", syncFullscreenButton);
 
 window.addEventListener("keydown", (event) => {
+  if (handleUndoRedoShortcut(event)) return;
+  syncRelinkDuplicateModifier(event);
+  syncNodeDragDuplicateModifier(event);
+
   const note = keyMap.get(event.key);
   if (note !== undefined) {
     if (isTextEditingTarget() || pressedKeys.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -5614,6 +6529,9 @@ window.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("keyup", (event) => {
+  syncRelinkDuplicateModifier(event);
+  syncNodeDragDuplicateModifier(event);
+
   const note = keyMap.get(event.key);
   if (note === undefined) return;
   pressedKeys.delete(event.key);
@@ -5624,6 +6542,8 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
   refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 });
 
+initializePatchHistories();
+syncTouchModifierControlsVisibility();
 render();
 syncFullscreenButton();
 refreshAudioDevices({ renderPatchPanel: !state.selected.type });

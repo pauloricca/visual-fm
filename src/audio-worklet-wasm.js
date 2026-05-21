@@ -16,6 +16,7 @@ const MASTER_DC_BLOCK_HZ = 10;
 const DENORMAL_EPSILON = 1e-20;
 const FORMANT_INTENSITY_MAX = 36;
 const MAX_CUSTOM_WAVE_POINTS = 64;
+const QUANTISE_MIDI_ROOT = "midi-note";
 
 const WAVE_IDS = new Map([
   ["sine", 0],
@@ -264,7 +265,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
       quantise: {
         enabled: Boolean(node.quantise?.enabled),
-        root: QUANTISE_ROOT_NOTES.includes(node.quantise?.root) ? node.quantise.root : "C",
+        root: node.quantise?.root === QUANTISE_MIDI_ROOT || QUANTISE_ROOT_NOTES.includes(node.quantise?.root) ? node.quantise.root : "C",
         scale: QUANTISE_SCALE_IDS.has(node.quantise?.scale) ? node.quantise.scale : "chromatic",
         glide: Number.isFinite(quantiseGlide) ? this.clamp(quantiseGlide, 0, 4) : 0,
       },
@@ -377,7 +378,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         node.ratio,
         node.frequency,
         node.quantise.enabled ? 1 : 0,
-        QUANTISE_ROOT_NOTES.indexOf(node.quantise.root),
+        node.quantise.root === QUANTISE_MIDI_ROOT ? -1 : QUANTISE_ROOT_NOTES.indexOf(node.quantise.root),
         QUANTISE_SCALE_IDS.get(node.quantise.scale) ?? 0,
         node.quantise.glide,
         node.speed,

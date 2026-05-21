@@ -15,6 +15,7 @@
               <span class="brand-mark"></span>
               <span id="appTitle">Visual FM - Visual FM Patch</span>
             </div>
+            <div class="patch-tabs" id="patchTabs" aria-label="Patch tabs"></div>
           </div>
 
           <div class="canvas-viewport" id="canvasViewport">
@@ -38,6 +39,13 @@
               </svg>
               <span class="control-caption">Fine</span>
             </button>
+            <button class="clone-modifier-button floating-control-button" id="cloneModifierButton" type="button" aria-label="Hold to clone" aria-pressed="false" title="Hold to clone">
+              <svg class="clone-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <circle cx="13" cy="18" r="8" fill="none" stroke="currentColor" stroke-width="2.8"/>
+                <circle cx="19" cy="14" r="8" fill="none" stroke="currentColor" stroke-width="2.8" stroke-dasharray="3.2 3.2" stroke-linecap="round"/>
+              </svg>
+              <span class="control-caption">Clone</span>
+            </button>
             <button class="audio-status floating-control-button" id="audioStatus" type="button" disabled aria-label="Audio idle" title="Audio idle">
               <svg class="speaker-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
                 <path d="M5 13h6l8-7v20l-8-7H5z" fill="currentColor"/>
@@ -45,6 +53,20 @@
                 <path class="speaker-slash" d="M24 10l-12 12" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
               </svg>
               <span class="control-caption">Audio</span>
+            </button>
+            <button class="undo-button floating-control-button" id="undoButton" type="button" disabled aria-label="Undo" title="Undo">
+              <svg class="history-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <path d="M14 10H7v7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M8 10h11c4.4 0 8 3.4 8 7.7S23.4 25 19 25h-7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="control-caption">Undo</span>
+            </button>
+            <button class="redo-button floating-control-button" id="redoButton" type="button" disabled aria-label="Redo" title="Redo">
+              <svg class="history-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <path d="M18 10h7v7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M24 10H13c-4.4 0-8 3.4-8 7.7S8.6 25 13 25h7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="control-caption">Redo</span>
             </button>
             <button class="record-button floating-control-button" id="recordButton" type="button" aria-label="Start recording" title="Start recording">
               <span class="record-dot" aria-hidden="true"></span>

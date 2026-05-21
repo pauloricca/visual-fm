@@ -22,6 +22,7 @@ const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sam
 const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"]);
 const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"]);
 const SPEED_WAVE_TYPES = new Set(["perlin"]);
+const QUANTISE_MIDI_ROOT = "midi-note";
 const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const QUANTISE_SCALE_INTERVALS = Object.freeze({
   chromatic: Object.freeze([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
@@ -370,7 +371,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const glide = Number(quantise.glide);
     return {
       enabled: Boolean(quantise.enabled),
-      root: QUANTISE_ROOT_NOTES.includes(quantise.root) ? quantise.root : "C",
+      root: quantise.root === QUANTISE_MIDI_ROOT || QUANTISE_ROOT_NOTES.includes(quantise.root) ? quantise.root : "C",
       scale: QUANTISE_SCALE_INTERVALS[quantise.scale] ? quantise.scale : "chromatic",
       glide: Number.isFinite(glide) ? this.clamp(glide, 0, 4) : 0,
     };
@@ -1864,11 +1865,19 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return OSCILLATOR_WAVE_TYPES[index];
   }
 
-  quantiseFrequency(frequency, quantise) {
+  quantiseRootPitchClass(quantise, voice) {
+    if (quantise?.root !== QUANTISE_MIDI_ROOT) {
+      const root = QUANTISE_ROOT_NOTES.indexOf(quantise?.root);
+      return root >= 0 ? root : 0;
+    }
+    const voiceMidi = 69 + 12 * Math.log2((voice?.frequency || 440) / 440);
+    return ((Math.round(voiceMidi) % 12) + 12) % 12;
+  }
+
+  quantiseFrequency(frequency, quantise, voice) {
     if (!quantise?.enabled || frequency <= 0 || !Number.isFinite(frequency)) return frequency;
     const intervals = QUANTISE_SCALE_INTERVALS[quantise.scale] || QUANTISE_SCALE_INTERVALS.chromatic;
-    const root = QUANTISE_ROOT_NOTES.indexOf(quantise.root);
-    const rootPitchClass = root >= 0 ? root : 0;
+    const rootPitchClass = this.quantiseRootPitchClass(quantise, voice);
     const midi = 69 + 12 * Math.log2(frequency / 440);
     const center = Math.round(midi);
     let bestMidi = center;
@@ -1924,7 +1933,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
         ? this.clamp(Number(node.speed) || 8, 0.01, 60)
         : this.baseFrequency(node, voice);
       const targetFrequency = PITCHED_WAVE_TYPES.has(node.wave)
-        ? this.quantiseFrequency(baseFrequency * frequencyMultiplier, node.quantise)
+        ? this.quantiseFrequency(baseFrequency * frequencyMultiplier, node.quantise, voice)
         : baseFrequency * frequencyMultiplier;
       const effectiveFrequency = this.glideFrequency(node, voice, targetFrequency);
       const current = voice.phases.get(node.id) || 0;

@@ -592,6 +592,41 @@ if (Math.abs(quantisedFrequency - 466.16) > 8) {
   throw new Error(`WASM worklet quantise did not snap a modulated frequency; estimated ${quantisedFrequency.toFixed(2)}Hz.`);
 }
 
+engine.resetRuntimeState();
+engine.setGraph({
+  maxVoices: 1,
+  nodes: [
+    { id: "dynamic-quantise-mod", wave: "audio-input", audioInputGain: 1 },
+    {
+      id: "dynamic-quantise-carrier",
+      wave: "sine",
+      frequencyMode: "ratio",
+      frequency: 440,
+      ratio: 1,
+      quantise: { enabled: true, root: "midi-note", scale: "major", glide: 0 },
+    },
+  ],
+  links: [
+    { id: "dynamic-quantise-fm", from: "dynamic-quantise-mod", to: "dynamic-quantise-carrier", amount: 0.35, modulationTarget: "frequency" },
+    { id: "dynamic-quantise-out", from: "dynamic-quantise-carrier", to: "audio", amount: 1 },
+  ],
+});
+engine.noteOn(69, 1);
+
+const dynamicQuantiseSamples = [];
+for (let block = 0; block < 32; block += 1) {
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  const input = new Float32Array(128).fill(1);
+  engine.process([[input, input]], [[left, right]]);
+  if (block >= 2) dynamicQuantiseSamples.push(...left);
+}
+
+const dynamicQuantisedFrequency = estimateFrequency(dynamicQuantiseSamples);
+if (Math.abs(dynamicQuantisedFrequency - 554.37) > 8) {
+  throw new Error(`WASM worklet dynamic quantise root did not follow the played note; estimated ${dynamicQuantisedFrequency.toFixed(2)}Hz.`);
+}
+
 const reportedReady = messages.some((message) => message.type === "backendStatus" && message.payload?.ready);
 if (!reportedReady) {
   throw new Error("WASM worklet did not post a ready backendStatus message.");

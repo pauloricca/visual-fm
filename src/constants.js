@@ -17,7 +17,9 @@ export const DEFAULT_CUSTOM_WAVE = Object.freeze({
 });
 export const SPEED_WAVE_TYPES = new Set(["perlin"]);
 export const FREQUENCY_MODES = ["ratio", "fixed"];
+export const QUANTISE_MIDI_ROOT = "midi-note";
 export const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+export const QUANTISE_ROOT_OPTIONS = [QUANTISE_MIDI_ROOT, ...QUANTISE_ROOT_NOTES];
 export const QUANTISE_SCALES = [
   "chromatic",
   "major",

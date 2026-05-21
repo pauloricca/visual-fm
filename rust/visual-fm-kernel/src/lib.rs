@@ -378,7 +378,7 @@ pub extern "C" fn addNode(
             ratio: ratio.clamp(0.0, 16.0),
             frequency: frequency.clamp(0.0, 12_000.0),
             quantise_enabled: if quantise_enabled != 0 { 1 } else { 0 },
-            quantise_root: quantise_root.clamp(0, 11),
+            quantise_root: quantise_root.clamp(-1, 11),
             quantise_scale: quantise_scale.clamp(0, 8),
             quantise_glide: quantise_glide.clamp(0.0, 4.0),
             speed: speed.clamp(0.01, 60.0),
@@ -940,14 +940,26 @@ fn scale_contains(scale: i32, interval: i32) -> bool {
     }
 }
 
-fn quantise_frequency(node: Node, frequency: f64) -> f64 {
+fn midi_pitch_class(frequency: f64) -> i32 {
+    if !frequency.is_finite() || frequency <= 0.0 {
+        return 0;
+    }
+    let midi = (69.0 + 12.0 * (frequency / 440.0).log2()).round() as i32;
+    midi.rem_euclid(12)
+}
+
+fn quantise_frequency(node: Node, frequency: f64, note_frequency: f64) -> f64 {
     if node.quantise_enabled == 0 || !frequency.is_finite() || frequency <= 0.0 {
         return frequency;
     }
     let midi = 69.0 + 12.0 * (frequency / 440.0).log2();
     let center = midi.round() as i32;
     let octave_center = (center.div_euclid(12)) * 12;
-    let root = node.quantise_root.clamp(0, 11);
+    let root = if node.quantise_root < 0 {
+        midi_pitch_class(note_frequency)
+    } else {
+        node.quantise_root.clamp(0, 11)
+    };
     let mut best_midi = center;
     let mut best_distance = f64::INFINITY;
     for octave in -2..=2 {
@@ -1903,7 +1915,7 @@ fn advance_phases(voice_slot: usize, sample_rate: f64, note_frequency: f64, rele
             let target_frequency = if node.wave == 7 {
                 frequency * multiplier
             } else {
-                quantise_frequency(node, frequency * multiplier)
+                quantise_frequency(node, frequency * multiplier, note_frequency)
             };
             let effective_frequency = if node.wave == 7 {
                 target_frequency

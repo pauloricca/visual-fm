@@ -26,7 +26,7 @@ import {
   NODE_MIDI_PARAMETERS,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
-  QUANTISE_ROOT_NOTES,
+  QUANTISE_ROOT_OPTIONS,
   QUANTISE_SCALES,
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
@@ -225,7 +225,7 @@ export function normalizeFrequencyMode(mode) {
 export function normalizeNodeQuantise(quantise = {}) {
   return {
     enabled: Boolean(quantise.enabled),
-    root: QUANTISE_ROOT_NOTES.includes(quantise.root) ? quantise.root : DEFAULT_NODE_QUANTISE.root,
+    root: QUANTISE_ROOT_OPTIONS.includes(quantise.root) ? quantise.root : DEFAULT_NODE_QUANTISE.root,
     scale: QUANTISE_SCALES.includes(quantise.scale) ? quantise.scale : DEFAULT_NODE_QUANTISE.scale,
     glide: Number.isFinite(Number(quantise.glide)) ? clamp(Number(quantise.glide), 0, 4) : DEFAULT_NODE_QUANTISE.glide,
   };
