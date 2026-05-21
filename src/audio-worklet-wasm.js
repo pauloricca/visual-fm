@@ -119,6 +119,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.maxVoices = 5;
     this.voices = new Map();
     this.activeVoicesByNote = new Map();
+    this.pendingVoiceStarts = [];
     this.voiceCounter = 1;
     this.freeSlots = Array.from({ length: MAX_ACTIVE_VOICES }, (_, index) => index);
     this.sampleCursor = 0;
@@ -742,16 +743,21 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
   allocateSlot() {
     if (this.freeSlots.length) return this.freeSlots.shift();
-    const candidate = this.voiceToSteal();
-    if (!candidate) return null;
-    const slot = candidate.slot;
-    this.deleteVoice(candidate.id, { keepSlot: true });
-    return slot;
+    const stolenVoice = [...this.voices.values()]
+      .filter((voice) => voice.stolenAt !== null)
+      .sort((a, b) => a.stolenAt - b.stolenAt)[0];
+    if (stolenVoice) {
+      const slot = stolenVoice.slot;
+      this.deleteVoice(stolenVoice.id, { keepSlot: true });
+      return slot;
+    }
+    return null;
   }
 
   voiceToSteal() {
     const voices = [...this.voices.values()];
     return voices
+      .filter((voice) => voice.stolenAt === null)
       .sort((a, b) => {
         if ((a.releasedAt === null) !== (b.releasedAt === null)) return a.releasedAt === null ? 1 : -1;
         return (a.releasedAt ?? a.startedAt) - (b.releasedAt ?? b.startedAt);
@@ -760,37 +766,105 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
   activeVoiceToSteal() {
     return [...this.voices.values()]
-      .filter((voice) => voice.releasedAt === null)
+      .filter((voice) => voice.stolenAt === null && voice.releasedAt === null)
       .sort((a, b) => a.startedAt - b.startedAt)[0] || null;
   }
 
   activeVoiceCount() {
     let count = 0;
     for (const voice of this.voices.values()) {
-      if (voice.releasedAt === null) count += 1;
+      if (voice.stolenAt === null) count += 1;
     }
     return count;
   }
 
-  enforceVoiceLimit() {
-    while (this.activeVoiceCount() > this.maxVoices) {
-      const candidate = this.activeVoiceToSteal();
+  stealVoiceForFade() {
+    const candidate = this.voiceToSteal();
+    if (!candidate) return false;
+    candidate.stolenAt = this.sampleCursor / sampleRate;
+    this.forgetActiveVoice(candidate.id);
+    return true;
+  }
+
+  enforceVoiceLimit(limit = this.maxVoices) {
+    while (this.activeVoiceCount() > limit) {
+      const candidate = this.activeVoiceToSteal() || this.voiceToSteal();
       if (!candidate) return;
-      this.releaseVoice(candidate, this.sampleCursor / sampleRate, VOICE_STEAL_FADE_SECONDS);
+      candidate.stolenAt = this.sampleCursor / sampleRate;
+      this.forgetActiveVoice(candidate.id);
     }
   }
 
-  noteOn(note, velocity = 1) {
-    const numericNote = Number(note);
-    if (!Number.isFinite(numericNote)) return;
-    const now = this.sampleCursor / sampleRate;
-    const activeVoice = this.voices.get(this.activeVoicesByNote.get(numericNote));
-    if (activeVoice) {
-      this.releaseVoice(activeVoice, now, VOICE_STEAL_FADE_SECONDS);
+  forgetActiveVoice(voiceId) {
+    for (const [note, activeVoiceId] of this.activeVoicesByNote) {
+      if (activeVoiceId === voiceId) this.activeVoicesByNote.delete(note);
     }
+  }
+
+  latestStolenFadeEnd(now = this.sampleCursor / sampleRate) {
+    let fadeEnd = now;
+    for (const voice of this.voices.values()) {
+      if (voice.stolenAt !== null) {
+        fadeEnd = Math.max(fadeEnd, voice.stolenAt + VOICE_STEAL_FADE_SECONDS);
+      }
+    }
+    return fadeEnd;
+  }
+
+  queueVoiceStart(note, velocity, readyAt) {
+    this.pendingVoiceStarts = this.pendingVoiceStarts.filter((pending) => pending.note !== note);
+    this.pendingVoiceStarts.push({ note, velocity, readyAt });
+  }
+
+  flushPendingVoiceStarts(now) {
+    if (!this.pendingVoiceStarts.length) return;
+
+    let ready = [];
+    const remaining = [];
+    for (const pending of this.pendingVoiceStarts) {
+      if (pending.readyAt > now) {
+        remaining.push(pending);
+      } else {
+        ready.push(pending);
+      }
+    }
+    if (!ready.length) {
+      this.pendingVoiceStarts = remaining;
+      return;
+    }
+
+    if (ready.length > this.maxVoices) {
+      ready = ready.slice(ready.length - this.maxVoices);
+    }
+
+    const freeActiveSlots = Math.max(0, this.maxVoices - this.activeVoiceCount());
+    const slotsToReserve = Math.max(0, ready.length - freeActiveSlots);
+    if (slotsToReserve > 0) {
+      let reservedSlots = 0;
+      while (reservedSlots < slotsToReserve && this.stealVoiceForFade()) {
+        reservedSlots += 1;
+      }
+      this.pendingVoiceStarts = [
+        ...remaining,
+        ...ready.map((pending) => ({ ...pending, readyAt: this.latestStolenFadeEnd(now) })),
+      ];
+      return;
+    }
+
+    const stillPending = [];
+    for (const pending of ready) {
+      if (this.startVoice(pending.note, pending.velocity, now)) continue;
+      stillPending.push({ ...pending, readyAt: this.latestStolenFadeEnd(now) });
+    }
+    this.pendingVoiceStarts = [...remaining, ...stillPending];
     this.enforceVoiceLimit();
+  }
+
+  startVoice(note, velocity = 1, startedAt = this.sampleCursor / sampleRate) {
+    const numericNote = Number(note);
+    if (!Number.isFinite(numericNote)) return false;
     const slot = this.allocateSlot();
-    if (slot === null) return;
+    if (slot === null) return false;
     this.wasm?.resetVoiceSlot?.(slot);
     const voice = {
       id: `voice-${this.voiceCounter++}`,
@@ -798,18 +872,33 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       note: numericNote,
       frequency: this.midiNoteFrequency(numericNote),
       velocity: this.clamp(Number(velocity) || 0, 0.05, 1),
-      startedAt: now,
+      startedAt,
       releasedAt: null,
+      stolenAt: null,
       releaseSeconds: 0.24,
       releaseGain: 1,
     };
     this.voices.set(voice.id, voice);
     this.activeVoicesByNote.set(numericNote, voice.id);
-    this.enforceVoiceLimit();
+    return true;
+  }
+
+  noteOn(note, velocity = 1) {
+    const numericNote = Number(note);
+    if (!Number.isFinite(numericNote)) return;
+    const now = this.sampleCursor / sampleRate;
+    const activeVoice = this.voices.get(this.activeVoicesByNote.get(numericNote));
+    if (activeVoice && activeVoice.releasedAt === null) {
+      activeVoice.releasedAt = now;
+      this.activeVoicesByNote.delete(numericNote);
+    }
+    this.queueVoiceStart(numericNote, velocity, now);
+    this.flushPendingVoiceStarts(now);
   }
 
   noteOff(note) {
     const numericNote = Number(note);
+    this.pendingVoiceStarts = this.pendingVoiceStarts.filter((pending) => pending.note !== numericNote);
     const voice = this.voices.get(this.activeVoicesByNote.get(numericNote));
     if (!voice) return;
     this.releaseVoice(voice, this.sampleCursor / sampleRate, this.outputReleaseSeconds());
@@ -845,20 +934,27 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
   voiceLifecycleGain(voice, now) {
     const startGain = this.smoothStep((now - voice.startedAt) / VOICE_START_FADE_SECONDS);
-    return startGain;
+    if (voice.stolenAt === null) return startGain;
+    const stealFade = 1 - this.smoothStep((now - voice.stolenAt) / VOICE_STEAL_FADE_SECONDS);
+    return startGain * stealFade;
   }
 
   pruneVoices(now) {
     for (const voice of [...this.voices.values()]) {
-      if (voice.releasedAt !== null && now - voice.releasedAt > (voice.releaseSeconds || 0.24) + 0.02) {
+      const stealFinished = voice.stolenAt !== null && now - voice.stolenAt > VOICE_STEAL_FADE_SECONDS;
+      const releaseFinished = voice.releasedAt !== null && now - voice.releasedAt > (voice.releaseSeconds || 0.24) + 0.02;
+      if (stealFinished || releaseFinished) {
         this.deleteVoice(voice.id);
       }
     }
+    this.enforceVoiceLimit();
+    this.flushPendingVoiceStarts(now);
   }
 
   resetRuntimeState() {
     this.voices.clear();
     this.activeVoicesByNote.clear();
+    this.pendingVoiceStarts = [];
     this.freeSlots = Array.from({ length: MAX_ACTIVE_VOICES }, (_, index) => index);
     this.chorusBuffers.forEach((buffer) => buffer.fill(0));
     this.chorusIndices = [0, 0];
@@ -890,6 +986,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       1,
       now - voice.startedAt,
       voice.releasedAt === null ? -1 : now - voice.releasedAt,
+      voice.stolenAt === null ? -1 : now - voice.stolenAt,
     );
   }
 

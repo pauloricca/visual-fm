@@ -11,6 +11,7 @@ const MAX_CUSTOM_WAVE_POINTS: usize = 64;
 const FORMANT_INTENSITY_MAX: f64 = 36.0;
 const CUSTOM_ONESHOT_EDGE_FADE_SECONDS: f64 = 0.002;
 const VOICE_START_FADE_SECONDS: f64 = 0.006;
+const VOICE_STEAL_FADE_SECONDS: f64 = 0.03;
 const CUSTOM_MODE_LOOP: i32 = 0;
 const CUSTOM_MODE_ONCE: i32 = 1;
 const CUSTOM_MODE_PING_PONG: i32 = 2;
@@ -1958,6 +1959,7 @@ pub extern "C" fn renderVoiceGraph(
     lifecycle_gain: f64,
     voice_age: f64,
     release_age: f64,
+    stolen_age: f64,
 ) {
     let frames = (frames as usize).min(MAX_WASM_FRAMES);
     if frames == 0 || sample_rate <= 0.0 {
@@ -1980,7 +1982,17 @@ pub extern "C" fn renderVoiceGraph(
         } else {
             release_age + sample_offset
         };
-        let amp = base_amp * smooth_step(age / VOICE_START_FADE_SECONDS);
+        let sample_stolen_age = if stolen_age < 0.0 {
+            -1.0
+        } else {
+            stolen_age + sample_offset
+        };
+        let steal_gain = if sample_stolen_age < 0.0 {
+            1.0
+        } else {
+            1.0 - smooth_step(sample_stolen_age / VOICE_STEAL_FADE_SECONDS)
+        };
+        let amp = base_amp * smooth_step(age / VOICE_START_FADE_SECONDS) * steal_gain;
 
         unsafe {
             for link_index in 0..LINK_COUNT {
