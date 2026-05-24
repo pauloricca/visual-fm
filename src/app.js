@@ -81,8 +81,10 @@ const fineSliderButton = document.querySelector("#fineSliderButton");
 const cloneModifierButton = document.querySelector("#cloneModifierButton");
 const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
 const knobPanelButton = document.querySelector("#knobPanelButton");
+const timelinePanelButton = document.querySelector("#timelinePanelButton");
 const fullscreenButton = document.querySelector("#fullscreenButton");
 const bottomPanel = document.querySelector("#bottomPanel");
+const recordingTimelinePanel = document.querySelector("#recordingTimelinePanel");
 const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
 const midiKnobPanel = document.querySelector("#midiKnobPanel");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
@@ -134,6 +136,12 @@ const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
 const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
 const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
+const RECORDING_TEMPO_MIN = 40;
+const RECORDING_TEMPO_MAX = 220;
+const RECORDING_DEFAULT_TEMPO = 120;
+const RECORDING_COUNTDOWN_BEATS = 4;
+const RECORDING_TIMELINE_MIN_SECONDS = 8;
+const RECORDING_WAVEFORM_POINTS = 72;
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -198,6 +206,7 @@ let audioContext = null;
 let synthNode = null;
 const synthSlots = new Map();
 let outputGainNode = null;
+let recordingPlaybackGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
 let audioOutputSinkDestination = null;
@@ -209,8 +218,31 @@ let audioWorkletModulePromise = null;
 let mediaRecorder = null;
 let recordingChunks = [];
 let recordingStartedAt = null;
+let recordingLaneStartedAt = 0;
 let recordingStarting = false;
 let recordingSavedTimer = null;
+let recordingCountdownTimer = null;
+let recordingCountdownBeat = 0;
+let recordingCountdownActive = false;
+let recordingMetronomeTimer = null;
+let recordingTimelineFrame = null;
+let recordingTimelineStartedAt = 0;
+let recordingTimelineTempo = RECORDING_DEFAULT_TEMPO;
+let recordingMetronomeEnabled = false;
+let recordingLaneCounter = 1;
+const recordingLanes = [];
+const recordingPlaybackSources = [];
+let selectedRecordingLaneId = null;
+let recordingPlayheadTime = 0;
+let recordingReturnPlayheadTime = 0;
+let recordingTransportPlaying = false;
+let recordingTransportStartedAt = 0;
+let recordingTransportStartTime = 0;
+let recordingRenderedDuration = RECORDING_TIMELINE_MIN_SECONDS;
+let recordingScrubState = null;
+let recordingScrubGainNode = null;
+let recordingScrubSource = null;
+let recordingScrubPreviewLastAt = 0;
 let audioMuted = false;
 let audioBackend = loadAudioBackend();
 let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
@@ -250,6 +282,7 @@ let keyboardFineSliderActive = false;
 let touchCloneModifierPointerId = null;
 let cloneModifierActive = false;
 const activeBottomPanels = {
+  timeline: false,
   keyboard: false,
   knobs: false,
 };
@@ -345,6 +378,7 @@ function normalizePatchSlot(slot, fallbackPatch = null) {
   const normalized = normalizePatch(slot?.patch || fallbackPatch || normalizeDefaultPatch());
   return {
     id: typeof slot?.id === "string" && slot.id.trim() ? slot.id : patchSlotUid(),
+    active: slot?.active !== false,
     patch: normalized,
   };
 }
@@ -397,6 +431,7 @@ function currentPatchSessionData() {
     activePatchSlotId,
     patchSlots: patchSlots.map((slot) => ({
       id: slot.id,
+      active: slot.active !== false,
       patch: slot.id === activePatchSlotId ? currentPatchData() : slot.patch,
     })),
   };
@@ -1802,11 +1837,23 @@ function disconnectOutputRoutes() {
   }
 }
 
+function disconnectRecordingPlaybackRoute() {
+  if (!recordingPlaybackGainNode) return;
+  try {
+    recordingPlaybackGainNode.disconnect();
+  } catch {
+    // Disconnect can throw if no route exists yet.
+  }
+}
+
 function connectOutputRoute(destination) {
   if (!outputGainNode || !destination) return;
   disconnectOutputRoutes();
+  disconnectRecordingPlaybackRoute();
   outputGainNode.connect(destination);
   if (recorderDestination) outputGainNode.connect(recorderDestination);
+  if (recordingPlaybackGainNode) recordingPlaybackGainNode.connect(destination);
+  if (recordingScrubGainNode) recordingScrubGainNode.connect(destination);
 }
 
 function stopOutputSinkElement() {
@@ -1970,9 +2017,10 @@ function updateWireSignalMeters() {
 }
 
 function syncOutputMute() {
-  if (!outputGainNode) return;
   const value = audioMuted ? 0 : 1;
-  outputGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (outputGainNode) outputGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (recordingPlaybackGainNode) recordingPlaybackGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (recordingScrubGainNode) recordingScrubGainNode.gain.setTargetAtTime(value * 0.5, audioContext?.currentTime || 0, 0.01);
 }
 
 function setAudioStatusLabel(text) {
@@ -2103,6 +2151,14 @@ async function setupAudio() {
     outputGainNode = audioContext.createGain();
     syncOutputMute();
   }
+  if (!recordingPlaybackGainNode) {
+    recordingPlaybackGainNode = audioContext.createGain();
+    syncOutputMute();
+  }
+  if (!recordingScrubGainNode) {
+    recordingScrubGainNode = audioContext.createGain();
+    syncOutputMute();
+  }
 
   if (!audioWorkletModulePromise) {
     if (!audioContext.audioWorklet?.addModule) {
@@ -2141,6 +2197,7 @@ async function ensureSynthSlots() {
   syncActivePatchSlot();
   for (const slot of patchSlots) {
     await ensureSynthSlot(slot);
+    syncSynthSlotActive(slot.id);
   }
 
   for (const [slotId, synthSlot] of synthSlots) {
@@ -2161,6 +2218,7 @@ async function ensureSynthSlot(slot) {
   const existing = synthSlots.get(slot.id);
   if (existing) {
     postGraph(slot.id, slot.patch);
+    syncSynthSlotActive(slot.id);
     return existing;
   }
 
@@ -2175,16 +2233,31 @@ async function ensureSynthSlot(slot) {
   });
   const synthSlot = { id: slot.id, node, status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true } };
   synthSlots.set(slot.id, synthSlot);
-  node.connect(outputGainNode);
   node.port.onmessage = (event) => handleWorkletMessageForSlot(slot.id, event);
   if (audioInputSource) audioInputSource.connect(node);
   postGraph(slot.id, slot.patch);
+  syncSynthSlotActive(slot.id);
   if (slot.id === activePatchSlotId) {
     synthNode = node;
     audioBackendStatus = synthSlot.status;
     updateAudioStatus();
   }
   return synthSlot;
+}
+
+function syncSynthSlotActive(slotId) {
+  const synthSlot = synthSlots.get(slotId);
+  if (!synthSlot || !outputGainNode) return;
+  const slot = patchSlots.find((item) => item.id === slotId);
+  const shouldConnect = slot?.active !== false;
+  try {
+    synthSlot.node.disconnect(outputGainNode);
+  } catch {
+    // The node may not currently be connected to the output.
+  }
+  if (shouldConnect) {
+    synthSlot.node.connect(outputGainNode);
+  }
 }
 
 async function ensureAudioInput() {
@@ -2298,13 +2371,13 @@ function setRecordingButtonState(isRecording) {
   recordButton.title = isRecording ? "Stop recording" : "Start recording";
 }
 
-function showRecordingSavedState() {
+function showRecordingSavedState(caption = "Saved", label = "Recording saved") {
   clearTimeout(recordingSavedTimer);
   recordButton.classList.remove("recording");
   recordButton.classList.add("saved");
-  if (recordButtonCaption) recordButtonCaption.textContent = "Saved";
-  recordButton.setAttribute("aria-label", "Recording saved");
-  recordButton.title = "Recording saved";
+  if (recordButtonCaption) recordButtonCaption.textContent = caption;
+  recordButton.setAttribute("aria-label", label);
+  recordButton.title = label;
   recordingSavedTimer = window.setTimeout(() => {
     recordButton.classList.remove("saved");
     if (recordButtonCaption) recordButtonCaption.textContent = "Rec";
@@ -2314,19 +2387,641 @@ function showRecordingSavedState() {
   }, 1200);
 }
 
-async function saveRecordingToServer(wavBlob) {
+function recordingSequenceDuration() {
+  const laneEnd = recordingLanes.reduce((max, lane) => Math.max(max, lane.startTime + lane.duration), 0);
+  const liveEnd = mediaRecorder?.state === "recording"
+    ? recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt)
+    : 0;
+  return Math.max(RECORDING_TIMELINE_MIN_SECONDS, laneEnd, liveEnd);
+}
+
+function currentRecordingPlayheadTime() {
+  if (mediaRecorder?.state === "recording") {
+    return recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt);
+  }
+  if (recordingTransportPlaying && audioContext) {
+    return recordingTransportStartTime + Math.max(0, audioContext.currentTime - recordingTransportStartedAt);
+  }
+  return recordingPlayheadTime;
+}
+
+function setRecordingPlayheadTime(time, { render = false } = {}) {
+  recordingPlayheadTime = clamp(Number(time) || 0, 0, recordingSequenceDuration());
+  if (render && activeBottomPanels.timeline) {
+    renderRecordingTimelinePanel();
+  } else {
+    updateRecordingTimelinePlayhead();
+  }
+}
+
+function recordingTimelinePointerRect(element) {
+  const trackArea = element?.closest?.(".recording-track-area") || recordingTimelinePanel?.querySelector(".recording-track-area");
+  const lanes = trackArea?.querySelector(".recording-lanes");
+  const ruler = trackArea?.querySelector("[data-recording-timeline-scale]");
+  const rect = (lanes || ruler || trackArea || element)?.getBoundingClientRect?.();
+  return rect && rect.width > 0 ? rect : null;
+}
+
+function formatTimelineTime(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const wholeSeconds = Math.floor(total % 60);
+  const tenths = Math.floor((total - Math.floor(total)) * 10);
+  return `${minutes}:${String(wholeSeconds).padStart(2, "0")}.${tenths}`;
+}
+
+function formatRulerTime(seconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(totalSeconds / 60);
+  const wholeSeconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}`;
+}
+
+function recordingTimelineScale() {
+  return recordingTimelinePanel?.querySelector("[data-recording-timeline-scale]");
+}
+
+function updateRecordingTimelinePlayhead() {
+  if (!activeBottomPanels.timeline || !recordingTimelinePanel) return;
+  const nextDuration = recordingSequenceDuration();
+  if (mediaRecorder?.state === "recording" && nextDuration > recordingRenderedDuration + 0.25) {
+    renderRecordingTimelinePanel();
+    return;
+  }
+  const scale = recordingTimelineScale();
+  const playhead = recordingTimelinePanel.querySelector("[data-recording-playhead]");
+  const timeLabel = recordingTimelinePanel.querySelector("[data-recording-playhead-time]");
+  const liveClip = recordingTimelinePanel.querySelector("[data-recording-live-clip]");
+  if (!scale || !playhead) return;
+  const duration = nextDuration;
+  const playheadTime = clamp(currentRecordingPlayheadTime(), 0, duration);
+  recordingPlayheadTime = playheadTime;
+  const percent = duration > 0 ? playheadTime / duration * 100 : 0;
+  playhead.style.left = `${percent}%`;
+  if (timeLabel) timeLabel.textContent = formatTimelineTime(playheadTime);
+  if (liveClip) {
+    liveClip.style.width = `${Math.max(1.5, (Math.max(0, playheadTime - recordingLaneStartedAt) / duration * 100))}%`;
+  }
+}
+
+function scheduleRecordingTimelineFrame() {
+  if (recordingTimelineFrame !== null) return;
+  recordingTimelineFrame = window.requestAnimationFrame(() => {
+    recordingTimelineFrame = null;
+    updateRecordingTimelinePlayhead();
+    if (recordingTransportPlaying && recordingPlayheadTime >= recordingSequenceDuration()) {
+      stopRecordingTransport({ resetPlayhead: false });
+      return;
+    }
+    if (mediaRecorder?.state === "recording" || recordingTransportPlaying) scheduleRecordingTimelineFrame();
+  });
+}
+
+function selectedRecordingLane() {
+  return recordingLanes.find((lane) => lane.id === selectedRecordingLaneId) || null;
+}
+
+function recordingLaneWaveform(buffer) {
+  if (!buffer?.length) return [];
+  const points = [];
+  const length = buffer.length;
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+  for (let index = 0; index < RECORDING_WAVEFORM_POINTS; index += 1) {
+    const start = Math.floor(index / RECORDING_WAVEFORM_POINTS * length);
+    const end = Math.max(start + 1, Math.floor((index + 1) / RECORDING_WAVEFORM_POINTS * length));
+    let peak = 0;
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      let sample = 0;
+      for (const channel of channels) sample += Math.abs(channel[sampleIndex] || 0);
+      peak = Math.max(peak, sample / Math.max(1, channels.length));
+    }
+    points.push(clamp(peak, 0, 1));
+  }
+  return points;
+}
+
+function recordingWaveformSvg(lane) {
+  const waveform = lane.waveform || [];
+  if (!waveform.length) return "";
+  const width = 100;
+  const height = 22;
+  const center = height / 2;
+  const step = width / Math.max(1, waveform.length - 1);
+  const upper = waveform.map((peak, index) => {
+    const x = index * step;
+    const y = center - Math.max(1, peak * center * 0.92);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  const lower = waveform.slice().reverse().map((peak, reverseIndex) => {
+    const index = waveform.length - 1 - reverseIndex;
+    const x = index * step;
+    const y = center + Math.max(1, peak * center * 0.92);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  return `
+    <svg class="recording-waveform" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <polygon points="${upper.concat(lower).join(" ")}"></polygon>
+    </svg>
+  `;
+}
+
+function renderRecordingTimelinePanel() {
+  if (!recordingTimelinePanel) return;
+  const duration = recordingSequenceDuration();
+  recordingRenderedDuration = duration;
+  const selectedLane = selectedRecordingLane();
+  const tickStep = duration > 30 ? Math.max(5, Math.ceil(duration / 12)) : 1;
+  const rulerTicks = [];
+  for (let time = 0; time <= duration + 0.001; time += tickStep) {
+    rulerTicks.push({ time, left: time / duration * 100 });
+  }
+  const status = recordingCountdownActive
+    ? `Recording in ${Math.max(1, RECORDING_COUNTDOWN_BEATS - recordingCountdownBeat + 1)}`
+    : mediaRecorder?.state === "recording"
+      ? "Recording"
+      : "";
+
+  recordingTimelinePanel.innerHTML = `
+    <div class="recording-timeline">
+      <div class="recording-track-area">
+        <div class="recording-ruler" data-recording-timeline-scale>
+          ${rulerTicks.map((tick) => `
+            <span class="recording-ruler-tick" style="left: ${tick.left}%">
+              <span>${formatRulerTime(tick.time)}</span>
+            </span>
+          `).join("")}
+          <span class="recording-playhead" data-recording-playhead>
+            <span data-recording-playhead-time>${formatTimelineTime(currentRecordingPlayheadTime())}</span>
+          </span>
+        </div>
+        <div class="recording-lanes">
+          ${recordingLanes.length ? recordingLanes.map((lane, index) => {
+            const left = lane.startTime / duration * 100;
+            const width = Math.max(1.5, lane.duration / duration * 100);
+            return `
+              <button class="recording-lane ${lane.id === selectedRecordingLaneId ? "is-selected" : ""}" type="button" data-recording-lane-id="${escapeHtml(lane.id)}">
+                <span class="recording-lane-label">${escapeHtml(lane.name || `Lane ${index + 1}`)}</span>
+                <span class="recording-lane-clip" style="left: ${left}%; width: ${width}%">
+                  ${recordingWaveformSvg(lane)}
+                  <span>${formatTimelineTime(lane.duration)}</span>
+                </span>
+              </button>
+            `;
+          }).join("") : mediaRecorder?.state === "recording" ? "" : `
+            <div class="recording-lane recording-lane-empty">
+              <span>Press Rec to capture a lane</span>
+            </div>
+          `}
+          ${mediaRecorder?.state === "recording" ? `
+            <div class="recording-lane is-recording">
+              <span class="recording-lane-label">Lane ${recordingLanes.length + 1}</span>
+              <span class="recording-lane-clip is-live" data-recording-live-clip style="left: ${(recordingLaneStartedAt / duration * 100).toFixed(3)}%; width: ${Math.max(1.5, ((currentRecordingPlayheadTime() - recordingLaneStartedAt) / duration * 100)).toFixed(3)}%">
+                <span>Live</span>
+              </span>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+      <div class="recording-side">
+        ${selectedLane ? `
+          <div class="field recording-lane-name-field">
+            <label for="recordingLaneName">Lane name</label>
+            <input id="recordingLaneName" type="text" value="${escapeHtml(selectedLane.name || "")}" autocomplete="off">
+          </div>
+          <button class="text-button danger" id="deleteRecordingLaneButton" type="button">Delete</button>
+        ` : `
+          ${status ? `<div class="recording-status" aria-live="polite">${escapeHtml(status)}</div>` : ""}
+          <div class="field recording-tempo-field">
+            <label for="recordingTempo">Tempo</label>
+            <div class="field-row">
+              <input id="recordingTempoRange" type="range" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
+              <input id="recordingTempo" type="number" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
+            </div>
+          </div>
+          <label class="toggle-row recording-metronome-row" for="recordingMetronome">
+            <input id="recordingMetronome" type="checkbox" ${recordingMetronomeEnabled ? "checked" : ""}>
+            <span>Metronome</span>
+          </label>
+          <div class="recording-transport-actions">
+            <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Stop" : "Play"}" title="${recordingTransportPlaying ? "Stop" : "Play"}">
+              ${recordingTransportPlaying
+                ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="6" width="4" height="12" rx="1"></rect><rect x="13" y="6" width="4" height="12" rx="1"></rect></svg>`
+                : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10-6.5z"></path></svg>`}
+            </button>
+            <button class="icon-button" id="rewindRecordingButton" type="button" aria-label="Move playhead to start" title="Move playhead to start">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5v14" fill="none"></path><path d="M19 6l-10 6 10 6z"></path></svg>
+            </button>
+            <button class="text-button primary" id="exportTimelineButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Export</button>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+  attachRecordingTimelineEvents();
+  updateRecordingTimelinePlayhead();
+}
+
+function playMetronomeTick(accent = false) {
+  if (!audioContext) return;
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  const now = audioContext.currentTime;
+  oscillator.frequency.value = accent ? 1320 : 880;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.12, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+  oscillator.connect(gain).connect(audioContext.destination);
+  oscillator.start(now);
+  oscillator.stop(now + 0.07);
+}
+
+function clearRecordingCountdown() {
+  if (recordingCountdownTimer !== null) {
+    clearTimeout(recordingCountdownTimer);
+    recordingCountdownTimer = null;
+  }
+  recordingCountdownActive = false;
+  recordingCountdownBeat = 0;
+}
+
+function stopRecordingMetronome() {
+  if (recordingMetronomeTimer !== null) {
+    clearInterval(recordingMetronomeTimer);
+    recordingMetronomeTimer = null;
+  }
+}
+
+function startRecordingMetronome() {
+  stopRecordingMetronome();
+  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline || mediaRecorder?.state !== "recording") return;
+  const beatMs = 60000 / recordingTimelineTempo;
+  playMetronomeTick(true);
+  recordingMetronomeTimer = window.setInterval(() => playMetronomeTick(false), beatMs);
+}
+
+function restartRecordingMetronome() {
+  if (mediaRecorder?.state === "recording") startRecordingMetronome();
+}
+
+function stopRecordingLanePlayback() {
+  while (recordingPlaybackSources.length) {
+    const source = recordingPlaybackSources.pop();
+    try {
+      source.stop();
+    } catch {
+      // Source may already have ended.
+    }
+    try {
+      source.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }
+}
+
+function startRecordingLanePlayback(startTime = 0) {
+  stopRecordingLanePlayback();
+  if (!audioContext || !recordingLanes.length) return;
+  const now = audioContext.currentTime;
+  for (const lane of recordingLanes) {
+    const offset = Math.max(0, startTime - lane.startTime);
+    if (offset >= lane.duration) continue;
+    const source = audioContext.createBufferSource();
+    source.buffer = lane.buffer;
+    source.connect(recordingPlaybackGainNode || audioContext.destination);
+    source.addEventListener("ended", () => {
+      const index = recordingPlaybackSources.indexOf(source);
+      if (index >= 0) recordingPlaybackSources.splice(index, 1);
+      try {
+        source.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    }, { once: true });
+    recordingPlaybackSources.push(source);
+    source.start(now + Math.max(0, lane.startTime - startTime), offset);
+  }
+}
+
+function stopRecordingTransport({ resetPlayhead = false, render = true } = {}) {
+  recordingTransportPlaying = false;
+  stopRecordingLanePlayback();
+  if (resetPlayhead) setRecordingPlayheadTime(0);
+  if (render && activeBottomPanels.timeline) renderRecordingTimelinePanel();
+}
+
+function startRecordingTransport() {
+  if (!audioContext || !recordingLanes.length || mediaRecorder?.state === "recording") return;
+  stopRecordingLanePlayback();
+  const duration = recordingSequenceDuration();
+  const startTime = recordingPlayheadTime >= duration ? 0 : recordingPlayheadTime;
+  recordingTransportPlaying = true;
+  recordingTransportStartTime = startTime;
+  recordingTransportStartedAt = audioContext.currentTime;
+  const now = audioContext.currentTime;
+  for (const lane of recordingLanes) {
+    const offset = Math.max(0, startTime - lane.startTime);
+    if (offset >= lane.duration) continue;
+    const source = audioContext.createBufferSource();
+    source.buffer = lane.buffer;
+    source.connect(recordingPlaybackGainNode || audioContext.destination);
+    source.addEventListener("ended", () => {
+      const index = recordingPlaybackSources.indexOf(source);
+      if (index >= 0) recordingPlaybackSources.splice(index, 1);
+      try {
+        source.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    }, { once: true });
+    recordingPlaybackSources.push(source);
+    source.start(now + Math.max(0, lane.startTime - startTime), offset);
+  }
+  renderRecordingTimelinePanel();
+  scheduleRecordingTimelineFrame();
+}
+
+function toggleRecordingTransport() {
+  if (recordingTransportPlaying) {
+    stopRecordingTransport();
+  } else {
+    ensureAudio()
+      .then(startRecordingTransport)
+      .catch((error) => alert(`Could not play recording: ${error.message}`));
+  }
+}
+
+function playRecordingScrubPreview(time, playbackRate = 1) {
+  if (!audioContext || !recordingScrubGainNode) return;
+  const now = audioContext.currentTime;
+  if (now - recordingScrubPreviewLastAt < 0.045) return;
+  const lane = recordingLanes.find((item) => time >= item.startTime && time < item.startTime + item.duration);
+  if (!lane) return;
+  if (recordingScrubSource) {
+    try {
+      recordingScrubSource.gain.gain.cancelScheduledValues(now);
+      recordingScrubSource.gain.gain.setTargetAtTime(0.0001, now, 0.006);
+      recordingScrubSource.source.stop(now + 0.04);
+    } catch {
+      // Source may already have ended.
+    }
+  }
+  const offset = clamp(time - lane.startTime, 0, Math.max(0, lane.duration - 0.02));
+  const source = audioContext.createBufferSource();
+  const gain = audioContext.createGain();
+  source.buffer = lane.buffer;
+  source.playbackRate.value = clamp(Math.abs(playbackRate) || 0.15, 0.08, 4);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(1, now + 0.012);
+  gain.gain.setTargetAtTime(0.0001, now + 0.055, 0.02);
+  source.connect(gain).connect(recordingScrubGainNode);
+  recordingScrubSource = { source, gain };
+  recordingScrubPreviewLastAt = now;
+  source.addEventListener("ended", () => {
+    if (recordingScrubSource?.source === source) recordingScrubSource = null;
+    try {
+      source.disconnect();
+      gain.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }, { once: true });
+  source.start(now, offset, 0.12);
+}
+
+function stopRecordingScrubPreview() {
+  try {
+    const now = audioContext?.currentTime || 0;
+    recordingScrubSource?.gain.gain.cancelScheduledValues(now);
+    recordingScrubSource?.gain.gain.setTargetAtTime(0.0001, now, 0.006);
+    recordingScrubSource?.source.stop(now + 0.04);
+  } catch {
+    // Source may already have ended.
+  }
+  try {
+    recordingScrubSource?.source.disconnect();
+    recordingScrubSource?.gain.disconnect();
+  } catch {
+    // Already disconnected.
+  }
+  recordingScrubSource = null;
+  recordingScrubPreviewLastAt = 0;
+}
+
+function recordingTimeFromPointer(event, drag = recordingScrubState) {
+  if (!drag) return 0;
+  const duration = recordingSequenceDuration();
+  const horizontalDelta = event.clientX - drag.lastX;
+  if (Math.abs(horizontalDelta) < 1) return drag.lastTime;
+  const secondsPerPixel = duration / Math.max(1, drag.rect.width);
+  const axisDelta = horizontalDelta * secondsPerPixel;
+  const perpendicular = Math.max(0, Math.abs(event.clientY - drag.startY) - VALUE_SLIDER_PRECISION_THRESHOLD_PX);
+  const precision = 1 / (1 + Math.pow(perpendicular / VALUE_SLIDER_PRECISION_DISTANCE_PX, VALUE_SLIDER_PRECISION_POWER));
+  return clamp(drag.lastTime + axisDelta * precision, 0, duration);
+}
+
+function onRecordingRulerPointerDown(event) {
+  if (event.button !== 0) return;
+  if (event.target.closest?.("[data-recording-lane-id]")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopRecordingTransport({ render: false });
+  const rect = recordingTimelinePointerRect(event.currentTarget);
+  if (!rect) return;
+  const duration = recordingSequenceDuration();
+  const startTime = clamp((event.clientX - rect.left) / Math.max(1, rect.width) * duration, 0, duration);
+  recordingScrubState = {
+    pointerId: event.pointerId,
+    rect,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    startTime,
+    lastTime: startTime,
+    lastAt: performance.now(),
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  setRecordingPlayheadTime(startTime);
+  ensureAudio()
+    .then(() => playRecordingScrubPreview(startTime, 1))
+    .catch(() => {});
+}
+
+function onRecordingRulerPointerMove(event) {
+  if (!recordingScrubState || event.pointerId !== recordingScrubState.pointerId) return;
+  event.preventDefault();
+  const nextTime = recordingTimeFromPointer(event);
+  const now = performance.now();
+  const dt = Math.max(16, now - recordingScrubState.lastAt) / 1000;
+  const rate = (nextTime - recordingScrubState.lastTime) / dt;
+  if (Math.abs(nextTime - recordingScrubState.startTime) > 0.03) recordingScrubState.moved = true;
+  setRecordingPlayheadTime(nextTime);
+  playRecordingScrubPreview(nextTime, Math.abs(rate) / 1.2);
+  recordingScrubState.lastX = event.clientX;
+  recordingScrubState.lastTime = nextTime;
+  recordingScrubState.lastAt = now;
+}
+
+function onRecordingRulerPointerEnd(event) {
+  if (!recordingScrubState || event.pointerId !== recordingScrubState.pointerId) return;
+  event.preventDefault();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  recordingScrubState = null;
+  stopRecordingScrubPreview();
+}
+
+function attachRecordingTimelineEvents() {
+  const ruler = recordingTimelinePanel.querySelector("[data-recording-timeline-scale]");
+  const trackArea = recordingTimelinePanel.querySelector(".recording-track-area");
+  const scrubSurface = trackArea || ruler;
+  scrubSurface?.addEventListener("pointerdown", onRecordingRulerPointerDown);
+  scrubSurface?.addEventListener("pointermove", onRecordingRulerPointerMove);
+  scrubSurface?.addEventListener("pointerup", onRecordingRulerPointerEnd);
+  scrubSurface?.addEventListener("pointercancel", onRecordingRulerPointerEnd);
+  scrubSurface?.addEventListener("lostpointercapture", onRecordingRulerPointerEnd);
+  recordingTimelinePanel.querySelector(".recording-lanes")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("[data-recording-lane-id]")) return;
+    selectedRecordingLaneId = null;
+    renderRecordingTimelinePanel();
+  });
+  recordingTimelinePanel.querySelector(".recording-track-area")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("[data-recording-lane-id]")) return;
+    if (recordingScrubState?.moved) return;
+    selectedRecordingLaneId = null;
+    renderRecordingTimelinePanel();
+  });
+
+  for (const laneButton of recordingTimelinePanel.querySelectorAll("[data-recording-lane-id]")) {
+    laneButton.addEventListener("click", (event) => {
+      if (recordingScrubState?.moved) return;
+      event.stopPropagation();
+      selectedRecordingLaneId = selectedRecordingLaneId === laneButton.dataset.recordingLaneId
+        ? null
+        : laneButton.dataset.recordingLaneId;
+      renderRecordingTimelinePanel();
+    });
+  }
+
+  const laneName = recordingTimelinePanel.querySelector("#recordingLaneName");
+  laneName?.addEventListener("input", (event) => {
+    const lane = selectedRecordingLane();
+    if (!lane) return;
+    lane.name = event.target.value;
+    const laneButton = recordingTimelinePanel.querySelector(`[data-recording-lane-id="${CSS.escape(lane.id)}"] .recording-lane-label`);
+    if (laneButton) laneButton.textContent = lane.name || "Lane";
+  });
+  recordingTimelinePanel.querySelector("#deleteRecordingLaneButton")?.addEventListener("click", deleteSelectedRecordingLane);
+
+  if (!selectedRecordingLane()) {
+    bindNumberPair("recordingTempo", "recordingTempoRange", RECORDING_TEMPO_MIN, RECORDING_TEMPO_MAX, (value) => {
+      recordingTimelineTempo = Math.round(value);
+      restartRecordingMetronome();
+      return recordingTimelineTempo;
+    }, { root: recordingTimelinePanel });
+    recordingTimelinePanel.querySelector("#recordingMetronome")?.addEventListener("change", (event) => {
+      recordingMetronomeEnabled = event.target.checked;
+      restartRecordingMetronome();
+    });
+    recordingTimelinePanel.querySelector("#playRecordingButton")?.addEventListener("click", toggleRecordingTransport);
+    recordingTimelinePanel.querySelector("#rewindRecordingButton")?.addEventListener("click", () => {
+      stopRecordingTransport();
+      setRecordingPlayheadTime(0, { render: true });
+    });
+    recordingTimelinePanel.querySelector("#exportTimelineButton")?.addEventListener("click", () => {
+      exportRecordingSequence().catch((error) => alert(`Could not export recording mix: ${error.message}`));
+    });
+  }
+}
+
+function deleteSelectedRecordingLane() {
+  const lane = selectedRecordingLane();
+  if (!lane) return false;
+  const index = recordingLanes.findIndex((item) => item.id === lane.id);
+  if (index >= 0) recordingLanes.splice(index, 1);
+  selectedRecordingLaneId = null;
+  setRecordingPlayheadTime(Math.min(recordingPlayheadTime, recordingSequenceDuration()));
+  renderRecordingTimelinePanel();
+  return true;
+}
+
+function recordingCountdown() {
+  clearRecordingCountdown();
+  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline) return Promise.resolve();
+  recordingCountdownActive = true;
+  renderRecordingTimelinePanel();
+  const beatMs = 60000 / recordingTimelineTempo;
+  return new Promise((resolve) => {
+    const tick = () => {
+      recordingCountdownBeat += 1;
+      playMetronomeTick(recordingCountdownBeat === 1);
+      renderRecordingTimelinePanel();
+      if (recordingCountdownBeat >= RECORDING_COUNTDOWN_BEATS) {
+        recordingCountdownTimer = window.setTimeout(() => {
+          clearRecordingCountdown();
+          renderRecordingTimelinePanel();
+          resolve();
+        }, beatMs);
+        return;
+      }
+      recordingCountdownTimer = window.setTimeout(tick, beatMs);
+    };
+    tick();
+  });
+}
+
+function recordingExportTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`,
+  ].join("_");
+}
+
+function recordingExportFileName(name, fallback = "lane") {
+  return `${String(name || fallback)
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 80) || fallback}.wav`;
+}
+
+function uniqueRecordingExportFileNames(lanes) {
+  const used = new Set(["mix.wav"]);
+  return lanes.map((lane, index) => {
+    const fallback = `Lane ${index + 1}`;
+    const rawName = recordingExportFileName(lane.name, fallback);
+    const base = rawName.replace(/\.wav$/i, "");
+    let fileName = rawName;
+    let counter = 2;
+    while (used.has(fileName.toLowerCase())) {
+      fileName = `${base} ${counter}.wav`;
+      counter += 1;
+    }
+    used.add(fileName.toLowerCase());
+    return fileName;
+  });
+}
+
+async function saveRecordingToServer(wavBlob, startedAt = recordingStartedAt || new Date(), options = {}) {
+  const headers = {
+    "content-type": "audio/wav",
+    "x-recording-started-at": startedAt.toISOString(),
+  };
+  if (options.exportId && options.fileName) {
+    headers["x-recording-export-id"] = options.exportId;
+    headers["x-recording-file-name"] = options.fileName;
+  }
   const response = await fetch("/api/recordings", {
     method: "POST",
-    headers: {
-      "content-type": "audio/wav",
-      "x-recording-started-at": (recordingStartedAt || new Date()).toISOString(),
-    },
+    headers,
     body: wavBlob,
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(result.error || `Recording save failed (${response.status}).`);
   }
+  return result;
 }
 
 async function exportRecording() {
@@ -2335,7 +3030,53 @@ async function exportRecording() {
 
   const arrayBuffer = await sourceBlob.arrayBuffer();
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-  await saveRecordingToServer(audioBufferToWav(decoded));
+  recordingLanes.push({
+    id: `recording-lane-${recordingLaneCounter++}`,
+    name: `Lane ${recordingLaneCounter - 1}`,
+    startTime: recordingLaneStartedAt,
+    duration: decoded.duration,
+    buffer: decoded,
+    waveform: recordingLaneWaveform(decoded),
+    createdAt: recordingStartedAt || new Date(),
+  });
+  if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+}
+
+async function exportRecordingSequence() {
+  if (!recordingLanes.length) return;
+  await ensureAudio();
+  const sampleRate = audioContext.sampleRate;
+  const duration = Math.max(...recordingLanes.map((lane) => lane.startTime + lane.duration));
+  const channelCount = Math.max(2, ...recordingLanes.map((lane) => lane.buffer.numberOfChannels));
+  const exportStartedAt = new Date();
+  const exportId = recordingExportTimestamp(exportStartedAt);
+  const stemFileNames = uniqueRecordingExportFileNames(recordingLanes);
+  const offline = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
+  for (const lane of recordingLanes) {
+    const source = offline.createBufferSource();
+    source.buffer = lane.buffer;
+    source.connect(offline.destination);
+    source.start(lane.startTime);
+  }
+  const mixed = await offline.startRendering();
+  const mixResult = await saveRecordingToServer(audioBufferToWav(mixed), exportStartedAt, { exportId, fileName: "mix.wav" });
+  if (mixResult.fileName !== "mix.wav") {
+    throw new Error("The recording server needs to be restarted before folder exports are available.");
+  }
+  for (let index = 0; index < recordingLanes.length; index += 1) {
+    const lane = recordingLanes[index];
+    const stem = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
+    const source = stem.createBufferSource();
+    source.buffer = lane.buffer;
+    source.connect(stem.destination);
+    source.start(lane.startTime);
+    const renderedStem = await stem.startRendering();
+    await saveRecordingToServer(audioBufferToWav(renderedStem), exportStartedAt, {
+      exportId,
+      fileName: stemFileNames[index],
+    });
+  }
+  showRecordingSavedState();
 }
 
 async function startRecording() {
@@ -2349,14 +3090,19 @@ async function startRecording() {
 
   recordingStarting = true;
   recordButton.disabled = true;
+  stopRecordingTransport({ render: false });
+  recordingReturnPlayheadTime = recordingPlayheadTime;
   try {
     await ensureAudio();
+    await recordingCountdown();
   } finally {
     recordingStarting = false;
     recordButton.disabled = false;
   }
+  if (mediaRecorder?.state === "recording") return;
   recordingChunks = [];
   recordingStartedAt = new Date();
+  recordingLaneStartedAt = recordingReturnPlayheadTime;
   mediaRecorder = new MediaRecorder(recorderDestination.stream, options);
   mediaRecorder.addEventListener("dataavailable", (event) => {
     if (event.data?.size) recordingChunks.push(event.data);
@@ -2364,9 +3110,11 @@ async function startRecording() {
   mediaRecorder.addEventListener("stop", async () => {
     recordButton.disabled = true;
     setRecordingButtonState(false);
+    stopRecordingMetronome();
+    stopRecordingLanePlayback();
     try {
       await exportRecording();
-      showRecordingSavedState();
+      showRecordingSavedState("Lane", "Recording lane captured");
     } catch (error) {
       alert(`Could not save recording: ${error.message}`);
     } finally {
@@ -2374,13 +3122,23 @@ async function startRecording() {
       mediaRecorder = null;
       recordingChunks = [];
       recordingStartedAt = null;
+      recordingLaneStartedAt = 0;
+      setRecordingPlayheadTime(recordingReturnPlayheadTime);
+      if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
     }
   }, { once: true });
   mediaRecorder.start();
+  recordingTimelineStartedAt = audioContext.currentTime;
   setRecordingButtonState(true);
+  setRecordingPlayheadTime(recordingLaneStartedAt);
+  startRecordingLanePlayback(recordingLaneStartedAt);
+  startRecordingMetronome();
+  if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+  scheduleRecordingTimelineFrame();
 }
 
 function stopRecording() {
+  clearRecordingCountdown();
   if (mediaRecorder?.state === "recording") {
     mediaRecorder.stop();
   }
@@ -2414,7 +3172,7 @@ function patchForSlotId(slotId) {
 
 function matchingPatchSlots(eventMeta = {}) {
   syncActivePatchSlot();
-  return patchSlots.filter((slot) => patchMatchesMidiEvent(slot.patch, eventMeta));
+  return patchSlots.filter((slot) => slot.active !== false && patchMatchesMidiEvent(slot.patch, eventMeta));
 }
 
 function matchingSynthSlots(eventMeta = {}) {
@@ -2624,18 +3382,23 @@ function renderMidiKnobPanel() {
 }
 
 function renderBottomPanel() {
-  if (!bottomPanel || !midiKeyboardPanel || !midiKnobPanel) return;
+  if (!bottomPanel || !midiKeyboardPanel || !midiKnobPanel || !recordingTimelinePanel) return;
+  const showTimeline = activeBottomPanels.timeline;
   const showKeyboard = activeBottomPanels.keyboard;
   const showKnobs = activeBottomPanels.knobs;
-  bottomPanel.hidden = !showKeyboard && !showKnobs;
+  bottomPanel.hidden = !showTimeline && !showKeyboard && !showKnobs;
+  recordingTimelinePanel.hidden = !showTimeline;
   midiKeyboardPanel.hidden = !showKeyboard;
   midiKnobPanel.hidden = !showKnobs;
   appShell?.classList.toggle("keyboard-wide", showKeyboard && keyboardWideLayout);
+  timelinePanelButton?.classList.toggle("is-active", showTimeline);
+  timelinePanelButton?.setAttribute("aria-pressed", String(showTimeline));
   keyboardPanelButton?.classList.toggle("is-active", showKeyboard);
   keyboardPanelButton?.setAttribute("aria-pressed", String(showKeyboard));
   knobPanelButton?.classList.toggle("is-active", showKnobs);
   knobPanelButton?.setAttribute("aria-pressed", String(showKnobs));
 
+  if (showTimeline) renderRecordingTimelinePanel();
   if (showKeyboard) renderMidiKeyboardPanel();
   if (showKnobs) renderMidiKnobPanel();
 }
@@ -5302,6 +6065,12 @@ function renderEmptyPanel() {
         <button class="text-button" id="savePatchButton" type="button">Save</button>
         <button class="text-button" id="loadPatchButton" type="button">Load</button>
       </div>
+      ${patchSlots.length > 1 ? `
+        <label class="toggle-row patch-active-row" for="patchActive">
+          <input id="patchActive" type="checkbox" ${patchSlots.find((slot) => slot.id === activePatchSlotId)?.active === false ? "" : "checked"}>
+          <span>Active</span>
+        </label>
+      ` : ""}
       <div class="settings-pair">
         <div class="field">
           <label for="maxVoices">Max voices</label>
@@ -5367,6 +6136,15 @@ function renderEmptyPanel() {
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
+  });
+  panel.querySelector("#patchActive")?.addEventListener("change", (event) => {
+    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+    if (!slot) return;
+    slot.active = event.target.checked;
+    if (!slot.active) panicSynths(activePatchSlotId);
+    syncSynthSlotActive(activePatchSlotId);
+    renderPatchTabs();
+    savePatch();
   });
   bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
     state.maxVoices = Math.round(value);
@@ -5479,10 +6257,10 @@ function renderPatchTabs() {
       const name = slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName;
       return `
         <button
-          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""}"
+          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""} ${slot.active === false ? "inactive" : ""}"
           type="button"
           data-patch-slot-id="${escapeHtml(slot.id)}"
-          title="${escapeHtml(name || "Untitled Patch")}"
+          title="${escapeHtml(`${name || "Untitled Patch"}${slot.active === false ? " (inactive)" : ""}`)}"
         >${escapeHtml(name || "Untitled Patch")}</button>
       `;
     }).join("")}
@@ -6565,8 +7343,13 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
   if (event.key === "Backspace" || event.key === "Delete") {
+    if (!isTextEditingTarget() && selectedRecordingLane()) {
+      event.preventDefault();
+      deleteSelectedRecordingLane();
+      return;
+    }
+    if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
     const removed = removeSelectedElements();
     if (!removed) return;
     event.preventDefault();

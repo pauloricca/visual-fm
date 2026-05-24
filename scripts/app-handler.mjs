@@ -48,6 +48,17 @@ export function createAppRequestHandler(rootDir) {
       : null;
   }
 
+  function safeRecordingFileName(name) {
+    const fileName = String(name || "")
+      .trim()
+      .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+      .replace(/\s+/g, " ")
+      .replace(/^\.+|\.+$/g, "")
+      .slice(0, 96);
+    const wavName = fileName.toLowerCase().endsWith(".wav") ? fileName : `${fileName}.wav`;
+    return /^[^/\\]+\.wav$/i.test(wavName) ? wavName : null;
+  }
+
   function readRequestBody(request, maxBytes = 5 * 1024 * 1024) {
     return new Promise((resolveBody, rejectBody) => {
       let body = "";
@@ -225,6 +236,31 @@ export function createAppRequestHandler(rootDir) {
     const startedAt = new Date(request.headers["x-recording-started-at"] || Date.now());
     const baseTimestamp = timestampForFile(Number.isNaN(startedAt.valueOf()) ? new Date() : startedAt);
     mkdirSync(recordingsDir, { recursive: true });
+
+    const exportTimestamp = safeTimestampName(request.headers["x-recording-export-id"]);
+    const exportFileName = safeRecordingFileName(request.headers["x-recording-file-name"]);
+    if (exportTimestamp && exportFileName) {
+      const exportDirectory = join(recordingsDir, exportTimestamp);
+      const relativeDirectory = relative(recordingsDir, exportDirectory);
+      const filePath = join(exportDirectory, exportFileName);
+      const relativeFile = relative(exportDirectory, filePath);
+      if (
+        relativeDirectory.startsWith("..")
+        || relativeDirectory.includes(`..${sep}`)
+        || relativeFile.startsWith("..")
+        || relativeFile.includes(`..${sep}`)
+      ) {
+        jsonResponse(response, 400, { error: "Invalid recording export path." });
+        return;
+      }
+      mkdirSync(exportDirectory, { recursive: true });
+      writeFileSync(filePath, recording);
+      jsonResponse(response, 201, {
+        timestamp: exportTimestamp,
+        fileName: exportFileName,
+      });
+      return;
+    }
 
     let timestamp = baseTimestamp;
     let filePath = join(recordingsDir, `${timestamp}.wav`);

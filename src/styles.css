@@ -182,6 +182,20 @@ select {
   color: var(--text);
 }
 
+.patch-tab.inactive {
+  opacity: 0.52;
+}
+
+.patch-tab.inactive::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: rgba(255, 97, 97, 0.8);
+}
+
 .patch-tab-add {
   flex: 0 0 auto;
   width: 32px;
@@ -942,7 +956,8 @@ select {
 }
 
 .midi-keyboard-panel,
-.midi-knob-panel {
+.midi-knob-panel,
+.recording-timeline-panel {
   flex: 0 0 var(--bottom-panel-row-height);
   height: var(--bottom-panel-row-height);
   min-height: 0;
@@ -950,8 +965,305 @@ select {
 
 .bottom-panel[hidden],
 .midi-keyboard-panel[hidden],
-.midi-knob-panel[hidden] {
+.midi-knob-panel[hidden],
+.recording-timeline-panel[hidden] {
   display: none;
+}
+
+.recording-timeline-panel {
+  min-height: clamp(170px, 24vh, 250px);
+  padding: 14px 18px;
+}
+
+.recording-timeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(170px, 18vw, 230px);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+}
+
+.recording-track-area {
+  display: grid;
+  grid-template-rows: 32px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  overflow: hidden;
+}
+
+.recording-ruler {
+  position: relative;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 8, 10, 0.32);
+  cursor: ew-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.recording-ruler-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(167, 176, 178, 0.28);
+}
+
+.recording-ruler-tick span {
+  position: absolute;
+  top: 8px;
+  left: 5px;
+  color: rgba(167, 176, 178, 0.78);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.recording-playhead {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  bottom: -999px;
+  width: 2px;
+  transform: translateX(-1px);
+  background: var(--green);
+  box-shadow: 0 0 0 1px rgba(117, 208, 164, 0.18);
+  pointer-events: none;
+}
+
+.recording-playhead span {
+  position: absolute;
+  top: 6px;
+  left: 7px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: rgba(117, 208, 164, 0.16);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 820;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recording-lanes {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-height: 0;
+  padding: 12px 0;
+  overflow: auto;
+}
+
+.recording-lane {
+  position: relative;
+  min-height: 31px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+}
+
+.recording-lane:hover,
+.recording-lane:focus-visible {
+  background: rgba(255, 255, 255, 0.055);
+  outline: none;
+}
+
+.recording-lane.is-selected {
+  box-shadow: none;
+}
+
+.recording-lane::before {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.recording-lane-label {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 18px;
+  transform: translateY(-50%);
+  color: rgba(241, 244, 242, 0.72);
+  font-size: 11px;
+  font-weight: 780;
+  pointer-events: none;
+}
+
+.recording-lane-clip {
+  position: absolute;
+  z-index: 1;
+  top: 5px;
+  bottom: 5px;
+  min-width: 18px;
+  border: 1px solid rgba(117, 208, 164, 0.42);
+  border-radius: 6px;
+  background: rgba(117, 208, 164, 0.42);
+}
+
+.recording-lane.is-selected .recording-lane-clip {
+  border-color: rgba(130, 255, 185, 0.82);
+  background: rgba(117, 208, 164, 0.72);
+  box-shadow: 0 0 12px rgba(117, 208, 164, 0.18);
+}
+
+.recording-lane-clip span {
+  position: absolute;
+  z-index: 2;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(8, 17, 13, 0.88);
+  font-size: 10px;
+  font-weight: 840;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recording-waveform {
+  position: absolute;
+  z-index: 1;
+  inset: 4px 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 8px);
+  opacity: 0.56;
+  pointer-events: none;
+}
+
+.recording-waveform polygon {
+  fill: rgba(241, 244, 242, 0.42);
+}
+
+.recording-lane.is-selected .recording-waveform {
+  opacity: 0.72;
+}
+
+.recording-lane-clip.is-live {
+  border-color: rgba(255, 97, 97, 0.65);
+  background: rgba(255, 97, 97, 0.5);
+}
+
+.recording-lane-empty {
+  display: grid;
+  place-items: center;
+  min-height: 72px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.recording-lane-empty::before {
+  display: none;
+}
+
+.recording-side {
+  display: grid;
+  grid-template-rows: auto auto auto auto;
+  align-content: stretch;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.recording-status {
+  min-height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.recording-tempo-field {
+  display: grid;
+  grid-template-rows: auto 38px;
+  gap: 8px;
+  min-height: 0;
+  margin: 0;
+}
+
+.recording-tempo-field .field-row {
+  grid-template-columns: 1fr;
+  grid-template-rows: 38px;
+  gap: 0;
+  min-height: 0;
+}
+
+.recording-tempo-field .value-slider--horizontal {
+  height: 38px;
+  min-height: 0;
+}
+
+.recording-metronome-row {
+  min-height: 24px;
+}
+
+.recording-lane-name-field input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  outline: none;
+  padding: 0 10px;
+}
+
+.recording-transport-actions {
+  display: grid;
+  grid-template-columns: 44px 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+}
+
+.icon-button:hover,
+.icon-button:focus-visible {
+  border-color: rgba(117, 208, 164, 0.32);
+  outline: none;
+}
+
+.icon-button svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 2.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.patch-active-row {
+  margin: -6px 0 18px;
 }
 
 .midi-keyboard-panel {
@@ -2091,12 +2403,18 @@ select {
   }
 
   .midi-keyboard-panel,
-  .midi-knob-panel {
+  .midi-knob-panel,
+  .recording-timeline-panel {
     padding-left: 12px;
     padding-right: 12px;
   }
 
   .midi-keyboard-panel {
     padding-right: 10px;
+  }
+
+  .recording-timeline {
+    grid-template-columns: minmax(0, 1fr) 150px;
+    gap: 10px;
   }
 }
