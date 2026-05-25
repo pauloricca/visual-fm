@@ -217,6 +217,7 @@ let audioReadyPromise = null;
 let audioWorkletModulePromise = null;
 let mediaRecorder = null;
 let recordingChunks = [];
+let recordingSessions = [];
 let recordingStartedAt = null;
 let recordingLaneStartedAt = 0;
 let recordingStarting = false;
@@ -232,6 +233,7 @@ let recordingMetronomeEnabled = false;
 let recordingLaneCounter = 1;
 const recordingLanes = [];
 const recordingPlaybackSources = [];
+const recordingPatchLaneCounters = new Map();
 let selectedRecordingLaneId = null;
 let recordingPlayheadTime = 0;
 let recordingReturnPlayheadTime = 0;
@@ -2389,14 +2391,18 @@ function showRecordingSavedState(caption = "Saved", label = "Recording saved") {
 
 function recordingSequenceDuration() {
   const laneEnd = recordingLanes.reduce((max, lane) => Math.max(max, lane.startTime + lane.duration), 0);
-  const liveEnd = mediaRecorder?.state === "recording"
+  const liveEnd = recordingIsActive()
     ? recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt)
     : 0;
   return Math.max(RECORDING_TIMELINE_MIN_SECONDS, laneEnd, liveEnd);
 }
 
+function recordingIsActive() {
+  return recordingSessions.some((session) => session.recorder?.state === "recording");
+}
+
 function currentRecordingPlayheadTime() {
-  if (mediaRecorder?.state === "recording") {
+  if (recordingIsActive()) {
     return recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt);
   }
   if (recordingTransportPlaying && audioContext) {
@@ -2444,14 +2450,14 @@ function recordingTimelineScale() {
 function updateRecordingTimelinePlayhead() {
   if (!activeBottomPanels.timeline || !recordingTimelinePanel) return;
   const nextDuration = recordingSequenceDuration();
-  if (mediaRecorder?.state === "recording" && nextDuration > recordingRenderedDuration + 0.25) {
+  if (recordingIsActive() && nextDuration > recordingRenderedDuration + 0.25) {
     renderRecordingTimelinePanel();
     return;
   }
   const scale = recordingTimelineScale();
   const playhead = recordingTimelinePanel.querySelector("[data-recording-playhead]");
   const timeLabel = recordingTimelinePanel.querySelector("[data-recording-playhead-time]");
-  const liveClip = recordingTimelinePanel.querySelector("[data-recording-live-clip]");
+  const liveClips = recordingTimelinePanel.querySelectorAll("[data-recording-live-clip]");
   if (!scale || !playhead) return;
   const duration = nextDuration;
   const playheadTime = clamp(currentRecordingPlayheadTime(), 0, duration);
@@ -2459,8 +2465,9 @@ function updateRecordingTimelinePlayhead() {
   const percent = duration > 0 ? playheadTime / duration * 100 : 0;
   playhead.style.left = `${percent}%`;
   if (timeLabel) timeLabel.textContent = formatTimelineTime(playheadTime);
-  if (liveClip) {
-    liveClip.style.width = `${Math.max(1.5, (Math.max(0, playheadTime - recordingLaneStartedAt) / duration * 100))}%`;
+  if (liveClips.length) {
+    const liveWidth = `${Math.max(1.5, (Math.max(0, playheadTime - recordingLaneStartedAt) / duration * 100))}%`;
+    for (const liveClip of liveClips) liveClip.style.width = liveWidth;
   }
 }
 
@@ -2473,7 +2480,7 @@ function scheduleRecordingTimelineFrame() {
       stopRecordingTransport({ resetPlayhead: false });
       return;
     }
-    if (mediaRecorder?.state === "recording" || recordingTransportPlaying) scheduleRecordingTimelineFrame();
+    if (recordingIsActive() || recordingTransportPlaying) scheduleRecordingTimelineFrame();
   });
 }
 
@@ -2537,7 +2544,7 @@ function renderRecordingTimelinePanel() {
   }
   const status = recordingCountdownActive
     ? `Recording in ${Math.max(1, RECORDING_COUNTDOWN_BEATS - recordingCountdownBeat + 1)}`
-    : mediaRecorder?.state === "recording"
+    : recordingIsActive()
       ? "Recording"
       : "";
 
@@ -2567,19 +2574,19 @@ function renderRecordingTimelinePanel() {
                 </span>
               </button>
             `;
-          }).join("") : mediaRecorder?.state === "recording" ? "" : `
+          }).join("") : recordingIsActive() ? "" : `
             <div class="recording-lane recording-lane-empty">
               <span>Press Rec to capture a lane</span>
             </div>
           `}
-          ${mediaRecorder?.state === "recording" ? `
+          ${recordingIsActive() ? recordingSessions.map((session) => `
             <div class="recording-lane is-recording">
-              <span class="recording-lane-label">Lane ${recordingLanes.length + 1}</span>
+              <span class="recording-lane-label">${escapeHtml(previewRecordingLaneName(session))}</span>
               <span class="recording-lane-clip is-live" data-recording-live-clip style="left: ${(recordingLaneStartedAt / duration * 100).toFixed(3)}%; width: ${Math.max(1.5, ((currentRecordingPlayheadTime() - recordingLaneStartedAt) / duration * 100)).toFixed(3)}%">
                 <span>Live</span>
               </span>
             </div>
-          ` : ""}
+          `).join("") : ""}
         </div>
       </div>
       <div class="recording-side">
@@ -2653,14 +2660,14 @@ function stopRecordingMetronome() {
 
 function startRecordingMetronome() {
   stopRecordingMetronome();
-  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline || mediaRecorder?.state !== "recording") return;
+  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline || !recordingIsActive()) return;
   const beatMs = 60000 / recordingTimelineTempo;
   playMetronomeTick(true);
   recordingMetronomeTimer = window.setInterval(() => playMetronomeTick(false), beatMs);
 }
 
 function restartRecordingMetronome() {
-  if (mediaRecorder?.state === "recording") startRecordingMetronome();
+  if (recordingIsActive()) startRecordingMetronome();
 }
 
 function stopRecordingLanePlayback() {
@@ -2711,7 +2718,7 @@ function stopRecordingTransport({ resetPlayhead = false, render = true } = {}) {
 }
 
 function startRecordingTransport() {
-  if (!audioContext || !recordingLanes.length || mediaRecorder?.state === "recording") return;
+  if (!audioContext || !recordingLanes.length || recordingIsActive()) return;
   stopRecordingLanePlayback();
   const duration = recordingSequenceDuration();
   const startTime = recordingPlayheadTime >= duration ? 0 : recordingPlayheadTime;
@@ -3024,15 +3031,35 @@ async function saveRecordingToServer(wavBlob, startedAt = recordingStartedAt || 
   return result;
 }
 
-async function exportRecording() {
-  const sourceBlob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
+function activeRecordingPatchSlots() {
+  syncActivePatchSlot();
+  return patchSlots.filter((slot) => slot.active !== false && synthSlots.has(slot.id));
+}
+
+function nextRecordingLaneName(session) {
+  const current = recordingPatchLaneCounters.get(session.slotId) || 0;
+  const next = current + 1;
+  recordingPatchLaneCounters.set(session.slotId, next);
+  return `${session.patchName || "Patch"} ${next}`;
+}
+
+function previewRecordingLaneName(session) {
+  const next = (recordingPatchLaneCounters.get(session.slotId) || 0) + 1;
+  return `${session.patchName || "Patch"} ${next}`;
+}
+
+async function exportRecordingSession(session) {
+  const sourceBlob = new Blob(session.chunks, { type: session.recorder?.mimeType || "audio/webm" });
   if (!sourceBlob.size) return;
 
   const arrayBuffer = await sourceBlob.arrayBuffer();
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+  const name = nextRecordingLaneName(session);
   recordingLanes.push({
     id: `recording-lane-${recordingLaneCounter++}`,
-    name: `Lane ${recordingLaneCounter - 1}`,
+    name,
+    patchSlotId: session.slotId,
+    patchName: session.patchName,
     startTime: recordingLaneStartedAt,
     duration: decoded.duration,
     buffer: decoded,
@@ -3080,7 +3107,7 @@ async function exportRecordingSequence() {
 }
 
 async function startRecording() {
-  if (recordingStarting || mediaRecorder?.state === "recording") return;
+  if (recordingStarting || recordingIsActive()) return;
 
   const options = mediaRecorderOptions();
   if (options === null) {
@@ -3099,35 +3126,70 @@ async function startRecording() {
     recordingStarting = false;
     recordButton.disabled = false;
   }
-  if (mediaRecorder?.state === "recording") return;
-  recordingChunks = [];
+  if (recordingIsActive()) return;
   recordingStartedAt = new Date();
   recordingLaneStartedAt = recordingReturnPlayheadTime;
-  mediaRecorder = new MediaRecorder(recorderDestination.stream, options);
-  mediaRecorder.addEventListener("dataavailable", (event) => {
-    if (event.data?.size) recordingChunks.push(event.data);
-  });
-  mediaRecorder.addEventListener("stop", async () => {
+  const slots = activeRecordingPatchSlots();
+  if (!slots.length) {
+    alert("No active patches to record.");
+    recordingStartedAt = null;
+    return;
+  }
+
+  let remainingStops = slots.length;
+  const finishRecordingStop = async (session) => {
     recordButton.disabled = true;
     setRecordingButtonState(false);
     stopRecordingMetronome();
     stopRecordingLanePlayback();
     try {
-      await exportRecording();
-      showRecordingSavedState("Lane", "Recording lane captured");
+      await exportRecordingSession(session);
     } catch (error) {
       alert(`Could not save recording: ${error.message}`);
     } finally {
-      recordButton.disabled = false;
-      mediaRecorder = null;
-      recordingChunks = [];
-      recordingStartedAt = null;
-      recordingLaneStartedAt = 0;
-      setRecordingPlayheadTime(recordingReturnPlayheadTime);
-      if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+      try {
+        session.synthSlot.node.disconnect(session.destination);
+      } catch {
+        // The recording tap may already be disconnected.
+      }
+      remainingStops -= 1;
+      if (remainingStops <= 0) {
+        recordButton.disabled = false;
+        mediaRecorder = null;
+        recordingSessions = [];
+        recordingChunks = [];
+        recordingStartedAt = null;
+        recordingLaneStartedAt = 0;
+        setRecordingPlayheadTime(recordingReturnPlayheadTime);
+        showRecordingSavedState(slots.length === 1 ? "Lane" : "Lanes", slots.length === 1 ? "Recording lane captured" : "Recording lanes captured");
+        if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+      }
     }
-  }, { once: true });
-  mediaRecorder.start();
+  };
+
+  recordingSessions = slots.map((slot) => {
+    const synthSlot = synthSlots.get(slot.id);
+    const destination = audioContext.createMediaStreamDestination();
+    synthSlot.node.connect(destination);
+    const recorder = new MediaRecorder(destination.stream, options);
+    const session = {
+      slotId: slot.id,
+      patchName: slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName,
+      synthSlot,
+      destination,
+      recorder,
+      chunks: [],
+    };
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data?.size) session.chunks.push(event.data);
+    });
+    recorder.addEventListener("stop", () => {
+      finishRecordingStop(session);
+    }, { once: true });
+    return session;
+  });
+  mediaRecorder = recordingSessions[0]?.recorder || null;
+  for (const session of recordingSessions) session.recorder.start();
   recordingTimelineStartedAt = audioContext.currentTime;
   setRecordingButtonState(true);
   setRecordingPlayheadTime(recordingLaneStartedAt);
@@ -3139,14 +3201,16 @@ async function startRecording() {
 
 function stopRecording() {
   clearRecordingCountdown();
-  if (mediaRecorder?.state === "recording") {
-    mediaRecorder.stop();
+  if (recordingIsActive()) {
+    for (const session of recordingSessions) {
+      if (session.recorder?.state === "recording") session.recorder.stop();
+    }
   }
 }
 
 function toggleRecording() {
   if (recordingStarting) return;
-  if (mediaRecorder?.state === "recording") {
+  if (recordingIsActive()) {
     stopRecording();
   } else {
     startRecording().catch((error) => {
