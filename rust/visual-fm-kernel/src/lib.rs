@@ -8,8 +8,11 @@ const MAX_COMB_SLOTS: usize = 96;
 const MAX_DELAY_SAMPLES: usize = 8192;
 const MAX_FORMANT_BANDS: usize = 3;
 const MAX_CUSTOM_WAVE_POINTS: usize = 64;
+const MAX_SAMPLE_SLOTS: usize = 16;
+const MAX_SAMPLE_FRAMES: usize = 524_288;
 const FORMANT_INTENSITY_MAX: f64 = 36.0;
 const CUSTOM_ONESHOT_EDGE_FADE_SECONDS: f64 = 0.002;
+const SAMPLE_EDGE_FADE_SECONDS: f64 = 0.002;
 const VOICE_START_FADE_SECONDS: f64 = 0.006;
 const VOICE_STEAL_FADE_SECONDS: f64 = 0.03;
 const CUSTOM_MODE_LOOP: i32 = 0;
@@ -18,6 +21,9 @@ const CUSTOM_MODE_PING_PONG: i32 = 2;
 const CUSTOM_MODE_SUSTAIN: i32 = 3;
 const CUSTOM_MODE_SUSTAIN_LOOP: i32 = 4;
 const CUSTOM_MODE_SUSTAIN_PING_PONG: i32 = 5;
+const SAMPLE_MODE_ONE_SHOT: i32 = 0;
+const SAMPLE_MODE_LOOP: i32 = 1;
+const SAMPLE_MODE_PING_PONG: i32 = 2;
 const AUDIO_TARGET: i32 = -1;
 const LINK_TARGET_BASE: i32 = -2;
 const TWO_PI: f64 = core::f64::consts::PI * 2.0;
@@ -42,6 +48,10 @@ const TARGET_ENVELOPE_RELEASE: i32 = 19;
 const TARGET_FILTER_CUTOFF: i32 = 20;
 const TARGET_FILTER_RESONANCE: i32 = 21;
 const TARGET_DISTORTION_GAIN: i32 = 22;
+const TARGET_SAMPLE_TRIGGER: i32 = 23;
+const TARGET_SAMPLE_START: i32 = 24;
+const TARGET_SAMPLE_END: i32 = 25;
+const TARGET_SAMPLE_STRETCH: i32 = 26;
 
 #[derive(Copy, Clone)]
 struct Node {
@@ -58,6 +68,13 @@ struct Node {
     custom_mode: i32,
     custom_sustain_start: f64,
     custom_sustain_end: f64,
+    sample_mode: i32,
+    sample_start: f64,
+    sample_end: f64,
+    sample_stretch: f64,
+    sample_cycle_length: f64,
+    sample_overlap_ratio: f64,
+    sample_original_pitch: f64,
 }
 
 #[derive(Copy, Clone)]
@@ -100,6 +117,13 @@ const EMPTY_NODE: Node = Node {
     custom_mode: CUSTOM_MODE_LOOP,
     custom_sustain_start: 0.5,
     custom_sustain_end: 0.75,
+    sample_mode: SAMPLE_MODE_ONE_SHOT,
+    sample_start: 0.0,
+    sample_end: 1.0,
+    sample_stretch: 1.0,
+    sample_cycle_length: 4096.0,
+    sample_overlap_ratio: 0.09,
+    sample_original_pitch: 60.0,
 };
 
 const EMPTY_LINK: Link = Link {
@@ -212,6 +236,24 @@ static mut CUSTOM_WAVE_DIRECTIONS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
     [[1.0; MAX_NODES]; MAX_VOICE_SLOTS];
 static mut CUSTOM_WAVE_TRIGGERED: [[bool; MAX_NODES]; MAX_VOICE_SLOTS] =
     [[false; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_SLOT_FOR_NODE: [i32; MAX_NODES] = [-1; MAX_NODES];
+static mut SAMPLE_DATA: [[f32; MAX_SAMPLE_FRAMES]; MAX_SAMPLE_SLOTS] =
+    [[0.0; MAX_SAMPLE_FRAMES]; MAX_SAMPLE_SLOTS];
+static mut SAMPLE_LENGTHS: [usize; MAX_SAMPLE_SLOTS] = [0; MAX_SAMPLE_SLOTS];
+static mut SAMPLE_RATES: [f64; MAX_SAMPLE_SLOTS] = [44_100.0; MAX_SAMPLE_SLOTS];
+static mut SAMPLE_PLAYING: [[bool; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[false; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_POSITIONS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_DIRECTIONS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[1.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_START_VALUES: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_STRETCH_PHASES: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_STRETCH_ANCHORS: [[f64; MAX_NODES]; MAX_VOICE_SLOTS] =
+    [[0.0; MAX_NODES]; MAX_VOICE_SLOTS];
+static mut SAMPLE_STRETCH_MODS: [f64; MAX_NODES] = [0.0; MAX_NODES];
 static mut LINK_DELAY_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
 static mut LINK_DELAY_SLOT_COUNT: usize = 0;
 static mut LINK_COMB_SLOTS: [i32; MAX_LINKS] = [-1; MAX_LINKS];
@@ -307,6 +349,59 @@ pub extern "C" fn linkMeterCountPtr() -> *const u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn maxSampleFrames() -> u32 {
+    MAX_SAMPLE_FRAMES as u32
+}
+
+#[no_mangle]
+pub extern "C" fn sampleDataPtr(slot: u32) -> *mut f32 {
+    let slot = slot as usize;
+    if slot >= MAX_SAMPLE_SLOTS {
+        return core::ptr::null_mut();
+    }
+    unsafe { core::ptr::addr_of_mut!(SAMPLE_DATA[slot]).cast::<f32>() }
+}
+
+#[no_mangle]
+pub extern "C" fn setSampleData(node_index: i32, sample_rate: f64, length: u32) -> i32 {
+    unsafe {
+        if node_index < 0 || node_index as usize >= NODE_COUNT {
+            return -1;
+        }
+        let node_index = node_index as usize;
+        let existing = SAMPLE_SLOT_FOR_NODE[node_index];
+        let slot = if existing >= 0 {
+            existing as usize
+        } else {
+            let mut free_slot = None;
+            'outer: for slot_index in 0..MAX_SAMPLE_SLOTS {
+                for node_slot in 0..MAX_NODES {
+                    if SAMPLE_SLOT_FOR_NODE[node_slot] == slot_index as i32 {
+                        continue 'outer;
+                    }
+                }
+                free_slot = Some(slot_index);
+                break;
+            }
+            match free_slot {
+                Some(slot_index) => {
+                    SAMPLE_SLOT_FOR_NODE[node_index] = slot_index as i32;
+                    slot_index
+                }
+                None => return -1,
+            }
+        };
+        SAMPLE_LENGTHS[slot] = (length as usize).min(MAX_SAMPLE_FRAMES);
+        SAMPLE_RATES[slot] = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44_100.0
+        };
+        slot as i32
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn clear(frames: u32) {
     let frames = (frames as usize).min(MAX_WASM_FRAMES);
     let left = core::ptr::addr_of_mut!(LEFT).cast::<f32>();
@@ -336,6 +431,8 @@ pub extern "C" fn clearGraph() {
         }
         for index in 0..MAX_NODES {
             CUSTOM_WAVE_COUNTS[index] = 0;
+            SAMPLE_SLOT_FOR_NODE[index] = -1;
+            SAMPLE_STRETCH_MODS[index] = 0.0;
         }
     }
 }
@@ -367,6 +464,13 @@ pub extern "C" fn addNode(
     custom_mode: i32,
     custom_sustain_start: f64,
     custom_sustain_end: f64,
+    sample_mode: i32,
+    sample_start: f64,
+    sample_end: f64,
+    sample_stretch: f64,
+    sample_cycle_length: f64,
+    sample_overlap_ratio: f64,
+    sample_original_pitch: f64,
 ) -> i32 {
     unsafe {
         if NODE_COUNT >= MAX_NODES {
@@ -387,8 +491,16 @@ pub extern "C" fn addNode(
             custom_mode: custom_mode.clamp(CUSTOM_MODE_LOOP, CUSTOM_MODE_SUSTAIN_PING_PONG),
             custom_sustain_start: custom_sustain_start.clamp(0.0, 0.999),
             custom_sustain_end: custom_sustain_end.clamp((custom_sustain_start + 0.001).clamp(0.001, 1.0), 1.0),
+            sample_mode: sample_mode.clamp(SAMPLE_MODE_ONE_SHOT, SAMPLE_MODE_PING_PONG),
+            sample_start: sample_start.clamp(0.0, 1.0),
+            sample_end: sample_end.clamp(0.0, 1.0),
+            sample_stretch: sample_stretch.max(0.001),
+            sample_cycle_length: sample_cycle_length.round().max(1.0),
+            sample_overlap_ratio: sample_overlap_ratio.clamp(0.0, 1.0),
+            sample_original_pitch: sample_original_pitch.clamp(0.0, 127.0),
         };
         CUSTOM_WAVE_COUNTS[index] = 0;
+        SAMPLE_SLOT_FOR_NODE[index] = -1;
         NODE_COUNT += 1;
         index as i32
     }
@@ -409,6 +521,150 @@ pub extern "C" fn addCustomWavePoint(node_index: i32, x: f64, y: f64) -> i32 {
         CUSTOM_WAVE_YS[node_index][count] = y.clamp(-1.0, 1.0);
         CUSTOM_WAVE_COUNTS[node_index] = count + 1;
         count as i32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeFrequencyMode(index: u32, frequency_mode: i32) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].frequency_mode = if frequency_mode == 1 { 1 } else { 0 };
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeRatio(index: u32, ratio: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].ratio = ratio.clamp(0.0, 16.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeFrequency(index: u32, frequency: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].frequency = frequency.clamp(0.0, 12_000.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeQuantiseEnabled(index: u32, enabled: i32) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].quantise_enabled = if enabled != 0 { 1 } else { 0 };
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeQuantiseRoot(index: u32, root: i32) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].quantise_root = root.clamp(-1, 11);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeQuantiseScale(index: u32, scale: i32) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].quantise_scale = scale.clamp(0, 8);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeQuantiseGlide(index: u32, glide: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].quantise_glide = glide.clamp(0.0, 4.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSpeed(index: u32, speed: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].speed = speed.clamp(0.01, 60.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeAudioInputGain(index: u32, gain: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].audio_input_gain = gain.clamp(0.0, 4.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleMode(index: u32, mode: i32) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_mode = mode.clamp(SAMPLE_MODE_ONE_SHOT, SAMPLE_MODE_PING_PONG);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleStart(index: u32, start: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_start = start.clamp(0.0, 1.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleEnd(index: u32, end: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_end = end.clamp(0.0, 1.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleStretch(index: u32, stretch: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_stretch = stretch.max(0.001);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleCycleLength(index: u32, cycle_length: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_cycle_length = cycle_length.round().max(1.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleOverlapRatio(index: u32, overlap_ratio: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_overlap_ratio = overlap_ratio.clamp(0.0, 1.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSampleOriginalPitch(index: u32, pitch: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sample_original_pitch = pitch.clamp(0.0, 127.0);
+        }
     }
 }
 
@@ -613,6 +869,10 @@ pub extern "C" fn resetPhases() {
     let custom_wave_done = core::ptr::addr_of_mut!(CUSTOM_WAVE_DONE).cast::<bool>();
     let custom_wave_directions = core::ptr::addr_of_mut!(CUSTOM_WAVE_DIRECTIONS).cast::<f64>();
     let custom_wave_triggered = core::ptr::addr_of_mut!(CUSTOM_WAVE_TRIGGERED).cast::<bool>();
+    let sample_playing = core::ptr::addr_of_mut!(SAMPLE_PLAYING).cast::<bool>();
+    let sample_positions = core::ptr::addr_of_mut!(SAMPLE_POSITIONS).cast::<f64>();
+    let sample_directions = core::ptr::addr_of_mut!(SAMPLE_DIRECTIONS).cast::<f64>();
+    let sample_start_values = core::ptr::addr_of_mut!(SAMPLE_START_VALUES).cast::<f64>();
     let delay_buffers = core::ptr::addr_of_mut!(LINK_DELAY_BUFFERS).cast::<f32>();
     let delay_indices = core::ptr::addr_of_mut!(LINK_DELAY_INDICES).cast::<usize>();
     let delay_ready = core::ptr::addr_of_mut!(LINK_DELAY_READY).cast::<bool>();
@@ -642,6 +902,12 @@ pub extern "C" fn resetPhases() {
             *custom_wave_done.add(index) = false;
             *custom_wave_directions.add(index) = 1.0;
             *custom_wave_triggered.add(index) = false;
+            *sample_playing.add(index) = false;
+            *sample_positions.add(index) = 0.0;
+            *sample_directions.add(index) = 1.0;
+            *sample_start_values.add(index) = 0.0;
+            *core::ptr::addr_of_mut!(SAMPLE_STRETCH_PHASES).cast::<f64>().add(index) = 0.0;
+            *core::ptr::addr_of_mut!(SAMPLE_STRETCH_ANCHORS).cast::<f64>().add(index) = 0.0;
         }
     }
     for index in 0..(MAX_VOICE_SLOTS * MAX_LINKS) {
@@ -713,6 +979,15 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
             CUSTOM_WAVE_DONE[voice_slot][node_index] = false;
             CUSTOM_WAVE_DIRECTIONS[voice_slot][node_index] = 1.0;
             CUSTOM_WAVE_TRIGGERED[voice_slot][node_index] = false;
+            SAMPLE_PLAYING[voice_slot][node_index] = node_index < NODE_COUNT && NODES[node_index].wave == 10;
+            SAMPLE_POSITIONS[voice_slot][node_index] = 0.0;
+            SAMPLE_DIRECTIONS[voice_slot][node_index] = 1.0;
+            SAMPLE_START_VALUES[voice_slot][node_index] = 0.0;
+            SAMPLE_STRETCH_PHASES[voice_slot][node_index] = 0.0;
+            SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] = 0.0;
+            if node_index < NODE_COUNT && NODES[node_index].wave == 10 {
+                start_sample_player(node_index, voice_slot, NODES[node_index], 0.0, 0.0);
+            }
         }
         for link_index in 0..MAX_LINKS {
             LINK_TRIGGER_ARMED[voice_slot][link_index] = true;
@@ -893,6 +1168,261 @@ fn custom_one_shot_edge_gain(node: Node, phase: f64, base_frequency: f64) -> f64
     let fade_phase = (CUSTOM_ONESHOT_EDGE_FADE_SECONDS * base_frequency).clamp(0.0005, 0.08);
     let p = phase.clamp(0.0, 1.0);
     (p / fade_phase).min((1.0 - p) / fade_phase).clamp(0.0, 1.0)
+}
+
+fn sample_slot_for_node(node_index: usize) -> Option<usize> {
+    unsafe {
+        if node_index >= MAX_NODES {
+            return None;
+        }
+        let slot = SAMPLE_SLOT_FOR_NODE[node_index];
+        if slot < 0 {
+            return None;
+        }
+        let slot = slot as usize;
+        if slot >= MAX_SAMPLE_SLOTS || SAMPLE_LENGTHS[slot] == 0 {
+            return None;
+        }
+        Some(slot)
+    }
+}
+
+fn sample_range(node_index: usize, node: Node, start_mod: f64, end_mod: f64) -> Option<(f64, f64, f64, f64, f64, f64)> {
+    let slot = sample_slot_for_node(node_index)?;
+    unsafe {
+        let max_frame = SAMPLE_LENGTHS[slot].saturating_sub(1) as f64;
+        if max_frame <= 0.0 {
+            return None;
+        }
+        let start = (node.sample_start + start_mod).clamp(0.0, 1.0);
+        let end = (node.sample_end + end_mod).clamp(0.0, 1.0);
+        let start_frame = (start * max_frame).round().clamp(0.0, max_frame);
+        let end_frame = (end * max_frame).round().clamp(0.0, max_frame);
+        let first_frame = start_frame.min(end_frame);
+        let last_frame = start_frame.max(end_frame);
+        let direction = if end_frame >= start_frame { 1.0 } else { -1.0 };
+        let length = (end_frame - start_frame).abs() + 1.0;
+        Some((start_frame, end_frame, first_frame, last_frame, direction, length.max(1.0)))
+    }
+}
+
+fn original_pitch_frequency(midi_note: f64) -> f64 {
+    440.0 * 2.0_f64.powf((midi_note - 69.0) / 12.0)
+}
+
+fn sample_playback_step(
+    node_index: usize,
+    node: Node,
+    note_frequency: f64,
+    frequency_mod: f64,
+    sample_rate: f64,
+) -> f64 {
+    let Some(slot) = sample_slot_for_node(node_index) else {
+        return 0.0;
+    };
+    unsafe {
+        let target_frequency = (base_frequency(node, note_frequency)
+            * 2.0_f64.powf(frequency_mod.clamp(-5.0, 5.0)))
+            .max(0.0001);
+        let original = original_pitch_frequency(node.sample_original_pitch).max(0.0001);
+        let source_rate = SAMPLE_RATES[slot].max(1.0);
+        (target_frequency / original) * (source_rate / sample_rate.max(1.0))
+    }
+}
+
+fn sample_playback_duration(
+    node_index: usize,
+    node: Node,
+    note_frequency: f64,
+    frequency_mod: f64,
+    sample_rate: f64,
+) -> Option<f64> {
+    let (_, _, _, _, _, length) = sample_range(node_index, node, 0.0, 0.0)?;
+    let step = sample_playback_step(
+        node_index,
+        node,
+        note_frequency,
+        frequency_mod,
+        sample_rate,
+    )
+    .abs()
+    .max(0.0001);
+    Some((length / step / sample_rate.max(1.0)) * node.sample_stretch.max(0.001))
+}
+
+fn start_sample_player(
+    node_index: usize,
+    voice_slot: usize,
+    node: Node,
+    start_mod: f64,
+    end_mod: f64,
+) {
+    unsafe {
+        let Some((start_frame, _, _, _, direction, _)) = sample_range(node_index, node, start_mod, end_mod) else {
+            SAMPLE_PLAYING[voice_slot][node_index] = false;
+            return;
+        };
+        let Some(slot) = sample_slot_for_node(node_index) else {
+            SAMPLE_PLAYING[voice_slot][node_index] = false;
+            return;
+        };
+        let start_index = (start_frame.round() as usize).min(SAMPLE_LENGTHS[slot].saturating_sub(1));
+        SAMPLE_PLAYING[voice_slot][node_index] = true;
+        SAMPLE_POSITIONS[voice_slot][node_index] = start_frame;
+        SAMPLE_DIRECTIONS[voice_slot][node_index] = direction;
+        SAMPLE_START_VALUES[voice_slot][node_index] = SAMPLE_DATA[slot][start_index] as f64;
+        SAMPLE_STRETCH_PHASES[voice_slot][node_index] = 0.0;
+        SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] = start_frame;
+    }
+}
+
+fn sample_player_boundary(node_index: usize, voice_slot: usize, start_frame: f64, end_frame: f64, direction: f64) -> f64 {
+    unsafe {
+        if SAMPLE_DIRECTIONS[voice_slot][node_index] == direction {
+            end_frame
+        } else {
+            start_frame
+        }
+    }
+}
+
+fn sample_player_past_end(position: f64, play_direction: f64, boundary: f64) -> bool {
+    if play_direction >= 0.0 {
+        position > boundary
+    } else {
+        position < boundary
+    }
+}
+
+fn finish_sample_boundary(
+    node_index: usize,
+    voice_slot: usize,
+    node: Node,
+    start_frame: f64,
+    end_frame: f64,
+    first_frame: f64,
+    last_frame: f64,
+    direction: f64,
+) {
+    unsafe {
+        let play_direction = SAMPLE_DIRECTIONS[voice_slot][node_index];
+        let boundary = sample_player_boundary(node_index, voice_slot, start_frame, end_frame, direction);
+        let position = SAMPLE_POSITIONS[voice_slot][node_index];
+        if !sample_player_past_end(position, play_direction, boundary) {
+            return;
+        }
+        if node.sample_mode == SAMPLE_MODE_LOOP {
+            let span = (end_frame - start_frame).abs().max(1.0);
+            let overshoot = (position - boundary).abs();
+            let wrapped = overshoot % span;
+            SAMPLE_POSITIONS[voice_slot][node_index] = if direction >= 0.0 {
+                start_frame + wrapped
+            } else {
+                start_frame - wrapped
+            };
+            SAMPLE_DIRECTIONS[voice_slot][node_index] = direction;
+        } else if node.sample_mode == SAMPLE_MODE_PING_PONG {
+            let next_direction = -play_direction;
+            let overshoot = (position - boundary).abs();
+            SAMPLE_DIRECTIONS[voice_slot][node_index] = next_direction;
+            SAMPLE_POSITIONS[voice_slot][node_index] =
+                (boundary + overshoot * next_direction).clamp(first_frame, last_frame);
+        } else {
+            SAMPLE_PLAYING[voice_slot][node_index] = false;
+        }
+    }
+}
+
+fn sample_value(
+    node_index: usize,
+    node: Node,
+    voice_slot: usize,
+    sample_rate: f64,
+    start_mod: f64,
+    end_mod: f64,
+    stretch_mod: f64,
+) -> f64 {
+    unsafe {
+        if !SAMPLE_PLAYING[voice_slot][node_index] {
+            return 0.0;
+        }
+        let Some(slot) = sample_slot_for_node(node_index) else {
+            SAMPLE_PLAYING[voice_slot][node_index] = false;
+            return 0.0;
+        };
+        let Some((start_frame, end_frame, first_frame, last_frame, direction, length)) =
+            sample_range(node_index, node, start_mod, end_mod)
+        else {
+            SAMPLE_PLAYING[voice_slot][node_index] = false;
+            return 0.0;
+        };
+        finish_sample_boundary(
+            node_index,
+            voice_slot,
+            node,
+            start_frame,
+            end_frame,
+            first_frame,
+            last_frame,
+            direction,
+        );
+        if !SAMPLE_PLAYING[voice_slot][node_index] {
+            return 0.0;
+        }
+        let stretch = (node.sample_stretch + stretch_mod).max(0.001);
+        let (position, next_position, mix) = if (stretch - 1.0).abs() < 0.001 {
+            let base_position = SAMPLE_POSITIONS[voice_slot][node_index];
+            (base_position, base_position, 0.0)
+        } else {
+            let grain_frames = node.sample_cycle_length.round().clamp(1.0, length.max(1.0));
+            let overlap_frames = if node.sample_overlap_ratio <= 0.0 {
+                0.0
+            } else {
+                (grain_frames * node.sample_overlap_ratio.clamp(0.0, 1.0))
+                    .round()
+                    .clamp(1.0, (grain_frames - 1.0).max(1.0))
+            };
+            let hop_frames = (grain_frames - overlap_frames).max(1.0);
+            let local = SAMPLE_STRETCH_PHASES[voice_slot][node_index].clamp(0.0, grain_frames);
+            let overlap_local = (local - hop_frames).max(0.0);
+            let mix = if overlap_frames > 0.0 && overlap_local > 0.0 {
+                smooth_step(overlap_local / overlap_frames)
+            } else {
+                0.0
+            };
+            let direction = SAMPLE_DIRECTIONS[voice_slot][node_index];
+            let next_anchor = SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] + (hop_frames / stretch) * direction;
+            (
+                SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] + local * direction,
+                next_anchor + overlap_local * direction,
+                mix,
+            )
+        };
+        let position = position.clamp(first_frame, last_frame);
+        let sample_at = |read_position: f64| -> f64 {
+            let read_position = read_position.clamp(first_frame, last_frame);
+            let lower = (read_position.floor() as usize).min(SAMPLE_LENGTHS[slot].saturating_sub(1));
+            let upper = (lower + 1).min(SAMPLE_LENGTHS[slot].saturating_sub(1)).min(last_frame as usize);
+            let frac = read_position - lower as f64;
+            let a = SAMPLE_DATA[slot][lower] as f64;
+            let b = SAMPLE_DATA[slot][upper] as f64;
+            a + (b - a) * frac
+        };
+        let blended = if mix > 0.0 {
+            sample_at(position) * (1.0 - mix) + sample_at(next_position) * mix
+        } else {
+            sample_at(position)
+        };
+        let start_distance = (position - start_frame).abs();
+        let end_distance = (end_frame - position).abs();
+        let fade_frames = (SAMPLE_RATES[slot].max(sample_rate) * SAMPLE_EDGE_FADE_SECONDS)
+            .round()
+            .clamp(1.0, (length * 0.5).max(1.0));
+        let edge = smooth_step((start_distance / fade_frames).min(end_distance / fade_frames));
+        let correction = SAMPLE_START_VALUES[voice_slot][node_index]
+            * (1.0 - smooth_step(start_distance / fade_frames));
+        sanitize_sample((blended - correction) * edge, 4.0)
+    }
 }
 
 fn custom_mode_is_finite(mode: i32) -> bool {
@@ -1105,6 +1635,8 @@ fn triggered_envelope_value(
     link_index: usize,
     link: Link,
     voice_slot: usize,
+    sample_rate: f64,
+    note_frequency: f64,
     age: f64,
     release_age: f64,
 ) -> f64 {
@@ -1112,19 +1644,48 @@ fn triggered_envelope_value(
         return 1.0;
     }
     let has_envelope_trigger = link_has_envelope_trigger(link_index);
-    if voice_slot == DRONE_VOICE_SLOT && !has_envelope_trigger {
-        return 0.0;
-    }
-    if !has_envelope_trigger {
-        return envelope_value(link, age, release_age);
-    }
 
     unsafe {
         let start_age = LINK_TRIGGER_START_AGE[voice_slot][link_index];
-        if start_age < 0.0 || age < start_age {
-            return 0.0;
+        if voice_slot == DRONE_VOICE_SLOT || has_envelope_trigger {
+            if start_age < 0.0 || age < start_age {
+                return 0.0;
+            }
+            return envelope_value(link, age - start_age, release_age);
         }
-        envelope_value(link, age - start_age, release_age)
+        if release_age < 0.0 && link.from >= 0 {
+            let node_index = link.from as usize;
+            if node_index < NODE_COUNT {
+                let node = NODES[node_index];
+                if node.wave == 10 && node.sample_mode == SAMPLE_MODE_ONE_SHOT {
+                    if let Some(duration) = sample_playback_duration(
+                        node_index,
+                        node,
+                        note_frequency,
+                        FREQUENCY_MODS[node_index],
+                        sample_rate,
+                    ) {
+                        let release_at = (duration - link.env_release.max(0.001)).max(0.0);
+                        if age >= release_at {
+                            let release_level = held_envelope_value(link, release_at);
+                            return release_level
+                                * decay_curve((age - release_at) / link.env_release.max(0.001));
+                        }
+                    }
+                }
+            }
+        }
+        envelope_value(link, age, release_age)
+    }
+}
+
+fn trigger_node_output_envelopes(target_node_index: usize, voice_slot: usize, age: f64) {
+    unsafe {
+        for link_index in 0..LINK_COUNT {
+            if LINKS[link_index].from == target_node_index as i32 && LINKS[link_index].drone == 0 {
+                LINK_TRIGGER_START_AGE[voice_slot][link_index] = age;
+            }
+        }
     }
 }
 
@@ -1167,6 +1728,39 @@ fn apply_phase_reset_trigger(
             CUSTOM_WAVE_DONE[voice_slot][target_node_index] = false;
             CUSTOM_WAVE_DIRECTIONS[voice_slot][target_node_index] = 1.0;
             CUSTOM_WAVE_TRIGGERED[voice_slot][target_node_index] = true;
+            LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = false;
+        } else if !armed && value <= ENVELOPE_TRIGGER_REARM {
+            LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = true;
+        }
+    }
+}
+
+fn apply_sample_trigger(
+    target_node_index: usize,
+    mod_link_index: usize,
+    voice_slot: usize,
+    age: f64,
+    value: f64,
+    start_mod: f64,
+    end_mod: f64,
+) {
+    if !value.is_finite() {
+        return;
+    }
+
+    unsafe {
+        let armed = LINK_TRIGGER_ARMED[voice_slot][mod_link_index];
+        if armed && value >= ENVELOPE_TRIGGER_THRESHOLD {
+            if target_node_index < NODE_COUNT {
+                start_sample_player(
+                    target_node_index,
+                    voice_slot,
+                    NODES[target_node_index],
+                    start_mod,
+                    end_mod,
+                );
+                trigger_node_output_envelopes(target_node_index, voice_slot, age);
+            }
             LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = false;
         } else if !armed && value <= ENVELOPE_TRIGGER_REARM {
             LINK_TRIGGER_ARMED[voice_slot][mod_link_index] = true;
@@ -1643,7 +2237,15 @@ fn render_link_signal(
     let envelope = if ignore_envelope {
         1.0
     } else {
-        triggered_envelope_value(link_index, link, voice_slot, age, release_age)
+        triggered_envelope_value(
+            link_index,
+            link,
+            voice_slot,
+            sample_rate,
+            note_frequency,
+            age,
+            release_age,
+        )
     };
     let delayed_source = apply_link_delay(
         link_index,
@@ -1693,6 +2295,9 @@ fn render_node(
         let mut mix_signal = 0.0;
         let mut ring_amount = 0.0;
         let mut ring_signal = 0.0;
+        let mut sample_start_mod = 0.0;
+        let mut sample_end_mod = 0.0;
+        let mut sample_stretch_mod = 0.0;
 
         for link_index in 0..LINK_COUNT {
             let link = LINKS[link_index];
@@ -1740,6 +2345,20 @@ fn render_node(
                         modulation.value,
                     );
                 }
+                TARGET_SAMPLE_START => sample_start_mod += modulation.value,
+                TARGET_SAMPLE_END => sample_end_mod += modulation.value,
+                TARGET_SAMPLE_STRETCH => sample_stretch_mod += modulation.value,
+                TARGET_SAMPLE_TRIGGER => {
+                    apply_sample_trigger(
+                        node_index,
+                        link_index,
+                        voice_slot,
+                        age,
+                        modulation.value,
+                        sample_start_mod,
+                        sample_end_mod,
+                    );
+                }
                 TARGET_RING => {
                     ring_amount += modulation.amount;
                     ring_signal += modulation.signal * modulation.amount;
@@ -1756,11 +2375,23 @@ fn render_node(
         let phase = PHASES[voice_slot][node_index];
         let node_base_frequency = base_frequency(node, note_frequency);
         let active_wave =
-            node.wave == 6 || node.wave == 8 || node_base_frequency > 0.0;
+            node.wave == 6 || node.wave == 8 || node.wave == 10 || node_base_frequency > 0.0;
         let wave = modulated_wave(node.wave, wave_mod);
         let custom_done = node.wave == 9 && custom_mode_is_finite(node.custom_mode) && CUSTOM_WAVE_DONE[voice_slot][node_index];
         let mut value = if active_wave && !custom_done {
-            oscillator(node_index, node, phase + phase_mod, voice_slot, frame, wave)
+            if node.wave == 10 {
+                sample_value(
+                    node_index,
+                    node,
+                    voice_slot,
+                    sample_rate,
+                    sample_start_mod,
+                    sample_end_mod,
+                    sample_stretch_mod,
+                )
+            } else {
+                oscillator(node_index, node, phase + phase_mod, voice_slot, frame, wave)
+            }
         } else {
             0.0
         };
@@ -1786,7 +2417,13 @@ fn render_node(
             } else {
                 1.0 - (mix - 0.5) * 2.0
             };
-            let modulator_gain = if mix >= 0.5 { 1.0 } else { mix * 2.0 };
+            let modulator_gain = if mix_amount > 1.0 {
+                mix_amount
+            } else if mix >= 0.5 {
+                1.0
+            } else {
+                mix * 2.0
+            };
             value = sanitize_sample(
                 value * carrier_gain + (mix_signal / mix_amount) * modulator_gain,
                 4.0,
@@ -1795,6 +2432,7 @@ fn render_node(
 
         value = sanitize_sample(value, 4.0);
         FREQUENCY_MODS[node_index] = frequency_mod;
+        SAMPLE_STRETCH_MODS[node_index] = sample_stretch_mod;
         RENDER_CACHE[node_index] = value;
         CACHE_STAMPS[node_index] = stamp;
         FEEDBACK[voice_slot][node_index] = value;
@@ -1926,6 +2564,47 @@ fn advance_phases(voice_slot: usize, sample_rate: f64, note_frequency: f64, rele
             let step = effective_frequency / sample_rate;
             if node.wave == 9 {
                 advance_custom_wave_phase(voice_slot, node_index, node, step, release_age);
+                FREQUENCY_MODS[node_index] = 0.0;
+                continue;
+            }
+            if node.wave == 10 {
+                if SAMPLE_PLAYING[voice_slot][node_index] {
+                    let sample_step = sample_playback_step(
+                        node_index,
+                        node,
+                        note_frequency,
+                        FREQUENCY_MODS[node_index],
+                        sample_rate,
+                    )
+                    .abs()
+                    .max(0.0001);
+                    let stretch = (node.sample_stretch + SAMPLE_STRETCH_MODS[node_index]).max(0.001);
+                    SAMPLE_POSITIONS[voice_slot][node_index] +=
+                        (sample_step / stretch) * SAMPLE_DIRECTIONS[voice_slot][node_index];
+                    if (stretch - 1.0).abs() < 0.001 {
+                        SAMPLE_STRETCH_PHASES[voice_slot][node_index] = 0.0;
+                        SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] = SAMPLE_POSITIONS[voice_slot][node_index];
+                    } else {
+                        let (_, _, _, _, _, length) = sample_range(node_index, node, 0.0, 0.0)
+                            .unwrap_or((0.0, 0.0, 0.0, 0.0, 1.0, 512.0));
+                        let grain_frames = node.sample_cycle_length.round().clamp(1.0, length.max(1.0));
+                        let overlap_frames = if node.sample_overlap_ratio <= 0.0 {
+                            0.0
+                        } else {
+                            (grain_frames * node.sample_overlap_ratio.clamp(0.0, 1.0))
+                                .round()
+                                .clamp(1.0, (grain_frames - 1.0).max(1.0))
+                        };
+                        let hop_frames = (grain_frames - overlap_frames).max(1.0);
+                        SAMPLE_STRETCH_PHASES[voice_slot][node_index] += sample_step;
+                        while SAMPLE_STRETCH_PHASES[voice_slot][node_index] >= grain_frames {
+                            SAMPLE_STRETCH_ANCHORS[voice_slot][node_index] +=
+                                (hop_frames / stretch) * SAMPLE_DIRECTIONS[voice_slot][node_index];
+                            SAMPLE_STRETCH_PHASES[voice_slot][node_index] -= hop_frames;
+                        }
+                    }
+                }
+                SAMPLE_STRETCH_MODS[node_index] = 0.0;
                 FREQUENCY_MODS[node_index] = 0.0;
                 continue;
             }

@@ -9,11 +9,20 @@ const mimeTypes = new Map([
   [".map", "application/json; charset=utf-8"],
   [".svg", "image/svg+xml"],
   [".wav", "audio/wav"],
+  [".mp3", "audio/mpeg"],
+  [".m4a", "audio/mp4"],
+  [".aac", "audio/aac"],
+  [".ogg", "audio/ogg"],
+  [".flac", "audio/flac"],
+  [".webm", "audio/webm"],
+  [".aif", "audio/aiff"],
+  [".aiff", "audio/aiff"],
 ]);
 
 export function createAppRequestHandler(rootDir) {
   const savedDir = join(rootDir, "patches");
   const recordingsDir = join(rootDir, "recordings");
+  const samplesDir = join(rootDir, "samples");
 
   function jsonResponse(response, status, body) {
     response.writeHead(status, {
@@ -57,6 +66,18 @@ export function createAppRequestHandler(rootDir) {
       .slice(0, 96);
     const wavName = fileName.toLowerCase().endsWith(".wav") ? fileName : `${fileName}.wav`;
     return /^[^/\\]+\.wav$/i.test(wavName) ? wavName : null;
+  }
+
+  function safeSampleFileName(name) {
+    const fileName = String(name || "")
+      .trim()
+      .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+      .replace(/\s+/g, " ")
+      .replace(/^\.+|\.+$/g, "")
+      .slice(0, 120);
+    const extension = extname(fileName).toLowerCase();
+    const audioExtensions = new Set([".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".webm", ".aif", ".aiff"]);
+    return fileName && audioExtensions.has(extension) && /^[^/\\]+$/i.test(fileName) ? fileName : null;
   }
 
   function readRequestBody(request, maxBytes = 5 * 1024 * 1024) {
@@ -126,6 +147,23 @@ export function createAppRequestHandler(rootDir) {
         return { name: entry.name, timestamps };
       })
       .filter((patch) => patch.timestamps.length > 0)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }
+
+  function listSamples() {
+    if (!existsSync(samplesDir)) return [];
+    return readdirSync(samplesDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && safeSampleFileName(entry.name) === entry.name)
+      .map((entry) => {
+        const filePath = join(samplesDir, entry.name);
+        const stats = statSync(filePath);
+        return {
+          name: entry.name,
+          path: `/samples/${encodeURIComponent(entry.name)}`,
+          size: stats.size,
+          modifiedAt: stats.mtime.toISOString(),
+        };
+      })
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   }
 
@@ -277,6 +315,54 @@ export function createAppRequestHandler(rootDir) {
     });
   }
 
+  async function handleSamplesRequest(request, response) {
+    if (request.method === "GET") {
+      jsonResponse(response, 200, { samples: listSamples() });
+      return;
+    }
+
+    if (request.method !== "POST") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+
+    const sample = await readRequestBuffer(request);
+    if (!sample.length) {
+      jsonResponse(response, 400, { error: "Sample content is required." });
+      return;
+    }
+
+    const requestedName = safeSampleFileName(request.headers["x-sample-file-name"]);
+    if (!requestedName) {
+      jsonResponse(response, 400, { error: "A valid audio file name is required." });
+      return;
+    }
+
+    mkdirSync(samplesDir, { recursive: true });
+    const extension = extname(requestedName);
+    const base = requestedName.slice(0, requestedName.length - extension.length);
+    let fileName = requestedName;
+    let filePath = join(samplesDir, fileName);
+    let counter = 2;
+    while (existsSync(filePath)) {
+      fileName = `${base} ${counter}${extension}`;
+      filePath = join(samplesDir, fileName);
+      counter += 1;
+    }
+
+    const relativePath = relative(samplesDir, filePath);
+    if (relativePath.startsWith("..") || relativePath.includes(`..${sep}`)) {
+      jsonResponse(response, 400, { error: "Invalid sample path." });
+      return;
+    }
+
+    writeFileSync(filePath, sample);
+    jsonResponse(response, 201, {
+      name: fileName,
+      path: `/samples/${encodeURIComponent(fileName)}`,
+    });
+  }
+
   return function handleAppRequest(request, response) {
     const url = new URL(request.url, `${request.socket.encrypted ? "https" : "http"}://${request.headers.host || "localhost"}`);
 
@@ -290,6 +376,13 @@ export function createAppRequestHandler(rootDir) {
     if (url.pathname === "/api/recordings") {
       handleRecordingRequest(request, response).catch((error) => {
         jsonResponse(response, 500, { error: error.message || "Recording request failed." });
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/samples") {
+      handleSamplesRequest(request, response).catch((error) => {
+        jsonResponse(response, 500, { error: error.message || "Sample request failed." });
       });
       return;
     }

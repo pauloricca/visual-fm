@@ -544,6 +544,59 @@ if (combDistortionPeak <= 0 || !(combDistortionLink.controlSmoother.current.dist
   throw new Error("WASM worklet comb filter/distortion path did not render or smooth as expected.");
 }
 
+engine.resetRuntimeState();
+engine.setGraph({
+  maxVoices: 1,
+  nodes: [
+    {
+      id: "one-shot-sample",
+      wave: "sample",
+      frequencyMode: "ratio",
+      ratio: 1,
+      sample: { mode: "one-shot", start: 0, end: 1, originalPitch: 60 },
+    },
+  ],
+  links: [
+    {
+      id: "one-shot-sample-out",
+      from: "one-shot-sample",
+      to: "audio",
+      amount: 1,
+      envelope: { attack: 0.001, decay: 0.001, sustain: 1, release: 0.02 },
+    },
+  ],
+});
+engine.setSampleData({
+  nodeId: "one-shot-sample",
+  sampleRate: 48000,
+  data: new Float32Array(4800).fill(0.7),
+});
+engine.noteOn(60, 1);
+for (let block = 0; block < 8; block += 1) {
+  engine.process([], [[new Float32Array(128), new Float32Array(128)]]);
+}
+engine.noteOff(60);
+let oneShotHeldPeak = 0;
+for (let block = 0; block < 24; block += 1) {
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  engine.process([], [[left, right]]);
+  oneShotHeldPeak = Math.max(
+    oneShotHeldPeak,
+    left.reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+    right.reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+  );
+}
+if (oneShotHeldPeak <= 0.0001) {
+  throw new Error("WASM worklet one-shot sample stopped when the key was released.");
+}
+for (let block = 0; block < 48; block += 1) {
+  engine.process([], [[new Float32Array(128), new Float32Array(128)]]);
+}
+if (engine.voices.size !== 0) {
+  throw new Error("WASM worklet one-shot sample voice did not finish after the sample tail.");
+}
+
 function estimateFrequency(samples, sampleRate = 48000) {
   const crossings = [];
   for (let index = 1; index < samples.length; index += 1) {

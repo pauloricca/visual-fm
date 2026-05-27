@@ -3,9 +3,24 @@ export const STORAGE_KEY = "visual-fm.patch.v1";
 export const LINK_FILTER_TYPES = ["none", "lowpass", "highpass", "bandpass", "comb", "comb-notch", "formant"];
 export const LINK_DISTORTION_TYPES = ["hard-clip", "soft-clip", "fuzz", "saturate", "wavefold"];
 export const LINK_SIGNAL_MODES = ["raw", "envelope", "inverted-envelope"];
-export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "noise", "perlin", "audio-input"];
+export const WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "sample", "noise", "perlin", "audio-input"];
 export const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"];
-export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"]);
+export const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "sample"]);
+export const DEFAULT_SAMPLE = Object.freeze({
+  name: "",
+  sampleRate: 0,
+  data: Object.freeze([]),
+  storageKey: "",
+  fileName: "",
+  path: "",
+  mode: "one-shot",
+  start: 0,
+  end: 1,
+  stretch: 1,
+  cycleLength: 4096,
+  overlapRatio: 0.09,
+  originalPitch: 60,
+});
 export const DEFAULT_CUSTOM_WAVE = Object.freeze({
   mode: "loop",
   sustainStart: 0.5,
@@ -38,7 +53,7 @@ export const MAX_KEYBOARD_START_NOTE = 120;
 export const MIN_KEYBOARD_LENGTH = 7;
 export const MAX_KEYBOARD_LENGTH = 28;
 export const DEFAULT_NODE_QUANTISE = { enabled: false, root: "C", scale: "chromatic", glide: 0 };
-export const NODE_MODULATION_TARGETS = ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix"];
+export const NODE_MODULATION_TARGETS = ["phase", "phaseResetTrigger", "frequency", "wave", "ring", "fold", "mix", "sampleTrigger", "sampleStart", "sampleEnd", "sampleStretch"];
 export const LINK_MODULATION_TARGETS = [
   "amplitude",
   "pan",
@@ -112,6 +127,13 @@ export const NODE_MIDI_PARAMETERS = new Set([
   "quantise.glide",
   "speed",
   "audioInputGain",
+  "sample.mode",
+  "sample.start",
+  "sample.end",
+  "sample.stretch",
+  "sample.cycleLength",
+  "sample.overlapRatio",
+  "sample.originalPitch",
 ]);
 export const LINK_MIDI_PARAMETERS = new Set([
   "modulationTarget",
@@ -155,8 +177,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
   ],
   links: [
     {

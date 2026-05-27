@@ -47,6 +47,7 @@ import {
   normalizeModulationTarget,
   normalizeNodeQuantise,
   normalizePatch,
+  normalizeSample,
   normalizeSignalMode,
 } from "./patch-normalize.js";
 import { audioBufferToWav, mediaRecorderOptions } from "./recording.js";
@@ -97,15 +98,15 @@ const CANVAS_ZOOM_MAX = 2.5;
 const AUDIO_BACKENDS = {
   js: {
     label: "JS AudioWorklet",
-    moduleUrl: "./src/audio-worklet.js?v=custom-wave-2",
+    moduleUrl: "./src/audio-worklet.js?v=sample-wave-16",
     processorName: "visual-fm-engine",
   },
   wasm: {
     label: "Rust WASM",
-    moduleUrl: "./src/audio-worklet-wasm.js?v=custom-wave-2",
+    moduleUrl: "./src/audio-worklet-wasm.js?v=sample-wave-16",
     processorName: "visual-fm-wasm-engine",
     processorOptions: async () => {
-      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=custom-wave-2", window.location.href).href;
+      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=sample-wave-16", window.location.href).href;
       const response = await fetch(wasmUrl);
       if (!response.ok) {
         throw new Error(`Could not fetch WASM kernel (${response.status}).`);
@@ -142,6 +143,12 @@ const RECORDING_DEFAULT_TEMPO = 120;
 const RECORDING_COUNTDOWN_BEATS = 4;
 const RECORDING_TIMELINE_MIN_SECONDS = 8;
 const RECORDING_WAVEFORM_POINTS = 72;
+const RECORDING_WAVEFORM_SILENCE_FLOOR = 0.003;
+const RECORDING_WAVEFORM_MIN_VISUAL_PEAK = 0.08;
+const MIDI_NOTE_OPTIONS = Array.from({ length: 128 }, (_, value) => ({
+  value,
+  label: `${midiNoteLabel(value)} (${value})`,
+}));
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -294,6 +301,7 @@ let patchLibrary = null;
 let patchSlots = patchSession.slots;
 let activePatchSlotId = patchSession.activeSlotId;
 const patchHistories = new Map();
+let activeSavedPatchRef = null;
 let suppressPatchHistory = false;
 const activeMidiKeyboardPointers = new Map();
 const midiKnobValues = new Map();
@@ -362,6 +370,10 @@ function patchDataUsesAudioInput(patch) {
   return (patch?.nodes || []).some((node) => node.wave === "audio-input");
 }
 
+function patchDataUsesSamples(patch) {
+  return (patch?.nodes || []).some((node) => node.wave === "sample");
+}
+
 function patchUsesAudioInput() {
   return patchDataUsesAudioInput(state);
 }
@@ -369,6 +381,11 @@ function patchUsesAudioInput() {
 function sessionUsesAudioInput() {
   syncActivePatchSlot();
   return patchSlots.some((slot) => patchDataUsesAudioInput(slot.patch));
+}
+
+function sessionUsesSamples() {
+  syncActivePatchSlot();
+  return patchSlots.some((slot) => patchDataUsesSamples(slot.patch));
 }
 
 function patchSlotUid() {
@@ -417,7 +434,7 @@ function loadPatchSession() {
 
 function savePatch() {
   try {
-    const nextPatch = clonePatch(currentPatchData());
+    const nextPatch = patchForSessionStorage(currentPatchData());
     recordPatchHistory(nextPatch);
     syncActivePatchSlot();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchSessionData()));
@@ -434,14 +451,46 @@ function currentPatchSessionData() {
     patchSlots: patchSlots.map((slot) => ({
       id: slot.id,
       active: slot.active !== false,
-      patch: slot.id === activePatchSlotId ? currentPatchData() : slot.patch,
+      patch: patchForSessionStorage(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
     })),
+  };
+}
+
+function patchForSessionStorage(patch) {
+  return {
+    ...patch,
+    midiBindings: clonePatch(patch.midiBindings || []),
+    masterEffects: clonePatch(patch.masterEffects || {}),
+    audioOutPosition: patch.audioOutPosition ? { ...patch.audioOutPosition } : patch.audioOutPosition,
+    nodes: (patch.nodes || []).map((node) => ({
+      ...node,
+      quantise: node.quantise ? { ...node.quantise } : node.quantise,
+      customWave: node.customWave ? clonePatch(node.customWave) : node.customWave,
+      sample: node.sample ? sampleGraphMeta(node.sample) : node.sample,
+    })),
+    links: clonePatch(patch.links || []),
   };
 }
 
 function syncActivePatchSlot() {
   const slot = patchSlots.find((item) => item.id === activePatchSlotId);
-  if (slot) slot.patch = clonePatch(currentPatchData());
+  if (slot) slot.patch = runtimePatchSnapshot(currentPatchData());
+}
+
+function runtimePatchSnapshot(patch) {
+  return {
+    ...patch,
+    midiBindings: clonePatch(patch.midiBindings || []),
+    masterEffects: clonePatch(patch.masterEffects || {}),
+    audioOutPosition: patch.audioOutPosition ? { ...patch.audioOutPosition } : patch.audioOutPosition,
+    nodes: (patch.nodes || []).map((node) => ({
+      ...node,
+      quantise: node.quantise ? { ...node.quantise } : node.quantise,
+      customWave: node.customWave ? clonePatch(node.customWave) : node.customWave,
+      sample: node.sample ? { ...node.sample } : node.sample,
+    })),
+    links: clonePatch(patch.links || []),
+  };
 }
 
 function currentPatchData() {
@@ -469,10 +518,11 @@ function patchHistoryForSlot(slotId = activePatchSlotId) {
     const patch = slotId === activePatchSlotId
       ? currentPatchData()
       : patchSlots.find((slot) => slot.id === slotId)?.patch || normalizeDefaultPatch();
+    const snapshot = patchForSessionStorage(patch);
     history = {
       undo: [],
       redo: [],
-      current: clonePatch(patch),
+      current: clonePatch(snapshot),
     };
     patchHistories.set(slotId, history);
   }
@@ -484,10 +534,11 @@ function patchDataEquals(a, b) {
 }
 
 function resetPatchHistory(slotId, patch) {
+  const snapshot = patchForSessionStorage(patch);
   patchHistories.set(slotId, {
     undo: [],
     redo: [],
-    current: clonePatch(patch),
+    current: clonePatch(snapshot),
   });
   syncHistoryButtons();
 }
@@ -552,10 +603,11 @@ function syncHistoryButtons() {
 
 function initializePatchHistories() {
   for (const slot of patchSlots) {
+    const patch = slot.id === activePatchSlotId ? currentPatchData() : slot.patch;
     patchHistories.set(slot.id, {
       undo: [],
       redo: [],
-      current: clonePatch(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
+      current: clonePatch(patchForSessionStorage(patch)),
     });
   }
 }
@@ -702,6 +754,85 @@ function nodeParameterDefinitions(node) {
         node.audioInputGain = value;
       },
     }] : []),
+    ...(node.wave === "sample" ? [{
+      id: "sample.mode",
+      label: "Sample mode",
+      type: "choice",
+      options: [
+        { value: "one-shot", label: "One-shot" },
+        { value: "loop", label: "Loop" },
+        { value: "ping-pong", label: "Ping-pong" },
+      ],
+      get: () => sampleGraphMeta(node.sample).mode,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { mode: value });
+      },
+    },
+    {
+      id: "sample.start",
+      label: "Sample start",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).start,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { start: value });
+      },
+    },
+    {
+      id: "sample.end",
+      label: "Sample end",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).end,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { end: value });
+      },
+    },
+    {
+      id: "sample.stretch",
+      label: "Stretch",
+      type: "number",
+      min: 0.1,
+      max: 10,
+      get: () => sampleGraphMeta(node.sample).stretch,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { stretch: value });
+      },
+    },
+    {
+      id: "sample.cycleLength",
+      label: "Cycle length",
+      type: "number",
+      min: 1,
+      max: 16384,
+      get: () => sampleGraphMeta(node.sample).cycleLength,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { cycleLength: value });
+      },
+    },
+    {
+      id: "sample.overlapRatio",
+      label: "Overlap ratio",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).overlapRatio,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { overlapRatio: value });
+      },
+    },
+    {
+      id: "sample.originalPitch",
+      label: "Original pitch",
+      type: "choice",
+      options: midiNoteOptions().map(({ value, label }) => ({ value: String(value), label })),
+      get: () => String(sampleGraphMeta(node.sample).originalPitch),
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { originalPitch: Number(value) });
+      },
+    }] : []),
   ];
 
   return definitions;
@@ -710,7 +841,6 @@ function nodeParameterDefinitions(node) {
 function linkParameterDefinitions(link, patch = state) {
   const targetNameLabel = targetName(link.to, new Set(), patch);
   const modulationTargets = modulationTargetsForLink(link, patch);
-  const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
   const definitions = [
     ...(modulationTargets.length ? [{
       id: "modulationTarget",
@@ -723,7 +853,6 @@ function linkParameterDefinitions(link, patch = state) {
       get: () => link.modulationTarget,
       set: (value) => {
         link.modulationTarget = value;
-        if (value === "mix") link.amount = clamp(link.amount, 0, 1);
       },
     }] : []),
     {
@@ -731,7 +860,7 @@ function linkParameterDefinitions(link, patch = state) {
       label: "Amplitude",
       type: "number",
       min: 0,
-      max: amountMax,
+      max: LINK_AMOUNT_INPUT_MAX,
       get: () => link.amount,
       set: (value) => {
         link.amount = value;
@@ -1222,6 +1351,14 @@ function updatePanelForMidiNumber(smoothing, value) {
     if (node && smoothing.parameter === "audioInputGain") {
       setPanelNumberPair("audioInputGain", "audioInputGainRange", value);
     }
+    if (node && smoothing.parameter === "sample.start") {
+      setPanelNumberPair("sampleStart", "sampleStartRange", value);
+      renderSampleWaveformPreview(node);
+    }
+    if (node && smoothing.parameter === "sample.end") {
+      setPanelNumberPair("sampleEnd", "sampleEndRange", value);
+      renderSampleWaveformPreview(node);
+    }
     return;
   }
 
@@ -1707,7 +1844,7 @@ function linkGeometry(link, visited = new Set(), context = null) {
 
 function graphPayload(patch = state) {
   return {
-    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave }) => ({
+    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave, sample }) => ({
       id,
       wave,
       frequencyMode,
@@ -1717,6 +1854,7 @@ function graphPayload(patch = state) {
       speed,
       audioInputGain,
       customWave: normalizeCustomWave(customWave),
+      sample: sampleGraphMeta(sample),
     })),
     links: patch.links.map((link) => ({
       id: link.id,
@@ -1740,6 +1878,52 @@ function graphPayload(patch = state) {
   };
 }
 
+function sampleGraphMeta(sample) {
+  const normalized = normalizeSample({ ...sample, data: [] });
+  return {
+    ...normalized,
+    data: [],
+  };
+}
+
+function updateSampleMetadata(sample, updates = {}) {
+  const data = sample?.data || [];
+  return {
+    ...sample,
+    ...sampleGraphMeta({ ...sample, ...updates }),
+    data,
+  };
+}
+
+function replaceSampleAudioPreservingMetadata(currentSample, nextSample) {
+  const metadata = sampleGraphMeta(currentSample);
+  return normalizeSample({
+    ...nextSample,
+    mode: metadata.mode,
+    start: metadata.start,
+    end: metadata.end,
+    stretch: metadata.stretch,
+    cycleLength: metadata.cycleLength,
+    overlapRatio: metadata.overlapRatio,
+    originalPitch: metadata.originalPitch,
+    data: nextSample?.data || [],
+  });
+}
+
+function sampleDataSignature(sample) {
+  const data = sample?.data;
+  const length = data?.length || 0;
+  if (!length) return "";
+  return [
+    sample.storageKey || "",
+    sample.path || "",
+    sample.fileName || "",
+    sample.name || "",
+    sample.sampleRate || 0,
+    length,
+  ].join(":");
+}
+
 function activeSynthSlot() {
   return synthSlots.get(activePatchSlotId) || null;
 }
@@ -1751,6 +1935,41 @@ function postGraph(slotId = activePatchSlotId, patch = state) {
     type: "graph",
     payload: graphPayload(patch),
   });
+  syncSampleDataToSlot(slot, patch);
+}
+
+function syncSampleDataToSlot(slot, patch = state) {
+  if (!slot?.node || !patch) return;
+  if (!slot.sampleDataSignatures) slot.sampleDataSignatures = new Map();
+  const liveNodeIds = new Set();
+  for (const node of patch.nodes || []) {
+    liveNodeIds.add(node.id);
+    if (node.wave !== "sample") continue;
+    const sample = node.sample || {};
+    const signature = sampleDataSignature(sample);
+    if (!signature || slot.sampleDataSignatures.get(node.id) === signature) continue;
+    const source = sample.data;
+    const data = source instanceof Float32Array
+      ? new Float32Array(source)
+      : Float32Array.from(Array.isArray(source) ? source : [], (value) => clamp(Number(value) || 0, -1, 1));
+    if (!data.length) continue;
+    slot.node.port.postMessage({
+      type: "sampleData",
+      payload: {
+        nodeId: node.id,
+        name: sample.name || "",
+        sampleRate: Number.isFinite(Number(sample.sampleRate)) ? Math.max(1, Math.round(Number(sample.sampleRate))) : audioContext?.sampleRate || 44100,
+        storageKey: sample.storageKey || "",
+        fileName: sample.fileName || "",
+        path: sample.path || "",
+        data,
+      },
+    }, [data.buffer]);
+    slot.sampleDataSignatures.set(node.id, signature);
+  }
+  for (const nodeId of slot.sampleDataSignatures.keys()) {
+    if (!liveNodeIds.has(nodeId)) slot.sampleDataSignatures.delete(nodeId);
+  }
 }
 
 function sendGraph({ immediate = false } = {}) {
@@ -1932,6 +2151,15 @@ function sendLinkParam(id, parameter, value) {
     payload: { id, parameter, value },
   });
   scheduleLinkParamGraphSync();
+}
+
+function sendNodeParam(id, parameter, value) {
+  const slot = activeSynthSlot();
+  if (!slot?.node) return;
+  slot.node.port.postMessage({
+    type: "nodeParam",
+    payload: { id, parameter, value },
+  });
 }
 
 function panicSynths(slotId = null) {
@@ -2148,6 +2376,7 @@ async function setupAudio() {
   }
 
   await resumeAudioContext();
+  syncBackendForPatch();
 
   if (!outputGainNode) {
     outputGainNode = audioContext.createGain();
@@ -2195,6 +2424,10 @@ async function setupAudio() {
   updateAudioStatus({ inputBlocked });
 }
 
+function syncBackendForPatch() {
+  // Samples are supported by both audio backends.
+}
+
 async function ensureSynthSlots() {
   syncActivePatchSlot();
   for (const slot of patchSlots) {
@@ -2233,7 +2466,12 @@ async function ensureSynthSlot(slot) {
     outputChannelCount: [2],
     processorOptions,
   });
-  const synthSlot = { id: slot.id, node, status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true } };
+  const synthSlot = {
+    id: slot.id,
+    node,
+    sampleDataSignatures: new Map(),
+    status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true },
+  };
   synthSlots.set(slot.id, synthSlot);
   node.port.onmessage = (event) => handleWorkletMessageForSlot(slot.id, event);
   if (audioInputSource) audioInputSource.connect(node);
@@ -2511,18 +2749,28 @@ function recordingWaveformSvg(lane) {
   const waveform = lane.waveform || [];
   if (!waveform.length) return "";
   const width = 100;
-  const height = 22;
+  const height = 28;
   const center = height / 2;
+  const peakCeiling = Math.max(...waveform);
+  const visualScale = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+    ? Math.max(peakCeiling, RECORDING_WAVEFORM_MIN_VISUAL_PEAK)
+    : 1;
   const step = width / Math.max(1, waveform.length - 1);
   const upper = waveform.map((peak, index) => {
     const x = index * step;
-    const y = center - Math.max(1, peak * center * 0.92);
+    const displayPeak = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+      ? clamp(Math.pow(clamp(peak / visualScale, 0, 1), 0.72), 0, 1)
+      : 0;
+    const y = center - Math.max(1, displayPeak * center * 0.92);
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   });
   const lower = waveform.slice().reverse().map((peak, reverseIndex) => {
     const index = waveform.length - 1 - reverseIndex;
     const x = index * step;
-    const y = center + Math.max(1, peak * center * 0.92);
+    const displayPeak = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+      ? clamp(Math.pow(clamp(peak / visualScale, 0, 1), 0.72), 0, 1)
+      : 0;
+    const y = center + Math.max(1, displayPeak * center * 0.92);
     return `${x.toFixed(2)},${y.toFixed(2)}`;
   });
   return `
@@ -3246,11 +3494,16 @@ function matchingSynthSlots(eventMeta = {}) {
 }
 
 function noteOn(note, velocity = 1, eventMeta = {}) {
-  ensureAudio().then(() => {
+  const send = () => {
     for (const slot of matchingSynthSlots(eventMeta)) {
       slot.node.port.postMessage({ type: "noteOn", payload: { note, velocity } });
     }
-  });
+  };
+  if (audioContext && synthNode) {
+    send();
+    return;
+  }
+  ensureAudio().then(send);
 }
 
 function noteOff(note, eventMeta = {}) {
@@ -3632,6 +3885,8 @@ function renderWires() {
     ? document.createElementNS("http://www.w3.org/2000/svg", "defs")
     : null;
   if (defs) wireLayer.appendChild(defs);
+  const endpointLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  endpointLayer.setAttribute("class", "link-endpoint-layer");
 
   for (const link of state.links) {
     if (linkDrag?.mode === "relink" && !linkDrag.duplicate && linkDrag.sourceLinkId === link.id) continue;
@@ -3733,7 +3988,7 @@ function renderWires() {
         handle.append(handleHit, handleDot);
         return handle;
       });
-      group.append(...endpointHandles);
+      endpointLayer.append(...endpointHandles);
     }
 
     wireLayer.appendChild(group);
@@ -3750,6 +4005,8 @@ function renderWires() {
     preview.setAttribute("stroke-dasharray", "7 7");
     wireLayer.appendChild(preview);
   }
+
+  if (endpointLayer.childNodes.length) wireLayer.appendChild(endpointLayer);
 }
 
 function drawAdsr(envelope) {
@@ -3850,6 +4107,7 @@ function renderPanel() {
     const usesPitchControls = isPitchedWave(node.wave);
     const usesSpeedControl = isSpeedWave(node.wave);
     const usesCustomWave = node.wave === "custom";
+    const usesSampleControls = node.wave === "sample";
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
@@ -3885,6 +4143,9 @@ function renderPanel() {
     const speedValue = Number.isFinite(Number(node.speed)) ? node.speed : 8;
     const usesAudioInputGain = node.wave === "audio-input";
     const audioInputGainValue = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
+    const sample = sampleGraphMeta(node.sample);
+    const sampleName = sample.name || "No sample selected";
+    const showSampleStretchDetails = Math.abs(sample.stretch - 1) > 0.001;
 
     panel.innerHTML = `
       <div class="panel-heading">
@@ -3909,6 +4170,68 @@ function renderPanel() {
           <button class="custom-wave-preview" id="customWavePreview" type="button" aria-label="Edit custom wave" title="Edit custom wave">
             ${customWaveSvg(ensureCustomWave(node).points)}
           </button>
+        </div>
+      ` : ""}
+      ${usesSampleControls ? `
+        <div class="field">
+          <label for="sampleFileButton">Sample file</label>
+          <button class="sample-file-button" id="sampleFileButton" type="button" title="${escapeHtml(sampleName)}">
+            ${escapeHtml(sample.name || "Choose file")}
+          </button>
+          <div class="sample-waveform-preview" id="sampleWaveformPreview">
+            ${sampleWaveformSvg(node.sample)}
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleStart", "Sample start", "node", node.id, "sample.start")}
+          <div class="field-row">
+            <input id="sampleStartRange" type="range" min="0" max="1" step="0.001" value="${sample.start}">
+            <input id="sampleStart" type="number" min="0" max="1" step="0.001" value="${sample.start}">
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleEnd", "Sample end", "node", node.id, "sample.end")}
+          <div class="field-row">
+            <input id="sampleEndRange" type="range" min="0" max="1" step="0.001" value="${sample.end}">
+            <input id="sampleEnd" type="number" min="0" max="1" step="0.001" value="${sample.end}">
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleStretch", "Stretch", "node", node.id, "sample.stretch")}
+          <div class="field-row">
+            <input id="sampleStretchRange" type="range" min="0.1" max="10" step="0.001" value="${sample.stretch}">
+            <input id="sampleStretch" type="number" min="0.001" step="0.001" value="${sample.stretch}">
+          </div>
+        </div>
+        <div class="settings-pair sample-stretch-settings" ${showSampleStretchDetails ? "" : "hidden"}>
+          <div class="field">
+            ${parameterLabel("sampleCycleLength", "Cycle length", "node", node.id, "sample.cycleLength")}
+            <div class="field-row">
+              <input id="sampleCycleLengthRange" type="range" min="64" max="16384" step="1" value="${sample.cycleLength}">
+              <input id="sampleCycleLength" type="number" min="1" step="1" value="${sample.cycleLength}">
+            </div>
+          </div>
+          <div class="field">
+            ${parameterLabel("sampleOverlapRatio", "Overlap ratio", "node", node.id, "sample.overlapRatio")}
+            <div class="field-row">
+              <input id="sampleOverlapRatioRange" type="range" min="0" max="1" step="0.001" value="${sample.overlapRatio}">
+              <input id="sampleOverlapRatio" type="number" min="0" max="1" step="0.001" value="${sample.overlapRatio}">
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleMode", "Sample mode", "node", node.id, "sample.mode")}
+          <select id="sampleMode">
+            <option value="one-shot" ${sample.mode === "one-shot" ? "selected" : ""}>One-shot</option>
+            <option value="loop" ${sample.mode === "loop" ? "selected" : ""}>Loop</option>
+            <option value="ping-pong" ${sample.mode === "ping-pong" ? "selected" : ""}>Ping-pong</option>
+          </select>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleOriginalPitch", "Original pitch", "node", node.id, "sample.originalPitch")}
+          <select id="sampleOriginalPitch">
+            ${midiNoteOptions().map(({ value, label }) => `<option value="${value}" ${sample.originalPitch === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
         </div>
       ` : ""}
       ${usesPitchControls ? `
@@ -3985,6 +4308,15 @@ function renderPanel() {
         });
       } else {
         if (node.wave === "custom") ensureCustomWave(node);
+        if (node.wave === "sample") {
+          node.sample = updateSampleMetadata(node.sample);
+          syncBackendForPatch();
+          if (audioContext) {
+            ensureAudio().then(() => sendGraph({ immediate: true })).catch(() => {
+              setAudioStatusLabel("Audio could not start");
+            });
+          }
+        }
         reconcileAudioInput();
       }
       pruneMidiBindings();
@@ -4002,39 +4334,40 @@ function renderPanel() {
       panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
         node.frequencyMode = event.target.value;
         render();
-        sendGraph();
+        sendNodeParam(node.id, "frequencyMode", node.frequencyMode);
         savePatch();
       });
       bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
+        const parameter = node.frequencyMode === "fixed" ? "frequency" : "ratio";
         if (node.frequencyMode === "fixed") {
           node.frequency = value;
         } else {
           node.ratio = value;
         }
         renderNodes();
-        sendGraph();
+        sendNodeParam(node.id, parameter, value);
         savePatch();
       }, { inputMax: frequencyInputMax });
       panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
         renderPanel();
-        sendGraph();
+        sendNodeParam(node.id, "quantise.enabled", node.quantise.enabled);
         savePatch();
       });
       if (usesQuantiseControls) {
         panel.querySelector("#quantiseRoot").addEventListener("change", (event) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), root: event.target.value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.root", node.quantise.root);
           savePatch();
         });
         panel.querySelector("#quantiseScale").addEventListener("change", (event) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), scale: event.target.value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.scale", node.quantise.scale);
           savePatch();
         });
         bindNumberPair("quantiseGlide", "quantiseGlideRange", 0, 4, (value) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.glide", node.quantise.glide);
           savePatch();
         });
       }
@@ -4043,14 +4376,65 @@ function renderPanel() {
       bindNumberPair("speed", "speedRange", 0.01, 60, (value) => {
         node.speed = value;
         renderNodes();
-        sendGraph();
+        sendNodeParam(node.id, "speed", value);
         savePatch();
       });
     }
     if (usesAudioInputGain) {
       bindNumberPair("audioInputGain", "audioInputGainRange", 0, 4, (value) => {
         node.audioInputGain = value;
-        sendGraph();
+        sendNodeParam(node.id, "audioInputGain", value);
+        savePatch();
+      });
+    }
+    if (usesSampleControls) {
+      panel.querySelector("#sampleFileButton")?.addEventListener("click", () => {
+        openSamplePickerModal(node.id);
+      });
+      panel.querySelector("#sampleMode")?.addEventListener("change", (event) => {
+        node.sample = updateSampleMetadata(node.sample, { mode: event.target.value });
+        sendNodeParam(node.id, "sample.mode", node.sample.mode);
+        savePatch();
+      });
+      bindNumberPair("sampleStart", "sampleStartRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { start: value });
+        renderSampleWaveformPreview(node);
+        renderNodes();
+        sendNodeParam(node.id, "sample.start", node.sample.start);
+        savePatch();
+        return node.sample.start;
+      });
+      bindNumberPair("sampleEnd", "sampleEndRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { end: value });
+        renderSampleWaveformPreview(node);
+        renderNodes();
+        sendNodeParam(node.id, "sample.end", node.sample.end);
+        savePatch();
+        return node.sample.end;
+      });
+      bindNumberPair("sampleStretch", "sampleStretchRange", 0.1, 10, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { stretch: value });
+        sendNodeParam(node.id, "sample.stretch", node.sample.stretch);
+        savePatch();
+        const stretchSettings = panel.querySelector(".sample-stretch-settings");
+        if (stretchSettings) stretchSettings.hidden = Math.abs(node.sample.stretch - 1) <= 0.001;
+        return node.sample.stretch;
+      }, { inputMin: 0.001, inputMax: 1000 });
+      bindNumberPair("sampleCycleLength", "sampleCycleLengthRange", 64, 16384, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { cycleLength: value });
+        sendNodeParam(node.id, "sample.cycleLength", node.sample.cycleLength);
+        savePatch();
+        return node.sample.cycleLength;
+      }, { inputMin: 1, inputMax: 262144 });
+      bindNumberPair("sampleOverlapRatio", "sampleOverlapRatioRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { overlapRatio: value });
+        sendNodeParam(node.id, "sample.overlapRatio", node.sample.overlapRatio);
+        savePatch();
+        return node.sample.overlapRatio;
+      });
+      panel.querySelector("#sampleOriginalPitch")?.addEventListener("change", (event) => {
+        node.sample = updateSampleMetadata(node.sample, { originalPitch: Number(event.target.value) });
+        sendNodeParam(node.id, "sample.originalPitch", node.sample.originalPitch);
         savePatch();
       });
     }
@@ -4076,7 +4460,7 @@ function renderPanel() {
     const targetKind = linkTargetKind(link);
     const modulationTargets = modulationTargetsForLink(link);
     const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_SLIDER_MAX;
-    const amountInputMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
+    const amountInputMax = LINK_AMOUNT_INPUT_MAX;
     const usesEnvelopeControls = !link.drone;
     const signalMode = normalizeSignalMode(link.signalMode);
     const usesFollowerControls = signalMode !== "raw";
@@ -4312,10 +4696,7 @@ function renderPanel() {
 
     panel.querySelector("#modulationTarget")?.addEventListener("change", (event) => {
       link.modulationTarget = event.target.value;
-      if (link.modulationTarget === "mix") {
-        link.amount = clamp(link.amount, 0, 1);
-        renderPanel();
-      }
+      renderPanel();
       sendGraph();
       savePatch();
     });
@@ -4470,7 +4851,7 @@ async function savePatchToServer() {
   }
 
   try {
-    const patch = currentPatchData();
+    const patch = patchForSessionStorage(currentPatchData());
     const response = await fetch("/api/patches", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -4483,6 +4864,10 @@ async function savePatchToServer() {
     if (!response.ok) {
       throw new Error(result.error || `Save failed (${response.status}).`);
     }
+    activeSavedPatchRef = {
+      patchName: result.patchName || safePatchFolderName(patch.patchName),
+      timestamp: result.timestamp || null,
+    };
     if (button) button.textContent = "Saved";
     window.setTimeout(() => {
       const currentButton = panel.querySelector("#savePatchButton");
@@ -4508,6 +4893,36 @@ async function fetchSavedPatches() {
 async function loadSavedPatch(patchName, timestamp) {
   const patch = await fetchSavedPatchData(patchName, timestamp);
   applyPatchData(patch);
+  activeSavedPatchRef = { patchName, timestamp };
+}
+
+function safePatchFolderName(name) {
+  return String(name || "Untitled Patch")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96)
+    || "Untitled Patch";
+}
+
+function savedPatchSelectionForCurrentPatch(patches) {
+  const currentPatchName = safePatchFolderName(state.patchName);
+  const savedRefPatchName = activeSavedPatchRef?.patchName || "";
+  const savedRefMatchesCurrent = savedRefPatchName && safePatchFolderName(savedRefPatchName) === currentPatchName;
+  const patch = (savedRefMatchesCurrent ? patches.find((item) => item.name === savedRefPatchName) : null)
+    || patches.find((item) => item.name === currentPatchName)
+    || patches.find((item) => item.name.localeCompare(currentPatchName, undefined, { sensitivity: "base" }) === 0)
+    || patches[0]
+    || null;
+  const timestamp = patch && savedRefMatchesCurrent && activeSavedPatchRef?.timestamp && patch.timestamps.includes(activeSavedPatchRef.timestamp)
+    ? activeSavedPatchRef.timestamp
+    : patch?.timestamps?.[0] || null;
+
+  return {
+    patchName: patch?.name || null,
+    timestamp,
+  };
 }
 
 async function fetchSavedPatchData(patchName, timestamp) {
@@ -4542,9 +4957,10 @@ async function openPatchLibrary(options = {}) {
   try {
     const patches = await fetchSavedPatches();
     if (!patchLibrary) return;
+    const selection = savedPatchSelectionForCurrentPatch(patches);
     patchLibrary.patches = patches;
-    patchLibrary.selectedPatchName = patches[0]?.name || null;
-    patchLibrary.selectedTimestamp = patches[0]?.timestamps?.[0] || null;
+    patchLibrary.selectedPatchName = selection.patchName;
+    patchLibrary.selectedTimestamp = selection.timestamp;
     patchLibrary.loading = false;
   } catch (error) {
     if (!patchLibrary) return;
@@ -4671,6 +5087,10 @@ function renderPatchLibraryModal() {
       if (patchLibrary.mode === "new-slot") {
         const patch = await fetchSavedPatchData(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
         addPatchSlot(patch);
+        activeSavedPatchRef = {
+          patchName: patchLibrary.selectedPatchName,
+          timestamp: patchLibrary.selectedTimestamp,
+        };
       } else {
         await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
       }
@@ -4680,6 +5100,14 @@ function renderPatchLibraryModal() {
       renderPatchLibraryModal();
     }
   });
+
+  if (!patchLibrary.loading) {
+    window.requestAnimationFrame(() => {
+      document.querySelectorAll("#patchLibraryModal .patch-library-row.selected").forEach((row) => {
+        row.scrollIntoView({ block: "nearest" });
+      });
+    });
+  }
 }
 
 function formatSavedPatchTimestamp(timestamp) {
@@ -4961,6 +5389,65 @@ function customWaveSvg(points, width = 260, height = 82) {
   `;
 }
 
+function sampleWaveformSvg(sample, width = 260, height = 82) {
+  const normalized = normalizeSample(sample);
+  const data = normalized.data || [];
+  const padding = 10;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const centerY = padding + innerHeight / 2;
+  const startX = padding + clamp(normalized.start, 0, 1) * innerWidth;
+  const endX = padding + clamp(normalized.end, 0, 1) * innerWidth;
+  const startLimit = Math.min(startX, endX);
+  const endLimit = Math.max(startX, endX);
+  let waveform = "";
+
+  if (data.length) {
+    const pointCount = Math.min(128, Math.max(24, Math.floor(data.length / 64)));
+    const peaks = [];
+    for (let index = 0; index < pointCount; index += 1) {
+      const sampleStart = Math.floor(index / pointCount * data.length);
+      const sampleEnd = Math.max(sampleStart + 1, Math.floor((index + 1) / pointCount * data.length));
+      let peak = 0;
+      for (let sampleIndex = sampleStart; sampleIndex < sampleEnd; sampleIndex += 1) {
+        peak = Math.max(peak, Math.abs(data[sampleIndex] || 0));
+      }
+      peaks.push(peak);
+    }
+    const peakCeiling = Math.max(0.01, ...peaks);
+    const step = innerWidth / Math.max(1, peaks.length - 1);
+    const upper = peaks.map((peak, index) => {
+      const x = padding + index * step;
+      const y = centerY - peak / peakCeiling * innerHeight * 0.45;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    const lower = peaks.slice().reverse().map((peak, reverseIndex) => {
+      const index = peaks.length - 1 - reverseIndex;
+      const x = padding + index * step;
+      const y = centerY + peak / peakCeiling * innerHeight * 0.45;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    waveform = `<polygon class="sample-waveform-fill" points="${upper.concat(lower).join(" ")}"></polygon>`;
+  }
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Sample waveform" role="img" focusable="false">
+      <line class="sample-waveform-zero" x1="${padding}" y1="${centerY}" x2="${width - padding}" y2="${centerY}"></line>
+      ${waveform}
+      <rect class="sample-waveform-window" x="${startLimit.toFixed(2)}" y="${padding}" width="${Math.max(1, endLimit - startLimit).toFixed(2)}" height="${innerHeight}"></rect>
+      <line class="sample-waveform-marker is-start" x1="${startX.toFixed(2)}" y1="${padding}" x2="${startX.toFixed(2)}" y2="${height - padding}"></line>
+      <line class="sample-waveform-marker is-end" x1="${endX.toFixed(2)}" y1="${padding}" x2="${endX.toFixed(2)}" y2="${height - padding}"></line>
+      <circle class="sample-waveform-point is-start" cx="${startX.toFixed(2)}" cy="${centerY}" r="4"></circle>
+      <circle class="sample-waveform-point is-end" cx="${endX.toFixed(2)}" cy="${centerY}" r="4"></circle>
+    </svg>
+  `;
+}
+
+function renderSampleWaveformPreview(node) {
+  const preview = panel.querySelector("#sampleWaveformPreview");
+  if (preview) preview.innerHTML = sampleWaveformSvg(node.sample);
+}
+
 function openCustomWaveModal(nodeId) {
   const node = nodeById(nodeId);
   if (!node) return;
@@ -5224,9 +5711,293 @@ function customWaveModeOptions(selectedMode) {
     .join("");
 }
 
+function midiNoteLabel(note) {
+  const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const value = clamp(Math.round(Number(note) || 0), 0, 127);
+  return `${names[value % 12]}${Math.floor(value / 12) - 1}`;
+}
+
+function midiNoteOptions() {
+  return MIDI_NOTE_OPTIONS;
+}
+
+function monoDataFromAudioBuffer(decoded) {
+  const length = decoded.length;
+  const mono = new Float32Array(length);
+  for (let index = 0; index < length; index += 1) {
+    let sample = 0;
+    for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+      sample += decoded.getChannelData(channel)[index] || 0;
+    }
+    mono[index] = clamp(sample / Math.max(1, decoded.numberOfChannels), -1, 1);
+  }
+  return mono;
+}
+
+function sampleFromAudioBuffer(decoded, metadata = {}) {
+  return normalizeSample({
+    name: metadata.name || "",
+    fileName: metadata.fileName || metadata.name || "",
+    path: metadata.path || "",
+    sampleRate: decoded.sampleRate,
+    data: monoDataFromAudioBuffer(decoded),
+    start: metadata.start ?? 0,
+    end: metadata.end ?? 1,
+    mode: metadata.mode || "one-shot",
+    originalPitch: metadata.originalPitch ?? 60,
+  });
+}
+
+async function decodeSampleArrayBuffer(arrayBuffer, metadata = {}) {
+  const context = audioContext || createAudioContext();
+  if (!audioContext) audioContext = context;
+  const decoded = await context.decodeAudioData(arrayBuffer.slice(0));
+  return sampleFromAudioBuffer(decoded, metadata);
+}
+
+async function decodeSampleFile(file, reference = {}) {
+  return decodeSampleArrayBuffer(await file.arrayBuffer(), {
+    name: reference.name || file.name,
+    fileName: reference.fileName || file.name,
+    path: reference.path || "",
+  });
+}
+
+async function fetchProjectSamples() {
+  const response = await fetch("/api/samples", { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Could not list samples (${response.status}).`);
+  return Array.isArray(result.samples) ? result.samples : [];
+}
+
+async function uploadSampleFile(file) {
+  const response = await fetch("/api/samples", {
+    method: "POST",
+    headers: {
+      "content-type": file.type || "application/octet-stream",
+      "x-sample-file-name": file.name,
+    },
+    body: file,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Sample import failed (${response.status}).`);
+  return result;
+}
+
+async function uploadRecordingLaneSample(lane) {
+  const blob = audioBufferToWav(lane.buffer);
+  const fileName = recordingExportFileName(lane.name || "track", "track");
+  const response = await fetch("/api/samples", {
+    method: "POST",
+    headers: {
+      "content-type": "audio/wav",
+      "x-sample-file-name": fileName,
+    },
+    body: blob,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Track sample import failed (${response.status}).`);
+  return result;
+}
+
+async function decodeProjectSample(sampleInfo) {
+  const response = await fetch(sampleInfo.path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Could not load sample (${response.status}).`);
+  return decodeSampleArrayBuffer(await response.arrayBuffer(), {
+    name: sampleInfo.name,
+    fileName: sampleInfo.name,
+    path: sampleInfo.path,
+  });
+}
+
+async function hydrateReferencedSamples() {
+  let changed = false;
+  for (const slot of patchSlots) {
+    for (const node of slot.patch.nodes || []) {
+      const sample = sampleGraphMeta(node.sample);
+      if (!sample.path || node.sample?.data?.length) continue;
+      try {
+        node.sample = replaceSampleAudioPreservingMetadata(node.sample, await decodeProjectSample(sample));
+        if (slot.id === activePatchSlotId) {
+          const activeNode = state.nodes.find((item) => item.id === node.id);
+          if (activeNode) activeNode.sample = node.sample;
+        }
+        changed = true;
+      } catch {
+        // Missing sample files leave the patch editable; a new sample can be selected.
+      }
+    }
+  }
+  if (!changed) return;
+  renderNodes();
+  if (state.selected.type === "node") renderPanel();
+  sendGraph({ immediate: true });
+  savePatch();
+}
+
+async function applySampleToNode(node, sample) {
+  node.sample = replaceSampleAudioPreservingMetadata(node.sample, sample);
+  syncBackendForPatch();
+  renderPanel();
+  renderNodes();
+  if (audioContext) {
+    await ensureAudio();
+  }
+  sendGraph({ immediate: true });
+  savePatch();
+}
+
+function openSamplePickerModal(nodeId) {
+  const node = nodeById(nodeId);
+  if (!node || node.wave !== "sample") return;
+  document.querySelector("#samplePickerModal")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "samplePickerModal";
+  overlay.className = "modal-backdrop";
+  overlay.innerHTML = `
+    <div class="modal sample-picker-modal" role="dialog" aria-modal="true" aria-labelledby="samplePickerTitle">
+      <div class="patch-library-heading">
+        <h2 id="samplePickerTitle">Sample source</h2>
+      </div>
+      <p class="modal-error" id="samplePickerError" role="alert" hidden></p>
+      <div class="sample-picker-sections">
+        <section class="sample-picker-section">
+          <h3>Samples</h3>
+          <div class="sample-picker-row">
+            <select id="projectSampleSelect" disabled>
+              <option>Loading...</option>
+            </select>
+            <button class="text-button" id="useProjectSampleButton" type="button" disabled>Use</button>
+          </div>
+        </section>
+        <section class="sample-picker-section">
+          <h3>Select File</h3>
+          <div class="sample-picker-row">
+            <div class="sample-file-choice">
+              <button class="text-button" id="chooseSampleImportFileButton" type="button">Choose File</button>
+              <span id="sampleImportFileName">No file chosen</span>
+              <input id="sampleImportFile" type="file" accept="audio/*" hidden>
+            </div>
+            <button class="text-button" id="importSampleFileButton" type="button">Import</button>
+          </div>
+        </section>
+        <section class="sample-picker-section">
+          <h3>Track</h3>
+          <div class="sample-picker-row">
+            <select id="sampleTrackSelect" ${recordingLanes.length ? "" : "disabled"}>
+              ${recordingLanes.length
+                ? recordingLanes.map((lane) => `<option value="${escapeHtml(lane.id)}">${escapeHtml(lane.name || "Track")}</option>`).join("")
+                : `<option>No tracks</option>`}
+            </select>
+            <button class="text-button" id="useTrackSampleButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Use</button>
+          </div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button class="text-button" id="samplePickerCancel" type="button">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const errorMessage = overlay.querySelector("#samplePickerError");
+  const projectSelect = overlay.querySelector("#projectSampleSelect");
+  const useProjectButton = overlay.querySelector("#useProjectSampleButton");
+  const fileInput = overlay.querySelector("#sampleImportFile");
+  const fileName = overlay.querySelector("#sampleImportFileName");
+  const importButton = overlay.querySelector("#importSampleFileButton");
+  const trackSelect = overlay.querySelector("#sampleTrackSelect");
+  const useTrackButton = overlay.querySelector("#useTrackSampleButton");
+
+  const close = () => overlay.remove();
+  const showError = (message) => {
+    errorMessage.textContent = message;
+    errorMessage.hidden = false;
+  };
+  const runAction = async (action) => {
+    errorMessage.hidden = true;
+    for (const button of [useProjectButton, importButton, useTrackButton]) button.disabled = true;
+    try {
+      await action();
+      close();
+    } catch (error) {
+      showError(error?.message || "Sample could not load");
+      useProjectButton.disabled = projectSelect.disabled || !projectSelect.value;
+      importButton.disabled = false;
+      useTrackButton.disabled = !recordingLanes.length;
+    }
+  };
+
+  fetchProjectSamples()
+    .then((samples) => {
+      projectSelect.innerHTML = samples.length
+        ? samples.map((sample) => `<option value="${escapeHtml(sample.name)}">${escapeHtml(sample.name)}</option>`).join("")
+        : `<option>No samples</option>`;
+      projectSelect.disabled = samples.length === 0;
+      useProjectButton.disabled = samples.length === 0;
+      projectSelect.dataset.samples = JSON.stringify(samples);
+    })
+    .catch((error) => {
+      projectSelect.innerHTML = `<option>Unavailable</option>`;
+      showError(error?.message || "Could not list samples");
+    });
+
+  useProjectButton.addEventListener("click", () => runAction(async () => {
+    const samples = JSON.parse(projectSelect.dataset.samples || "[]");
+    const sampleInfo = samples.find((item) => item.name === projectSelect.value);
+    if (!sampleInfo) throw new Error("Choose a sample.");
+    await applySampleToNode(node, await decodeProjectSample(sampleInfo));
+  }));
+
+  overlay.querySelector("#chooseSampleImportFileButton")?.addEventListener("click", () => {
+    fileInput.click();
+  });
+  fileInput.addEventListener("change", () => {
+    fileName.textContent = fileInput.files?.[0]?.name || "No file chosen";
+  });
+
+  importButton.addEventListener("click", () => runAction(async () => {
+    const file = fileInput.files?.[0];
+    if (!file) throw new Error("Choose a file.");
+    const saved = await uploadSampleFile(file);
+    const sample = await decodeSampleFile(file, {
+      name: saved.name || file.name,
+      fileName: saved.name || file.name,
+      path: saved.path || "",
+    });
+    await applySampleToNode(node, sample);
+  }));
+
+  useTrackButton.addEventListener("click", () => runAction(async () => {
+    const lane = recordingLanes.find((item) => item.id === trackSelect.value);
+    if (!lane) throw new Error("Choose a track.");
+    const saved = await uploadRecordingLaneSample(lane);
+    const sample = sampleFromAudioBuffer(lane.buffer, {
+      name: saved.name || `${lane.name || "track"}.wav`,
+      fileName: saved.name || `${lane.name || "track"}.wav`,
+      path: saved.path || "",
+    });
+    await applySampleToNode(node, sample);
+  }));
+
+  overlay.querySelector("#samplePickerCancel").addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
+  overlay.tabIndex = -1;
+  overlay.focus();
+}
+
 function nodeFrequencyLabel(node) {
   if (node.wave === "audio-input") return "line in";
   if (node.wave === "noise") return "random";
+  if (node.wave === "sample") {
+    const sample = sampleGraphMeta(node.sample);
+    return sample.name ? midiNoteLabel(sample.originalPitch) : "sample";
+  }
   if (isSpeedWave(node.wave)) {
     const speed = Number(node.speed);
     const label = speed < 10 ? speed.toFixed(2) : speed < 100 ? speed.toFixed(1) : String(Math.round(speed));
@@ -5244,6 +6015,10 @@ function modulationTargetLabel(target, destination = "") {
   const labels = {
     phase: "Phase (default)",
     phaseResetTrigger: "Phase reset trigger",
+    sampleTrigger: "Sample trigger",
+    sampleStart: "Sample start",
+    sampleEnd: "Sample end",
+    sampleStretch: "Sample stretch",
     frequency: "Frequency",
     wave: "Wave type",
     ring: "Ring",
@@ -5318,9 +6093,10 @@ function modulationTargetsForLink(link, patch = state) {
   }
   if (kind === "node") {
     const targetNode = nodeByIdInPatch(patch, link.to);
+    if (targetNode?.wave === "sample") return NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
     return targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
-      ? NODE_MODULATION_TARGETS
-      : NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
+      ? NODE_MODULATION_TARGETS.filter((target) => !target.startsWith("sample"))
+      : NODE_MODULATION_TARGETS.filter((target) => target !== "wave" && !target.startsWith("sample"));
   }
   return [];
 }
@@ -6362,6 +7138,7 @@ function addNode(position = null) {
     speed: 8,
     audioInputGain: 1,
     customWave: DEFAULT_CUSTOM_WAVE,
+    sample: normalizeSample(),
   };
   state.nodes.push(node);
   select("node", node.id);
@@ -7438,6 +8215,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 initializePatchHistories();
 syncTouchModifierControlsVisibility();
 render();
+hydrateReferencedSamples();
 syncFullscreenButton();
 refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 setupMidi();
