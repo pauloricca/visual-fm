@@ -6,7 +6,9 @@ import {
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
+  DEFAULT_MAX_VOICES,
   DEFAULT_NODE_QUANTISE,
+  DEFAULT_SAMPLE,
   FREQUENCY_MODES,
   LINK_DISTORTION_TYPES,
   LINK_FILTER_TYPES,
@@ -36,6 +38,7 @@ import {
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
   WAVE_TYPES,
+  defaultPatch,
   keyMap,
 } from "./constants.js";
 import { parsePatchFile, patchFileText } from "./patch-format.js";
@@ -130,6 +133,8 @@ const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
 const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
 const VALUE_SLIDER_PRECISION_POWER = 1.45;
+const VALUE_SLIDER_RESET_TAP_DISTANCE_PX = 14;
+const VALUE_SLIDER_RESET_TAP_MAX_MS = 360;
 const MIDI_KNOB_TOUCH_SCALE = 1.65;
 const MIDI_KNOB_TOUCH_PRECISION_THRESHOLD_PX = 28;
 const NODE_LAYOUT_HALF_WIDTH = 71;
@@ -3172,7 +3177,7 @@ function attachRecordingTimelineEvents() {
       recordingTimelineTempo = Math.round(value);
       restartRecordingMetronome();
       return recordingTimelineTempo;
-    }, { root: recordingTimelinePanel });
+    }, { root: recordingTimelinePanel, defaultValue: RECORDING_DEFAULT_TEMPO });
     recordingTimelinePanel.querySelector("#recordingMetronome")?.addEventListener("change", (event) => {
       recordingMetronomeEnabled = event.target.checked;
       restartRecordingMetronome();
@@ -3693,7 +3698,7 @@ function renderMidiKnobPanel() {
       0,
       127,
       (value) => setMidiKnobValue(binding, value),
-      { root: midiKnobPanel },
+      { root: midiKnobPanel, defaultValue: 0 },
     );
   }
 }
@@ -4347,7 +4352,7 @@ function renderPanel() {
         renderNodes();
         sendNodeParam(node.id, parameter, value);
         savePatch();
-      }, { inputMax: frequencyInputMax });
+      }, { inputMax: frequencyInputMax, defaultValue: () => (node.frequencyMode === "fixed" ? 440 : 1) });
       panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
         renderPanel();
@@ -4369,7 +4374,7 @@ function renderPanel() {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
           sendNodeParam(node.id, "quantise.glide", node.quantise.glide);
           savePatch();
-        });
+        }, { defaultValue: DEFAULT_NODE_QUANTISE.glide });
       }
     }
     if (usesSpeedControl) {
@@ -4378,14 +4383,14 @@ function renderPanel() {
         renderNodes();
         sendNodeParam(node.id, "speed", value);
         savePatch();
-      });
+      }, { defaultValue: 8 });
     }
     if (usesAudioInputGain) {
       bindNumberPair("audioInputGain", "audioInputGainRange", 0, 4, (value) => {
         node.audioInputGain = value;
         sendNodeParam(node.id, "audioInputGain", value);
         savePatch();
-      });
+      }, { defaultValue: 1 });
     }
     if (usesSampleControls) {
       panel.querySelector("#sampleFileButton")?.addEventListener("click", () => {
@@ -4403,7 +4408,7 @@ function renderPanel() {
         sendNodeParam(node.id, "sample.start", node.sample.start);
         savePatch();
         return node.sample.start;
-      });
+      }, { defaultValue: DEFAULT_SAMPLE.start });
       bindNumberPair("sampleEnd", "sampleEndRange", 0, 1, (value) => {
         node.sample = updateSampleMetadata(node.sample, { end: value });
         renderSampleWaveformPreview(node);
@@ -4411,7 +4416,7 @@ function renderPanel() {
         sendNodeParam(node.id, "sample.end", node.sample.end);
         savePatch();
         return node.sample.end;
-      });
+      }, { defaultValue: DEFAULT_SAMPLE.end });
       bindNumberPair("sampleStretch", "sampleStretchRange", 0.1, 10, (value) => {
         node.sample = updateSampleMetadata(node.sample, { stretch: value });
         sendNodeParam(node.id, "sample.stretch", node.sample.stretch);
@@ -4419,19 +4424,19 @@ function renderPanel() {
         const stretchSettings = panel.querySelector(".sample-stretch-settings");
         if (stretchSettings) stretchSettings.hidden = Math.abs(node.sample.stretch - 1) <= 0.001;
         return node.sample.stretch;
-      }, { inputMin: 0.001, inputMax: 1000 });
+      }, { inputMin: 0.001, inputMax: 1000, defaultValue: DEFAULT_SAMPLE.stretch });
       bindNumberPair("sampleCycleLength", "sampleCycleLengthRange", 64, 16384, (value) => {
         node.sample = updateSampleMetadata(node.sample, { cycleLength: value });
         sendNodeParam(node.id, "sample.cycleLength", node.sample.cycleLength);
         savePatch();
         return node.sample.cycleLength;
-      }, { inputMin: 1, inputMax: 262144 });
+      }, { inputMin: 1, inputMax: 262144, defaultValue: DEFAULT_SAMPLE.cycleLength });
       bindNumberPair("sampleOverlapRatio", "sampleOverlapRatioRange", 0, 1, (value) => {
         node.sample = updateSampleMetadata(node.sample, { overlapRatio: value });
         sendNodeParam(node.id, "sample.overlapRatio", node.sample.overlapRatio);
         savePatch();
         return node.sample.overlapRatio;
-      });
+      }, { defaultValue: DEFAULT_SAMPLE.overlapRatio });
       panel.querySelector("#sampleOriginalPitch")?.addEventListener("change", (event) => {
         node.sample = updateSampleMetadata(node.sample, { originalPitch: Number(event.target.value) });
         sendNodeParam(node.id, "sample.originalPitch", node.sample.originalPitch);
@@ -4658,33 +4663,33 @@ function renderPanel() {
       link.amount = value;
       sendLinkParam(link.id, "amount", value);
       schedulePatchSave();
-    }, { inputMax: amountInputMax });
+    }, { inputMax: amountInputMax, defaultValue: 0 });
 
     if (link.to === "audio") {
       bindNumberPair("pan", "panRange", -1, 1, (value) => {
         link.pan = value;
         sendLinkParam(link.id, "pan", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: 0 });
     }
 
     bindNumberPair("velocitySensitivity", "velocitySensitivityRange", VELOCITY_SENSITIVITY_MIN, VELOCITY_SENSITIVITY_MAX, (value) => {
       link.velocitySensitivity = value;
       sendLinkParam(link.id, "velocitySensitivity", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: () => (link.to === "audio" ? 1 : 0) });
 
     bindNumberPair("noise", "noiseRange", 0, 1, (value) => {
       link.noise = value;
       sendLinkParam(link.id, "noise", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: 0 });
 
     bindNumberPair("linkDelay", "linkDelayRange", 0, 3, (value) => {
       link.delay = value;
       sendLinkParam(link.id, "delay", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: 0 });
 
     panel.querySelector("#envelopeEnabled").addEventListener("change", (event) => {
       link.drone = !event.target.checked;
@@ -4714,13 +4719,13 @@ function renderPanel() {
         link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), attack: value };
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: DEFAULT_LINK_FOLLOWER.attack });
 
       bindNumberPair("followerRelease", "followerReleaseRange", 0.001, 4, (value) => {
         link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), release: value };
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: DEFAULT_LINK_FOLLOWER.release });
     }
 
     panel.querySelector("#filterEnabled").addEventListener("change", (event) => {
@@ -4752,13 +4757,13 @@ function renderPanel() {
         link.filter.cutoff = value;
         sendLinkParam(link.id, "filter.cutoff", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: () => defaultFilterCutoff(link.filter.type) });
 
       bindNumberPair("filterResonance", "filterResonanceRange", filterResonanceMin, filterResonanceMax, (value) => {
         link.filter.resonance = value;
         sendLinkParam(link.id, "filter.resonance", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: () => defaultFilterResonance(link.filter.type) });
     }
 
     panel.querySelector("#distortionEnabled").addEventListener("change", (event) => {
@@ -4788,7 +4793,7 @@ function renderPanel() {
         };
         sendLinkParam(link.id, "distortion.gain", value);
         schedulePatchSave();
-      }, { inputMin: 0.1 });
+      }, { inputMin: 0.1, defaultValue: DEFAULT_LINK_DISTORTION.gain });
     }
 
     if (usesEnvelopeControls) {
@@ -4800,7 +4805,7 @@ function renderPanel() {
           refreshAdsrView(link.envelope);
           sendGraph();
           savePatch();
-        });
+        }, { defaultValue: () => defaultEnvelopeValue(link, name) });
       }
     }
 
@@ -4836,7 +4841,7 @@ function renderMasterEffectsPanel() {
         effect[key] = value;
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: defaultPatch.masterEffects[effectName]?.[key] });
     }
   }
 
@@ -5303,6 +5308,24 @@ function effectField(effectId, key, label, value, min, max, unit) {
   `;
 }
 
+function defaultFilterCutoff(type) {
+  if (type === "formant") return 0;
+  if (type === "comb" || type === "comb-notch") return 440;
+  return DEFAULT_LINK_FILTER.cutoff;
+}
+
+function defaultFilterResonance(type) {
+  if (type === "comb" || type === "comb-notch") return 0.45;
+  return DEFAULT_LINK_FILTER.resonance;
+}
+
+function defaultEnvelopeValue(link, name) {
+  const envelope = link?.to === "audio"
+    ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
+    : { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 };
+  return envelope[name];
+}
+
 function filterTypeLabel(type) {
   const labels = {
     none: "None",
@@ -5564,14 +5587,14 @@ function openCustomWaveModal(nodeId) {
       renderEditor();
       commit();
       return sustainStart;
-    }, { root: controls });
+    }, { root: controls, defaultValue: DEFAULT_CUSTOM_WAVE.sustainStart });
     bindNumberPair("customSustainEnd", "customSustainEndRange", 0, 1, (value) => {
       const sustainEnd = clamp(value, customWave.sustainStart + 0.001, 1);
       customWave = normalizeCustomWave({ ...customWave, sustainEnd });
       renderEditor();
       commit();
       return sustainEnd;
-    }, { root: controls });
+    }, { root: controls, defaultValue: DEFAULT_CUSTOM_WAVE.sustainEnd });
   };
   const commit = () => {
     const target = nodeById(nodeId);
@@ -6154,6 +6177,7 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   });
   number.addEventListener("blur", (event) => commitValue(event.target.value, { valueMin: inputMin, valueMax: inputMax }));
   range.addEventListener("input", (event) => commitValue(event.target.value));
+  bindValueSliderDefaultReset(number, range, min, max, step, commitValue, options.defaultValue);
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }
 
@@ -6290,6 +6314,78 @@ function focusValueSliderNumber(number) {
   number.readOnly = false;
   number.focus({ preventScroll: true });
   number.select();
+}
+
+function bindValueSliderDefaultReset(number, range, min, max, step, commitValue, defaultValue) {
+  const control = range?.closest(".value-slider") || range;
+  if (!control || control.dataset.valueSliderResetBound) return;
+
+  const resolveDefaultValue = () => {
+    const value = typeof defaultValue === "function" ? defaultValue() : defaultValue;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? snapValueSliderValue(parsed, min, max, step) : null;
+  };
+  if (resolveDefaultValue() === null) return;
+
+  let tapStart = null;
+  let lastTap = null;
+  let lastResetTime = 0;
+
+  const resetValue = (event) => {
+    const now = performance.now();
+    if (now - lastResetTime < 80) return;
+    const value = resolveDefaultValue();
+    if (value === null) return;
+
+    lastResetTime = now;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (number && !number.readOnly) number.blur();
+    commitValue(value);
+  };
+
+  control.dataset.valueSliderResetBound = "true";
+  control.addEventListener("dblclick", resetValue);
+  control.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    tapStart = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      time: performance.now(),
+      x: event.clientX,
+      y: event.clientY,
+    };
+  }, { capture: true });
+  control.addEventListener("pointerup", (event) => {
+    if (!tapStart || event.pointerId !== tapStart.pointerId) return;
+
+    const now = performance.now();
+    const x = event.clientX;
+    const y = event.clientY;
+    const moved = Math.hypot(x - tapStart.x, y - tapStart.y);
+    const tap = {
+      pointerType: tapStart.pointerType,
+      time: now,
+      x,
+      y,
+    };
+    tapStart = null;
+
+    if (moved > VALUE_SLIDER_RESET_TAP_DISTANCE_PX) {
+      lastTap = null;
+      return;
+    }
+
+    const doubleTap = lastTap
+      && tap.pointerType === lastTap.pointerType
+      && now - lastTap.time <= VALUE_SLIDER_RESET_TAP_MAX_MS
+      && Math.hypot(tap.x - lastTap.x, tap.y - lastTap.y) <= VALUE_SLIDER_RESET_TAP_DISTANCE_PX;
+    lastTap = tap;
+    if (doubleTap) {
+      lastTap = null;
+      resetValue(event);
+    }
+  }, { capture: true });
 }
 
 function bindPrecisionRangeDrag(range, min, max, commitValue) {
@@ -6990,7 +7086,7 @@ function renderEmptyPanel() {
     state.maxVoices = Math.round(value);
     sendGraph();
     savePatch();
-  });
+  }, { defaultValue: DEFAULT_MAX_VOICES });
   panel.querySelector("#audioEngine").addEventListener("change", (event) => {
     audioBackend = normalizeAudioBackend(event.target.value);
     try {
@@ -7064,7 +7160,7 @@ function renderEmptyPanel() {
     state.keyboardLength = Math.round(value);
     if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
     savePatch();
-  });
+  }, { defaultValue: DEFAULT_KEYBOARD_LENGTH });
   attachMidiBindingEvents();
 }
 
