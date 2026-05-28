@@ -2209,6 +2209,22 @@ function panicSynths(slotId = null) {
   }
 }
 
+function syncSynthMuteState(slotId = null) {
+  const message = { type: "setMuted", payload: { muted: audioMuted } };
+  if (slotId) {
+    synthSlots.get(slotId)?.node.port.postMessage(message);
+    return;
+  }
+  for (const slot of synthSlots.values()) {
+    slot.node.port.postMessage(message);
+  }
+}
+
+function clearLinkMeterLevels() {
+  linkMeterLevels.clear();
+  scheduleLinkMeterPaint();
+}
+
 function scheduleLinkMeterPaint() {
   if (pendingLinkMeterFrame) return;
   pendingLinkMeterFrame = requestAnimationFrame(() => {
@@ -2513,6 +2529,7 @@ async function ensureSynthSlot(slot) {
   node.port.onmessage = (event) => handleWorkletMessageForSlot(slot.id, event);
   if (audioInputSource) audioInputSource.connect(node);
   postGraph(slot.id, slot.patch);
+  syncSynthMuteState(slot.id);
   syncSynthSlotActive(slot.id);
   if (slot.id === activePatchSlotId) {
     synthNode = node;
@@ -8349,7 +8366,10 @@ fullscreenButton?.addEventListener("click", (event) => {
 audioStatus.addEventListener("click", () => {
   if (audioStatus.disabled || !audioContext || !synthSlots.size) return;
   audioMuted = !audioMuted;
-  syncOutputMute();
+  if (audioMuted) syncOutputMute();
+  syncSynthMuteState();
+  clearLinkMeterLevels();
+  if (!audioMuted) syncOutputMute();
   updateAudioReadyButton();
 });
 

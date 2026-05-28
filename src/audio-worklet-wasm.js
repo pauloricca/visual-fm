@@ -138,6 +138,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.lastOutputPeak = 0;
     this.lastProcessFrames = 128;
     this.ready = false;
+    this.muted = false;
+    this.zeroVoicePhasesOnStart = false;
     this.wasm = null;
     this.leftBuffer = null;
     this.rightBuffer = null;
@@ -173,11 +175,13 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       } else if (type === "linkParam") {
         this.setLinkParam(payload);
       } else if (type === "noteOn") {
-        this.noteOn(payload.note, payload.velocity);
+        if (!this.muted) this.noteOn(payload.note, payload.velocity);
       } else if (type === "noteOff") {
         this.noteOff(payload.note);
       } else if (type === "panic") {
         this.resetRuntimeState();
+      } else if (type === "setMuted") {
+        this.setMuted(Boolean(payload?.muted));
       }
     };
 
@@ -996,6 +1000,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const slot = this.allocateSlot();
     if (slot === null) return false;
     this.wasm?.resetVoiceSlot?.(slot);
+    if (this.zeroVoicePhasesOnStart) this.wasm?.resetVoiceSlotPhases?.(slot);
     const voice = {
       id: `voice-${this.voiceCounter++}`,
       slot,
@@ -1138,6 +1143,12 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.wasm?.clearLinkMeters?.();
   }
 
+  setMuted(muted) {
+    this.muted = muted;
+    this.zeroVoicePhasesOnStart = !muted;
+    this.resetRuntimeState();
+  }
+
   waveId(node) {
     return WAVE_IDS.get(node?.wave) || 0;
   }
@@ -1211,6 +1222,11 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const frames = Math.min(left.length, MAX_WASM_FRAMES);
     this.lastProcessFrames = frames;
     const now = this.sampleCursor / sampleRate;
+
+    if (this.muted) {
+      this.fillSilence(outputs);
+      return true;
+    }
 
     if (!this.ready || !this.links.some((link) => link.to === "audio" && link.wasmIndex >= 0)) {
       this.fillSilence(outputs);

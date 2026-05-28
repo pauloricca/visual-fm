@@ -117,8 +117,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.maxVoices = DEFAULT_MAX_ACTIVE_VOICES;
     this.voiceCounter = 1;
     this.voicePool = Array.from({ length: MAX_MAX_ACTIVE_VOICES }, () => this.createVoiceShell());
-    this.droneVoice = this.createVoice("drone", 440, 1, 0, true);
+    this.droneVoice = this.createVoice("drone", 440, 1, 0, true, { initialPhaseZero: true });
     this.hasActiveDroneLinks = false;
+    this.muted = false;
+    this.zeroVoicePhasesOnStart = false;
     this.sampleCursor = 0;
     this.nextLinkMeterPostSample = 0;
     this.linkMeterPeaks = new Map();
@@ -160,13 +162,16 @@ class VisualFmEngine extends AudioWorkletProcessor {
         this.setSampleData(payload);
       }
       if (type === "noteOn") {
-        this.noteOn(payload.note, payload.velocity);
+        if (!this.muted) this.noteOn(payload.note, payload.velocity);
       }
       if (type === "noteOff") {
         this.noteOff(payload.note);
       }
       if (type === "panic") {
         this.resetRuntimeState();
+      }
+      if (type === "setMuted") {
+        this.setMuted(Boolean(payload?.muted));
       }
     };
   }
@@ -390,7 +395,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
 
     for (const node of this.nodes) {
       if (!voice.phases.has(node.id)) {
-        voice.phases.set(node.id, node.wave === "custom" ? 0 : Math.random());
+        voice.phases.set(node.id, voice.isDrone || node.wave === "custom" ? 0 : Math.random());
       }
       if (!voice.feedback.has(node.id)) {
         voice.feedback.set(node.id, { prev1: 0, prev2: 0 });
@@ -800,7 +805,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.activeVoicesByNote.clear();
     this.pendingVoiceStarts = [];
     this.pendingSampleVoiceStarts = [];
-    this.droneVoice = this.createVoice("drone", 440, 1, this.sampleCursor / sampleRate, true);
+    this.droneVoice = this.createVoice("drone", 440, 1, this.sampleCursor / sampleRate, true, { initialPhaseZero: true });
     this.chorusBuffers.forEach((buffer) => buffer.fill(0));
     this.chorusIndices = [0, 0];
     this.delayBuffers.forEach((buffer) => buffer.fill(0));
@@ -808,6 +813,22 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.reverbDelays = [this.createReverbDelays(), this.createReverbDelays()];
     this.inputDcBlockers = [this.createDcBlocker(), this.createDcBlocker()];
     this.outputDcBlockers = [this.createDcBlocker(), this.createDcBlocker()];
+    this.linkMeterPeaks.clear();
+  }
+
+  setMuted(muted) {
+    this.muted = muted;
+    this.zeroVoicePhasesOnStart = !muted;
+    this.resetRuntimeState();
+  }
+
+  fillSilence(outputs) {
+    const output = outputs[0];
+    const left = output?.[0];
+    const right = output?.[1] || left;
+    if (!left) return;
+    left.fill(0);
+    if (right !== left) right.fill(0);
   }
 
   readDelay(buffer, writeIndex, delaySamples) {
@@ -978,9 +999,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
     voice.sampleVoiceNodeId = options.sampleVoiceNodeId || null;
     voice.isSampleVoice = isSampleVoice;
     voice.isDrone = isDrone;
+    const initialPhaseZero = Boolean(options.initialPhaseZero);
 
     for (const node of this.nodes) {
-      voice.phases.set(node.id, node.wave === "custom" ? 0 : Math.random());
+      voice.phases.set(node.id, initialPhaseZero || node.wave === "custom" ? 0 : Math.random());
       voice.feedback.set(node.id, { prev1: 0, prev2: 0 });
       if (node.wave === "sample-hold") {
         voice.sampleHolds.set(node.id, this.randomBipolar());
@@ -1102,6 +1124,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
       440 * Math.pow(2, (note - 69) / 12),
       velocity,
       startedAt,
+      false,
+      { initialPhaseZero: this.zeroVoicePhasesOnStart },
     );
   }
 
@@ -1135,7 +1159,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       sourceVoice.velocity,
       readyAt,
       false,
-      { autoStartSamples: false, sampleVoiceNodeId: nodeId },
+      { autoStartSamples: false, sampleVoiceNodeId: nodeId, initialPhaseZero: this.zeroVoicePhasesOnStart },
     );
     this.startSamplePlayer(node, voice, readyAt, startMod, endMod);
     this.pendingSampleVoiceStarts.push({
@@ -2691,6 +2715,10 @@ class VisualFmEngine extends AudioWorkletProcessor {
     const output = outputs[0];
     const left = output[0];
     const right = output[1] || output[0];
+    if (this.muted) {
+      this.fillSilence(outputs);
+      return true;
+    }
 
     for (let i = 0; i < left.length; i += 1) {
       const now = this.sampleCursor / sampleRate;

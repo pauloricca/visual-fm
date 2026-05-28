@@ -1016,6 +1016,19 @@ pub extern "C" fn resetVoiceSlot(voice_slot: u32) {
 }
 
 #[no_mangle]
+pub extern "C" fn resetVoiceSlotPhases(voice_slot: u32) {
+    let voice_slot = voice_slot as usize;
+    if voice_slot >= MAX_VOICE_SLOTS {
+        return;
+    }
+    unsafe {
+        for node_index in 0..MAX_NODES {
+            PHASES[voice_slot][node_index] = 0.0;
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn armCustomOnceTriggers(voice_slot: u32) {
     let voice_slot = voice_slot as usize;
     if voice_slot >= MAX_VOICE_SLOTS {
