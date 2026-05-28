@@ -147,6 +147,9 @@ const RECORDING_TEMPO_MAX = 220;
 const RECORDING_DEFAULT_TEMPO = 120;
 const RECORDING_COUNTDOWN_BEATS = 4;
 const RECORDING_TIMELINE_MIN_SECONDS = 8;
+const RECORDING_RULER_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+const RECORDING_RULER_MINOR_TARGET_TICKS = 36;
+const RECORDING_RULER_LABEL_TARGET_TICKS = 6;
 const RECORDING_WAVEFORM_POINTS = 72;
 const RECORDING_WAVEFORM_SILENCE_FLOOR = 0.003;
 const RECORDING_WAVEFORM_MIN_VISUAL_PEAK = 0.08;
@@ -1780,17 +1783,33 @@ function audioOutPosition() {
   return state.audioOutPosition;
 }
 
-function bezierPath(from, to) {
+function bezierControlPoints(from, to, offset = 0) {
   const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
-  return `M ${from.x} ${from.y} C ${from.x} ${from.y + distance}, ${to.x} ${to.y - distance}, ${to.x} ${to.y}`;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const normal = { x: -dy / length, y: dx / length };
+  return {
+    p0: from,
+    p1: {
+      x: from.x + normal.x * offset,
+      y: from.y + distance + normal.y * offset,
+    },
+    p2: {
+      x: to.x + normal.x * offset,
+      y: to.y - distance + normal.y * offset,
+    },
+    p3: to,
+  };
 }
 
-function bezierPoint(from, to, t = 0.5) {
-  const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
-  const p0 = from;
-  const p1 = { x: from.x, y: from.y + distance };
-  const p2 = { x: to.x, y: to.y - distance };
-  const p3 = to;
+function bezierPath(from, to, offset = 0) {
+  const { p1, p2 } = bezierControlPoints(from, to, offset);
+  return `M ${from.x} ${from.y} C ${p1.x} ${p1.y}, ${p2.x} ${p2.y}, ${to.x} ${to.y}`;
+}
+
+function bezierPoint(from, to, t = 0.5, offset = 0) {
+  const { p0, p1, p2, p3 } = bezierControlPoints(from, to, offset);
   const u = 1 - t;
   return {
     x: u ** 3 * p0.x + 3 * u ** 2 * t * p1.x + 3 * u * t ** 2 * p2.x + t ** 3 * p3.x,
@@ -1798,16 +1817,27 @@ function bezierPoint(from, to, t = 0.5) {
   };
 }
 
-function feedbackPath(nodeId) {
-  const from = nodeOutputPoint(nodeId);
-  const to = nodeInputPoint(nodeId);
-  const loopWidth = 118;
-  return `M ${from.x} ${from.y} C ${from.x + loopWidth} ${from.y + 54}, ${to.x + loopWidth} ${to.y - 54}, ${to.x} ${to.y}`;
+function parallelLinkOffset(link) {
+  if (!link) return 0;
+  const siblings = state.links.filter((item) => item.from === link.from && item.to === link.to);
+  if (siblings.length <= 1) return 0;
+  const index = siblings.findIndex((item) => item.id === link.id);
+  if (index === -1) return 0;
+  return (index - (siblings.length - 1) / 2) * 18;
 }
 
-function feedbackMidpoint(nodeId) {
+function feedbackPath(nodeId, offset = 0) {
+  const from = nodeOutputPoint(nodeId);
+  const to = nodeInputPoint(nodeId);
+  const loopWidth = 118 + Math.abs(offset) * 1.45;
+  const side = offset < 0 ? -1 : 1;
+  return `M ${from.x} ${from.y} C ${from.x + loopWidth * side} ${from.y + 54}, ${to.x + loopWidth * side} ${to.y - 54}, ${to.x} ${to.y}`;
+}
+
+function feedbackMidpoint(nodeId, offset = 0) {
   const node = nodeById(nodeId);
-  return { x: node.x + 92, y: node.y };
+  const side = offset < 0 ? -1 : 1;
+  return { x: node.x + (92 + Math.abs(offset) * 1.05) * side, y: node.y };
 }
 
 function linkEndpointPoint(to, visited = new Set(), context = null) {
@@ -1830,8 +1860,9 @@ function linkInputPoint(id, visited = new Set(), context = null) {
   visited.delete(id);
   if (!to) return null;
 
-  if (link.from === link.to) return feedbackMidpoint(link.from);
-  return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T);
+  const offset = parallelLinkOffset(link);
+  if (link.from === link.to) return feedbackMidpoint(link.from, offset);
+  return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T, offset);
 }
 
 function linkGeometry(link, visited = new Set(), context = null) {
@@ -1842,8 +1873,9 @@ function linkGeometry(link, visited = new Set(), context = null) {
   visited.delete(link.id);
   if (!to) return null;
 
-  const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
-  const midpoint = link.from === link.to ? feedbackMidpoint(link.from) : bezierPoint(from, to, LINK_INPUT_T);
+  const offset = parallelLinkOffset(link);
+  const path = link.from === link.to ? feedbackPath(link.from, offset) : bezierPath(from, to, offset);
+  const midpoint = link.from === link.to ? feedbackMidpoint(link.from, offset) : bezierPoint(from, to, LINK_INPUT_T, offset);
   return { from, to, path, midpoint };
 }
 
@@ -2686,6 +2718,29 @@ function formatRulerTime(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}`;
 }
 
+function recordingRulerStep(duration, targetTicks) {
+  const rawStep = Math.max(0.5, duration / Math.max(1, targetTicks));
+  return RECORDING_RULER_STEPS.find((step) => step >= rawStep) || RECORDING_RULER_STEPS.at(-1);
+}
+
+function recordingRulerTicks(duration) {
+  const minorStep = recordingRulerStep(duration, RECORDING_RULER_MINOR_TARGET_TICKS);
+  const labelStep = Math.max(minorStep, recordingRulerStep(duration, RECORDING_RULER_LABEL_TARGET_TICKS));
+  const ticks = [];
+  const tickCount = Math.ceil(duration / minorStep);
+  for (let index = 0; index <= tickCount; index += 1) {
+    const time = Math.min(duration, index * minorStep);
+    const labeled = Math.abs(time / labelStep - Math.round(time / labelStep)) < 0.001 || index === 0;
+    ticks.push({
+      time,
+      left: time / duration * 100,
+      labeled,
+      major: labeled || Math.abs(time / labelStep * 2 - Math.round(time / labelStep * 2)) < 0.001,
+    });
+  }
+  return ticks;
+}
+
 function recordingTimelineScale() {
   return recordingTimelinePanel?.querySelector("[data-recording-timeline-scale]");
 }
@@ -2790,11 +2845,7 @@ function renderRecordingTimelinePanel() {
   const duration = recordingSequenceDuration();
   recordingRenderedDuration = duration;
   const selectedLane = selectedRecordingLane();
-  const tickStep = duration > 30 ? Math.max(5, Math.ceil(duration / 12)) : 1;
-  const rulerTicks = [];
-  for (let time = 0; time <= duration + 0.001; time += tickStep) {
-    rulerTicks.push({ time, left: time / duration * 100 });
-  }
+  const rulerTicks = recordingRulerTicks(duration);
   const status = recordingCountdownActive
     ? `Recording in ${Math.max(1, RECORDING_COUNTDOWN_BEATS - recordingCountdownBeat + 1)}`
     : recordingIsActive()
@@ -2806,8 +2857,8 @@ function renderRecordingTimelinePanel() {
       <div class="recording-track-area">
         <div class="recording-ruler" data-recording-timeline-scale>
           ${rulerTicks.map((tick) => `
-            <span class="recording-ruler-tick" style="left: ${tick.left}%">
-              <span>${formatRulerTime(tick.time)}</span>
+            <span class="recording-ruler-tick ${tick.major ? "is-major" : ""}" style="left: ${tick.left}%">
+              ${tick.labeled ? `<span>${formatRulerTime(tick.time)}</span>` : ""}
             </span>
           `).join("")}
           <span class="recording-playhead" data-recording-playhead>
@@ -5807,20 +5858,24 @@ async function uploadSampleFile(file) {
   return result;
 }
 
-async function uploadRecordingLaneSample(lane) {
-  const blob = audioBufferToWav(lane.buffer);
-  const fileName = recordingExportFileName(lane.name || "track", "track");
+async function uploadSampleBlob(blob, fileName, errorLabel = "Sample import") {
   const response = await fetch("/api/samples", {
     method: "POST",
     headers: {
-      "content-type": "audio/wav",
+      "content-type": blob.type || "application/octet-stream",
       "x-sample-file-name": fileName,
     },
     body: blob,
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || `Track sample import failed (${response.status}).`);
+  if (!response.ok) throw new Error(result.error || `${errorLabel} failed (${response.status}).`);
   return result;
+}
+
+async function uploadRecordingLaneSample(lane) {
+  const blob = audioBufferToWav(lane.buffer);
+  const fileName = recordingExportFileName(lane.name || "track", "track");
+  return uploadSampleBlob(blob, fileName, "Track sample import");
 }
 
 async function decodeProjectSample(sampleInfo) {
@@ -5915,6 +5970,14 @@ function openSamplePickerModal(nodeId) {
             <button class="text-button" id="useTrackSampleButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Use</button>
           </div>
         </section>
+        <section class="sample-picker-section">
+          <h3>Record</h3>
+          <div class="sample-recording-fields">
+            <input id="sampleRecordingName" type="text" maxlength="80" value="Sample ${escapeHtml(recordingExportTimestamp())}" aria-label="Recording name">
+            <span class="sample-recording-status" id="sampleRecordingStatus">Ready</span>
+            <button class="text-button" id="toggleSampleRecordingButton" type="button">Start recording</button>
+          </div>
+        </section>
       </div>
       <div class="modal-actions">
         <button class="text-button" id="samplePickerCancel" type="button">Cancel</button>
@@ -5931,24 +5994,118 @@ function openSamplePickerModal(nodeId) {
   const importButton = overlay.querySelector("#importSampleFileButton");
   const trackSelect = overlay.querySelector("#sampleTrackSelect");
   const useTrackButton = overlay.querySelector("#useTrackSampleButton");
+  const sampleRecordingName = overlay.querySelector("#sampleRecordingName");
+  const sampleRecordingStatus = overlay.querySelector("#sampleRecordingStatus");
+  const toggleSampleRecordingButton = overlay.querySelector("#toggleSampleRecordingButton");
 
-  const close = () => overlay.remove();
+  let sampleRecordStream = null;
+  let sampleRecorder = null;
+  let sampleRecordChunks = [];
+  let sampleRecordingCancelled = false;
+
+  const sampleRecordingActive = () => sampleRecorder?.state === "recording";
+  const stopSampleRecordStream = () => {
+    sampleRecordStream?.getTracks().forEach((track) => track.stop());
+    sampleRecordStream = null;
+  };
+  const close = () => {
+    if (sampleRecordingActive()) {
+      sampleRecordingCancelled = true;
+      sampleRecorder.stop();
+    } else {
+      stopSampleRecordStream();
+    }
+    overlay.remove();
+  };
   const showError = (message) => {
     errorMessage.textContent = message;
     errorMessage.hidden = false;
   };
+  const setSampleRecordingStatus = (message, isRecording = false) => {
+    sampleRecordingStatus.textContent = message;
+    toggleSampleRecordingButton.textContent = isRecording ? "Stop recording" : "Start recording";
+    toggleSampleRecordingButton.classList.toggle("recording", isRecording);
+  };
+  const setPickerActionsDisabled = (disabled) => {
+    useProjectButton.disabled = disabled || projectSelect.disabled || !projectSelect.value;
+    importButton.disabled = disabled;
+    useTrackButton.disabled = disabled || !recordingLanes.length;
+  };
   const runAction = async (action) => {
     errorMessage.hidden = true;
-    for (const button of [useProjectButton, importButton, useTrackButton]) button.disabled = true;
+    setPickerActionsDisabled(true);
+    toggleSampleRecordingButton.disabled = true;
     try {
       await action();
       close();
     } catch (error) {
       showError(error?.message || "Sample could not load");
-      useProjectButton.disabled = projectSelect.disabled || !projectSelect.value;
-      importButton.disabled = false;
-      useTrackButton.disabled = !recordingLanes.length;
+      setPickerActionsDisabled(false);
+      toggleSampleRecordingButton.disabled = false;
     }
+  };
+  const startSampleRecording = async () => {
+    const options = mediaRecorderOptions();
+    if (options === null) throw new Error("Recording is not supported in this browser.");
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Audio input unavailable.");
+
+    const audioConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+    const deviceId = selectedAudioDeviceId("input");
+    if (deviceId !== DEFAULT_AUDIO_DEVICE_ID) {
+      audioConstraints.deviceId = { exact: deviceId };
+    }
+
+    sampleRecordingCancelled = false;
+    sampleRecordChunks = [];
+    sampleRecordStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    sampleRecorder = new MediaRecorder(sampleRecordStream, options);
+    sampleRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data?.size) sampleRecordChunks.push(event.data);
+    });
+    sampleRecorder.addEventListener("stop", async () => {
+      const chunks = sampleRecordChunks;
+      const mimeType = sampleRecorder?.mimeType || "audio/webm";
+      const sampleName = sampleRecordingName.value.trim() || `Sample ${recordingExportTimestamp()}`;
+      sampleRecorder = null;
+      stopSampleRecordStream();
+      if (sampleRecordingCancelled || !document.body.contains(overlay)) return;
+      toggleSampleRecordingButton.disabled = true;
+      setSampleRecordingStatus("Saving...");
+      try {
+        const sourceBlob = new Blob(chunks, { type: mimeType });
+        if (!sourceBlob.size) throw new Error("No audio was recorded.");
+        const context = audioContext || createAudioContext();
+        if (!audioContext) audioContext = context;
+        const decoded = await context.decodeAudioData(await sourceBlob.arrayBuffer());
+        const fileName = recordingExportFileName(sampleName, "sample");
+        const saved = await uploadSampleBlob(audioBufferToWav(decoded), fileName, "Recorded sample import");
+        await applySampleToNode(node, sampleFromAudioBuffer(decoded, {
+          name: saved.name || fileName,
+          fileName: saved.name || fileName,
+          path: saved.path || "",
+        }));
+        close();
+      } catch (error) {
+        showError(error?.message || "Recorded sample could not load");
+        setPickerActionsDisabled(false);
+        toggleSampleRecordingButton.disabled = false;
+        setSampleRecordingStatus("Ready");
+      }
+    }, { once: true });
+    sampleRecorder.start();
+    setPickerActionsDisabled(true);
+    setSampleRecordingStatus("Recording...", true);
+    toggleSampleRecordingButton.disabled = false;
+  };
+  const stopSampleRecording = () => {
+    if (!sampleRecordingActive()) return;
+    toggleSampleRecordingButton.disabled = true;
+    setSampleRecordingStatus("Stopping...");
+    sampleRecorder.stop();
   };
 
   fetchProjectSamples()
@@ -5957,7 +6114,7 @@ function openSamplePickerModal(nodeId) {
         ? samples.map((sample) => `<option value="${escapeHtml(sample.name)}">${escapeHtml(sample.name)}</option>`).join("")
         : `<option>No samples</option>`;
       projectSelect.disabled = samples.length === 0;
-      useProjectButton.disabled = samples.length === 0;
+      useProjectButton.disabled = samples.length === 0 || sampleRecordingActive();
       projectSelect.dataset.samples = JSON.stringify(samples);
     })
     .catch((error) => {
@@ -6002,6 +6159,26 @@ function openSamplePickerModal(nodeId) {
     });
     await applySampleToNode(node, sample);
   }));
+
+  toggleSampleRecordingButton.addEventListener("click", () => {
+    errorMessage.hidden = true;
+    if (sampleRecordingActive()) {
+      stopSampleRecording();
+      return;
+    }
+    toggleSampleRecordingButton.disabled = true;
+    setSampleRecordingStatus("Starting...");
+    startSampleRecording()
+      .catch((error) => {
+        stopSampleRecordStream();
+        showError(error?.message || "Could not start recording.");
+        setPickerActionsDisabled(false);
+        setSampleRecordingStatus("Ready");
+      })
+      .finally(() => {
+        if (!sampleRecordingActive()) toggleSampleRecordingButton.disabled = false;
+      });
+  });
 
   overlay.querySelector("#samplePickerCancel").addEventListener("click", close);
   overlay.addEventListener("click", (event) => {
@@ -7364,13 +7541,7 @@ function relinkSelectedLink(link, endpoint, targetId) {
   savePatch();
 }
 
-function upsertLink(from, to) {
-  const existing = state.links.find((link) => link.from === from && link.to === to);
-  if (existing) {
-    select("link", existing.id);
-    return;
-  }
-
+function createLink(from, to) {
   const targetLink = linkById(to);
   const link = {
     id: uid("link"),
@@ -7919,11 +8090,11 @@ function onLinkPointerEnd(event) {
         .find(Boolean);
 
       if (inputAnchor?.dataset.nodeId) {
-        upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+        createLink(linkDrag.from, inputAnchor.dataset.nodeId);
       } else if (linkAnchor?.dataset.linkId) {
-        upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
+        createLink(linkDrag.from, linkAnchor.dataset.linkId);
       } else if (audioAnchor) {
-        upsertLink(linkDrag.from, "audio");
+        createLink(linkDrag.from, "audio");
       }
     }
   }

@@ -6,5 +6,9 @@ dist/
 coverage/
 target/
 rust/**/target/
-patches/
-recordings/
+patches/*
+!patches/.gitkeep
+recordings/*
+!recordings/.gitkeep
+samples/*
+!samples/.gitkeep
