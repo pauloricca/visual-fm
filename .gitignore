@@ -12,3 +12,5 @@ recordings/*
 !recordings/.gitkeep
 samples/*
 !samples/.gitkeep
+sessions/*
+!sessions/.gitkeep

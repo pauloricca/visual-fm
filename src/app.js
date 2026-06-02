@@ -70,6 +70,7 @@ const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
 const appTitle = document.querySelector("#appTitle");
+const sessionTitleButton = document.querySelector("#sessionTitleButton");
 const patchTabs = document.querySelector("#patchTabs");
 const addNodeButton = document.querySelector("#addNodeButton");
 const recordButton = document.querySelector("#recordButton");
@@ -133,6 +134,7 @@ const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
 const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
 const VALUE_SLIDER_PRECISION_POWER = 1.45;
+const RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX = 20;
 const VALUE_SLIDER_RESET_TAP_DISTANCE_PX = 14;
 const VALUE_SLIDER_RESET_TAP_MAX_MS = 360;
 const MIDI_KNOB_TOUCH_SCALE = 1.65;
@@ -214,7 +216,14 @@ async function toggleFullscreen() {
 const patchSession = loadPatchSession();
 const state = {
   ...patchSession.activePatch,
-  selected: { type: null, id: null },
+  sessionId: patchSession.sessionId,
+  sessionName: patchSession.sessionName,
+  audioInputDeviceId: patchSession.audioInputDeviceId,
+  audioOutputDeviceId: patchSession.audioOutputDeviceId,
+  linkSignalGradientMeters: patchSession.linkSignalGradientMeters,
+  keyboardStartNote: patchSession.keyboardStartNote,
+  keyboardLength: patchSession.keyboardLength,
+  selected: patchSession.selected || { type: null, id: null },
 };
 
 let audioContext = null;
@@ -246,10 +255,17 @@ let recordingTimelineStartedAt = 0;
 let recordingTimelineTempo = RECORDING_DEFAULT_TEMPO;
 let recordingMetronomeEnabled = false;
 let recordingLaneCounter = 1;
-const recordingLanes = [];
+const recordingLanes = normalizeStoredRecordingLanes(patchSession.recordings);
+recordingLaneCounter = nextRecordingLaneCounter(recordingLanes);
 const recordingPlaybackSources = [];
 const recordingPatchLaneCounters = new Map();
-let selectedRecordingLaneId = null;
+const recordingSelection = normalizeStoredRecordingSelection(
+  recordingLanes,
+  patchSession.selectedRecordingLaneId,
+  patchSession.selectedRecordingClipId,
+);
+let selectedRecordingLaneId = recordingSelection.laneId;
+let selectedRecordingClipId = recordingSelection.clipId;
 let recordingPlayheadTime = 0;
 let recordingReturnPlayheadTime = 0;
 let recordingTransportPlaying = false;
@@ -261,7 +277,7 @@ let recordingScrubGainNode = null;
 let recordingScrubSource = null;
 let recordingScrubPreviewLastAt = 0;
 let audioMuted = false;
-let audioBackend = loadAudioBackend();
+let audioBackend = patchSession.audioBackend || loadAudioBackend();
 let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
 let nodeCounter = 3;
 let linkCounter = 3;
@@ -299,13 +315,16 @@ let keyboardFineSliderActive = false;
 let touchCloneModifierPointerId = null;
 let cloneModifierActive = false;
 const activeBottomPanels = {
-  timeline: false,
-  keyboard: false,
-  knobs: false,
+  timeline: Boolean(patchSession.activeBottomPanels?.timeline),
+  keyboard: Boolean(patchSession.activeBottomPanels?.keyboard),
+  knobs: Boolean(patchSession.activeBottomPanels?.knobs),
 };
 let keyboardWideLayout = false;
 let availableAudioDevices = { inputs: [], outputs: [] };
 let patchLibrary = null;
+let sessionLibrary = null;
+let savedSessionSummaries = [];
+let pendingSessionNameCheck = null;
 let patchSlots = patchSession.slots;
 let activePatchSlotId = patchSession.activeSlotId;
 const patchHistories = new Map();
@@ -316,9 +335,7 @@ const midiKnobValues = new Map();
 
 syncCounters();
 pruneMidiBindings();
-if (state.selected.id && !nodeById(state.selected.id)) {
-  state.selected = { type: null, id: null };
-}
+state.selected = normalizeStoredSelection(state.selected, state);
 
 function uid(prefix) {
   const next = prefix === "op" ? nodeCounter++ : linkCounter++;
@@ -406,7 +423,66 @@ function normalizePatchSlot(slot, fallbackPatch = null) {
   return {
     id: typeof slot?.id === "string" && slot.id.trim() ? slot.id : patchSlotUid(),
     active: slot?.active !== false,
+    patchRef: slot?.patchRef || null,
     patch: normalized,
+  };
+}
+
+function defaultSessionName() {
+  return "Untitled Session";
+}
+
+function safeSessionFolderName(name) {
+  return String(name || defaultSessionName())
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96)
+    || defaultSessionName();
+}
+
+function sessionSettingsFromPatch(patch = normalizeDefaultPatch()) {
+  return {
+    sessionId: "",
+    sessionName: defaultSessionName(),
+    audioBackend: loadAudioBackend(),
+    audioInputDeviceId: patch.audioInputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
+    audioOutputDeviceId: patch.audioOutputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
+    linkSignalGradientMeters: Boolean(patch.linkSignalGradientMeters),
+    keyboardStartNote: Number.isFinite(Number(patch.keyboardStartNote))
+      ? clamp(Math.round(Number(patch.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
+      : DEFAULT_KEYBOARD_START_NOTE,
+    keyboardLength: Number.isFinite(Number(patch.keyboardLength))
+      ? clamp(Math.round(Number(patch.keyboardLength)), MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH)
+      : DEFAULT_KEYBOARD_LENGTH,
+  };
+}
+
+function normalizeSessionSettings(source = {}, fallbackPatch = normalizeDefaultPatch()) {
+  const fallback = sessionSettingsFromPatch(fallbackPatch);
+  const sessionName = typeof source.sessionName === "string" && source.sessionName.trim()
+    ? source.sessionName.trim()
+    : fallback.sessionName;
+  return {
+    sessionId: typeof source.sessionId === "string" && source.sessionId.trim() ? source.sessionId : "",
+    sessionName,
+    audioBackend: normalizeAudioBackend(source.audioBackend || fallback.audioBackend),
+    audioInputDeviceId: typeof source.audioInputDeviceId === "string" && source.audioInputDeviceId.trim()
+      ? source.audioInputDeviceId
+      : fallback.audioInputDeviceId,
+    audioOutputDeviceId: typeof source.audioOutputDeviceId === "string" && source.audioOutputDeviceId.trim()
+      ? source.audioOutputDeviceId
+      : fallback.audioOutputDeviceId,
+    linkSignalGradientMeters: source.linkSignalGradientMeters === undefined
+      ? fallback.linkSignalGradientMeters
+      : Boolean(source.linkSignalGradientMeters),
+    keyboardStartNote: Number.isFinite(Number(source.keyboardStartNote))
+      ? clamp(Math.round(Number(source.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
+      : fallback.keyboardStartNote,
+    keyboardLength: Number.isFinite(Number(source.keyboardLength))
+      ? clamp(Math.round(Number(source.keyboardLength)), MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH)
+      : fallback.keyboardLength,
   };
 }
 
@@ -416,7 +492,7 @@ function loadPatchSession() {
     if (!saved) {
       const activePatch = normalizeDefaultPatch();
       const slot = normalizePatchSlot(null, activePatch);
-      return { activePatch, slots: [slot], activeSlotId: slot.id };
+      return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
     }
 
     const parsed = JSON.parse(saved);
@@ -427,16 +503,26 @@ function loadPatchSession() {
         ? parsed.activePatchSlotId
         : safeSlots[0].id;
       const activePatch = clonePatch(safeSlots.find((slot) => slot.id === activeSlotId)?.patch || safeSlots[0].patch);
-      return { activePatch, slots: safeSlots, activeSlotId };
+      return {
+        ...normalizeSessionSettings(parsed, activePatch),
+        activePatch,
+        slots: safeSlots,
+        activeSlotId,
+        recordings: Array.isArray(parsed.recordings) ? parsed.recordings : [],
+        activeBottomPanels: normalizeStoredBottomPanels(parsed.activeBottomPanels),
+        selected: normalizeStoredSelection(parsed.selected, activePatch),
+        selectedRecordingLaneId: parsed.selectedRecordingLaneId || null,
+        selectedRecordingClipId: parsed.selectedRecordingClipId || null,
+      };
     }
 
     const activePatch = normalizePatch(parsed);
     const slot = normalizePatchSlot(null, activePatch);
-    return { activePatch, slots: [slot], activeSlotId: slot.id };
+    return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
   } catch {
     const activePatch = normalizeDefaultPatch();
     const slot = normalizePatchSlot(null, activePatch);
-    return { activePatch, slots: [slot], activeSlotId: slot.id };
+    return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
   }
 }
 
@@ -454,19 +540,86 @@ function savePatch() {
 
 function currentPatchSessionData() {
   return {
-    version: 2,
+    version: 3,
+    sessionId: state.sessionId,
+    sessionName: state.sessionName,
+    audioBackend,
+    audioInputDeviceId: state.audioInputDeviceId,
+    audioOutputDeviceId: state.audioOutputDeviceId,
+    linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
+    keyboardStartNote: state.keyboardStartNote,
+    keyboardLength: state.keyboardLength,
+    recordings: recordingLanes.map(recordingLaneReference),
+    activeBottomPanels: { ...activeBottomPanels },
+    selected: selectionForSessionStorage(state.selected),
+    selectedRecordingLaneId,
+    selectedRecordingClipId,
     activePatchSlotId,
     patchSlots: patchSlots.map((slot) => ({
       id: slot.id,
       active: slot.active !== false,
+      patchRef: slot.patchRef || null,
       patch: patchForSessionStorage(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
     })),
   };
 }
 
-function patchForSessionStorage(patch) {
+function selectionForSessionStorage(selection) {
+  if (!selection?.type) return { type: null, id: null };
+  if (selection.type === "nodes") {
+    return {
+      type: "nodes",
+      ids: Array.isArray(selection.ids) ? selection.ids : [],
+    };
+  }
   return {
-    ...patch,
+    type: selection.type,
+    id: selection.id || null,
+  };
+}
+
+function normalizeStoredBottomPanels(panels = {}) {
+  return {
+    timeline: Boolean(panels.timeline),
+    keyboard: Boolean(panels.keyboard),
+    knobs: Boolean(panels.knobs),
+  };
+}
+
+function isSelectionValid(selection, patch = state) {
+  if (!selection?.type) return true;
+  if (selection.type === "patch") return true;
+  if (selection.type === "audio") return true;
+  if (selection.type === "node") return Boolean(nodeByIdInPatch(patch, selection.id));
+  if (selection.type === "link") return Boolean(linkByIdInPatch(patch, selection.id));
+  if (selection.type === "nodes") {
+    return Array.isArray(selection.ids) && selection.ids.some((id) => nodeByIdInPatch(patch, id));
+  }
+  return false;
+}
+
+function normalizeStoredSelection(selection = {}, patch = state) {
+  if (!isSelectionValid(selection, patch)) return { type: null, id: null };
+  if (selection.type === "nodes") {
+    return {
+      type: "nodes",
+      ids: selection.ids.filter((id) => nodeByIdInPatch(patch, id)),
+    };
+  }
+  return selection?.type ? { type: selection.type, id: selection.id || null } : { type: null, id: null };
+}
+
+function patchForSessionStorage(patch) {
+  const {
+    audioInputDeviceId,
+    audioOutputDeviceId,
+    linkSignalGradientMeters,
+    keyboardStartNote,
+    keyboardLength,
+    ...patchData
+  } = patch;
+  return {
+    ...patchData,
     midiBindings: clonePatch(patch.midiBindings || []),
     masterEffects: clonePatch(patch.masterEffects || {}),
     audioOutPosition: patch.audioOutPosition ? { ...patch.audioOutPosition } : patch.audioOutPosition,
@@ -505,14 +658,9 @@ function currentPatchData() {
   return {
     patchName: state.patchName,
     maxVoices: state.maxVoices,
-    audioInputDeviceId: state.audioInputDeviceId,
-    audioOutputDeviceId: state.audioOutputDeviceId,
     audioOutPosition: state.audioOutPosition,
-    linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
-    keyboardStartNote: state.keyboardStartNote,
-    keyboardLength: state.keyboardLength,
     midiBindings: state.midiBindings,
     masterEffects: state.masterEffects,
     nodes: state.nodes,
@@ -1565,6 +1713,7 @@ function selectNodes(ids) {
     state.selected = { type: "nodes", ids: uniqueIds };
   }
   render();
+  savePatch();
 }
 
 function addNodeToSelection(id) {
@@ -2230,6 +2379,7 @@ function scheduleLinkMeterPaint() {
   pendingLinkMeterFrame = requestAnimationFrame(() => {
     pendingLinkMeterFrame = null;
     updateSelectedLinkMeter();
+    updateSelectedNodeMeter();
     if (state.linkSignalGradientMeters) updateWireSignalMeters();
   });
 }
@@ -2273,6 +2423,20 @@ function updateSelectedLinkMeter() {
   if (inputFill) inputFill.style.transform = `scaleY(${clamp(levels.input || 0, 0, 1)})`;
   if (outputFill) outputFill.style.transform = `scaleY(${clamp(levels.output || 0, 0, 1)})`;
   if (envelopeFill) envelopeFill.style.transform = `scaleY(${clamp(levels.envelope || 0, 0, 1)})`;
+}
+
+function nodeOutputMeterLevel(nodeId) {
+  return state.links
+    .filter((link) => link.from === nodeId)
+    .reduce((level, link) => Math.max(level, linkMeterLevels.get(link.id)?.output || 0), 0);
+}
+
+function updateSelectedNodeMeter() {
+  const meter = panel.querySelector("[data-node-meter]");
+  if (!meter) return;
+  const level = nodeOutputMeterLevel(meter.dataset.nodeMeter);
+  const outputFill = meter.querySelector("[data-link-meter-fill='output']");
+  if (outputFill) outputFill.style.transform = `scaleY(${clamp(level, 0, 1)})`;
 }
 
 function wireMeterGradientId(linkId) {
@@ -2682,7 +2846,7 @@ function showRecordingSavedState(caption = "Saved", label = "Recording saved") {
 }
 
 function recordingSequenceDuration() {
-  const laneEnd = recordingLanes.reduce((max, lane) => Math.max(max, lane.startTime + lane.duration), 0);
+  const laneEnd = recordingLanes.reduce((max, lane) => Math.max(max, recordingLaneEnd(lane)), 0);
   const liveEnd = recordingIsActive()
     ? recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt)
     : 0;
@@ -2714,9 +2878,8 @@ function setRecordingPlayheadTime(time, { render = false } = {}) {
 
 function recordingTimelinePointerRect(element) {
   const trackArea = element?.closest?.(".recording-track-area") || recordingTimelinePanel?.querySelector(".recording-track-area");
-  const lanes = trackArea?.querySelector(".recording-lanes");
   const ruler = trackArea?.querySelector("[data-recording-timeline-scale]");
-  const rect = (lanes || ruler || trackArea || element)?.getBoundingClientRect?.();
+  const rect = (ruler || trackArea || element)?.getBoundingClientRect?.();
   return rect && rect.width > 0 ? rect : null;
 }
 
@@ -2773,6 +2936,7 @@ function updateRecordingTimelinePlayhead() {
   const playhead = recordingTimelinePanel.querySelector("[data-recording-playhead]");
   const timeLabel = recordingTimelinePanel.querySelector("[data-recording-playhead-time]");
   const liveClips = recordingTimelinePanel.querySelectorAll("[data-recording-live-clip]");
+  const snipButton = recordingTimelinePanel.querySelector("#snipRecordingClipButton");
   if (!scale || !playhead) return;
   const duration = nextDuration;
   const playheadTime = clamp(currentRecordingPlayheadTime(), 0, duration);
@@ -2780,6 +2944,7 @@ function updateRecordingTimelinePlayhead() {
   const percent = duration > 0 ? playheadTime / duration * 100 : 0;
   playhead.style.left = `${percent}%`;
   if (timeLabel) timeLabel.textContent = formatTimelineTime(playheadTime);
+  if (snipButton) snipButton.disabled = !selectedRecordingSnipTarget();
   if (liveClips.length) {
     const liveWidth = `${Math.max(1.5, (Math.max(0, playheadTime - recordingLaneStartedAt) / duration * 100))}%`;
     for (const liveClip of liveClips) liveClip.style.width = liveWidth;
@@ -2797,6 +2962,151 @@ function scheduleRecordingTimelineFrame() {
     }
     if (recordingIsActive() || recordingTransportPlaying) scheduleRecordingTimelineFrame();
   });
+}
+
+function normalizeRecordingLaneVolume(value) {
+  return clamp(Number.isFinite(Number(value)) ? Number(value) : 1, 0, 2);
+}
+
+function recordingClipId(laneId, index = 1) {
+  return `${laneId}-clip-${index}`;
+}
+
+function normalizeStoredRecordingLanes(lanes = []) {
+  if (!Array.isArray(lanes)) return [];
+  return lanes.map((lane, index) => {
+    const laneId = lane?.id || `recording-lane-${index + 1}`;
+    const duration = Math.max(0, Number(lane?.duration) || 0);
+    const startTime = Math.max(0, Number(lane?.startTime) || 0);
+    const clips = Array.isArray(lane?.clips) && lane.clips.length
+      ? lane.clips.map((clip, clipIndex) => ({
+          id: clip.id || recordingClipId(laneId, clipIndex + 1),
+          startTime: Math.max(0, Number(clip.startTime) || 0),
+          duration: Math.max(0, Number(clip.duration) || 0),
+          offset: Math.max(0, Number(clip.offset) || 0),
+        }))
+      : [{
+          id: recordingClipId(laneId),
+          startTime,
+          duration,
+          offset: 0,
+        }];
+    return syncRecordingLaneBounds({
+      ...lane,
+      id: laneId,
+      name: lane?.name || "",
+      patchSlotId: lane?.patchSlotId || "",
+      patchName: lane?.patchName || "",
+      startTime,
+      duration,
+      volume: normalizeRecordingLaneVolume(lane?.volume),
+      buffer: null,
+      waveform: Array.isArray(lane?.waveform) ? lane.waveform : [],
+      createdAt: lane?.createdAt ? new Date(lane.createdAt) : new Date(),
+      path: lane?.path || "",
+      fileName: lane?.fileName || "",
+      clips,
+    });
+  });
+}
+
+function nextRecordingLaneCounter(lanes = []) {
+  return lanes.reduce((next, lane) => {
+    const match = /^recording-lane-(\d+)$/.exec(lane.id || "");
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
+function normalizeStoredRecordingSelection(lanes = [], laneId = null, clipId = null) {
+  const lane = lanes.find((item) => item.id === laneId);
+  if (!lane) return { laneId: null, clipId: null };
+  const clips = recordingLaneClips(lane);
+  const clip = clips.find((item) => item.id === clipId) || clips[0] || null;
+  return { laneId: lane.id, clipId: clip?.id || null };
+}
+
+function recordingLaneClips(lane) {
+  if (!lane) return [];
+  const clips = Array.isArray(lane.clips) && lane.clips.length
+    ? lane.clips
+    : [{
+        id: recordingClipId(lane.id),
+        startTime: Number(lane.startTime) || 0,
+        duration: Number(lane.duration) || lane.buffer?.duration || 0,
+        offset: 0,
+      }];
+  return clips
+    .map((clip, index) => ({
+      id: clip.id || recordingClipId(lane.id, index + 1),
+      startTime: Math.max(0, Number(clip.startTime) || 0),
+      duration: Math.max(0, Number(clip.duration) || 0),
+      offset: Math.max(0, Number(clip.offset) || 0),
+    }))
+    .filter((clip) => clip.duration > 0);
+}
+
+function syncRecordingLaneBounds(lane) {
+  const clips = recordingLaneClips(lane);
+  if (!clips.length) {
+    lane.startTime = 0;
+    lane.duration = 0;
+    lane.clips = [];
+    return lane;
+  }
+  const startTime = Math.min(...clips.map((clip) => clip.startTime));
+  const endTime = Math.max(...clips.map((clip) => clip.startTime + clip.duration));
+  lane.startTime = startTime;
+  lane.duration = Math.max(0, endTime - startTime);
+  lane.volume = normalizeRecordingLaneVolume(lane.volume);
+  lane.clips = clips;
+  return lane;
+}
+
+function recordingLaneEnd(lane) {
+  const clips = recordingLaneClips(lane);
+  return clips.reduce((max, clip) => Math.max(max, clip.startTime + clip.duration), 0);
+}
+
+function selectedRecordingClip() {
+  const lane = selectedRecordingLane();
+  if (!lane) return null;
+  const clips = recordingLaneClips(lane);
+  return clips.find((clip) => clip.id === selectedRecordingClipId) || clips[0] || null;
+}
+
+function recordingClipAtTime(lane, time, { includeEdges = true } = {}) {
+  const epsilon = 0.0005;
+  return recordingLaneClips(lane).find((clip) => {
+    const start = clip.startTime;
+    const end = clip.startTime + clip.duration;
+    return includeEdges
+      ? time >= start - epsilon && time <= end + epsilon
+      : time > start + epsilon && time < end - epsilon;
+  }) || null;
+}
+
+function selectedRecordingSnipTarget() {
+  const lane = selectedRecordingLane();
+  if (!lane) return null;
+  const playheadTime = currentRecordingPlayheadTime();
+  const selectedClip = selectedRecordingClip();
+  if (selectedClip) {
+    const start = selectedClip.startTime;
+    const end = selectedClip.startTime + selectedClip.duration;
+    if (playheadTime > start + 0.0005 && playheadTime < end - 0.0005) return selectedClip;
+  }
+  return recordingClipAtTime(lane, playheadTime, { includeEdges: false });
+}
+
+function recordingClipWaveform(lane, clip) {
+  const waveform = lane.waveform || [];
+  const sourceDuration = Math.max(lane.buffer?.duration || 0, ...recordingLaneClips(lane).map((item) => item.offset + item.duration));
+  if (!waveform.length || !clip || sourceDuration <= 0) return waveform;
+  const start = clamp(clip.offset / sourceDuration, 0, 1);
+  const end = clamp((clip.offset + clip.duration) / sourceDuration, start, 1);
+  const first = Math.floor(start * waveform.length);
+  const last = Math.max(first + 1, Math.ceil(end * waveform.length));
+  return waveform.slice(first, last);
 }
 
 function selectedRecordingLane() {
@@ -2822,8 +3132,8 @@ function recordingLaneWaveform(buffer) {
   return points;
 }
 
-function recordingWaveformSvg(lane) {
-  const waveform = lane.waveform || [];
+function recordingWaveformSvg(source) {
+  const waveform = Array.isArray(source) ? source : source?.waveform || [];
   if (!waveform.length) return "";
   const width = 100;
   const height = 28;
@@ -2862,6 +3172,8 @@ function renderRecordingTimelinePanel() {
   const duration = recordingSequenceDuration();
   recordingRenderedDuration = duration;
   const selectedLane = selectedRecordingLane();
+  const selectedClip = selectedRecordingClip();
+  const canSnipSelectedRecording = Boolean(selectedRecordingSnipTarget());
   const rulerTicks = recordingRulerTicks(duration);
   const status = recordingCountdownActive
     ? `Recording in ${Math.max(1, RECORDING_COUNTDOWN_BEATS - recordingCountdownBeat + 1)}`
@@ -2884,14 +3196,23 @@ function renderRecordingTimelinePanel() {
         </div>
         <div class="recording-lanes">
           ${recordingLanes.length ? recordingLanes.map((lane, index) => {
-            const left = lane.startTime / duration * 100;
-            const width = Math.max(1.5, lane.duration / duration * 100);
+            syncRecordingLaneBounds(lane);
+            const clips = recordingLaneClips(lane);
             return `
               <button class="recording-lane ${lane.id === selectedRecordingLaneId ? "is-selected" : ""}" type="button" data-recording-lane-id="${escapeHtml(lane.id)}">
                 <span class="recording-lane-label">${escapeHtml(lane.name || `Lane ${index + 1}`)}</span>
-                <span class="recording-lane-clip" style="left: ${left}%; width: ${width}%">
-                  ${recordingWaveformSvg(lane)}
-                  <span>${formatTimelineTime(lane.duration)}</span>
+                <span class="recording-lane-clip-area">
+                  ${clips.map((clip) => {
+                    const left = clip.startTime / duration * 100;
+                    const width = Math.max(1.5, clip.duration / duration * 100);
+                    const isSelectedClip = lane.id === selectedRecordingLaneId && clip.id === selectedClip?.id;
+                    return `
+                      <span class="recording-lane-clip ${isSelectedClip ? "is-selected" : ""}" data-recording-clip-id="${escapeHtml(clip.id)}" style="left: ${left}%; width: ${width}%">
+                        ${recordingWaveformSvg(recordingClipWaveform(lane, clip))}
+                        <span class="recording-clip-duration">${formatTimelineTime(clip.duration)}</span>
+                      </span>
+                    `;
+                  }).join("")}
                 </span>
               </button>
             `;
@@ -2903,8 +3224,10 @@ function renderRecordingTimelinePanel() {
           ${recordingIsActive() ? recordingSessions.map((session) => `
             <div class="recording-lane is-recording">
               <span class="recording-lane-label">${escapeHtml(previewRecordingLaneName(session))}</span>
-              <span class="recording-lane-clip is-live" data-recording-live-clip style="left: ${(recordingLaneStartedAt / duration * 100).toFixed(3)}%; width: ${Math.max(1.5, ((currentRecordingPlayheadTime() - recordingLaneStartedAt) / duration * 100)).toFixed(3)}%">
-                <span>Live</span>
+              <span class="recording-lane-clip-area">
+                <span class="recording-lane-clip is-live" data-recording-live-clip style="left: ${(recordingLaneStartedAt / duration * 100).toFixed(3)}%; width: ${Math.max(1.5, ((currentRecordingPlayheadTime() - recordingLaneStartedAt) / duration * 100)).toFixed(3)}%">
+                  <span class="recording-clip-duration">Live</span>
+                </span>
               </span>
             </div>
           `).join("") : ""}
@@ -2916,7 +3239,27 @@ function renderRecordingTimelinePanel() {
             <label for="recordingLaneName">Lane name</label>
             <input id="recordingLaneName" type="text" value="${escapeHtml(selectedLane.name || "")}" autocomplete="off">
           </div>
-          <button class="text-button danger" id="deleteRecordingLaneButton" type="button">Delete</button>
+          <div class="field recording-lane-volume-field">
+            <label for="recordingLaneVolume">Volume</label>
+            <input id="recordingLaneVolume" type="range" min="0" max="2" step="0.01" value="${normalizeRecordingLaneVolume(selectedLane.volume)}">
+          </div>
+          <div class="recording-lane-actions">
+            <button class="icon-button" id="snipRecordingClipButton" type="button" aria-label="Snip at playhead" title="Snip at playhead" ${canSnipSelectedRecording ? "" : "disabled"}>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="6" cy="7" r="2.5" fill="none"></circle>
+                <circle cx="6" cy="17" r="2.5" fill="none"></circle>
+                <path d="M8.1 8.6 19 19M8.1 15.4 19 5" fill="none"></path>
+              </svg>
+            </button>
+            <button class="icon-button danger" id="deleteRecordingLaneButton" type="button" aria-label="${selectedClip ? "Delete selected section" : "Delete lane"}" title="${selectedClip ? "Delete selected section" : "Delete lane"}">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h16" fill="none"></path>
+                <path d="M10 11v6M14 11v6" fill="none"></path>
+                <path d="M6 7l1 14h10l1-14" fill="none"></path>
+                <path d="M9 7V4h6v3" fill="none"></path>
+              </svg>
+            </button>
+          </div>
         ` : `
           ${status ? `<div class="recording-status" aria-live="polite">${escapeHtml(status)}</div>` : ""}
           <div class="field recording-tempo-field">
@@ -3001,33 +3344,70 @@ function stopRecordingLanePlayback() {
     }
     try {
       source.disconnect();
+      source._recordingGain?.disconnect();
     } catch {
       // Already disconnected.
     }
   }
 }
 
-function startRecordingLanePlayback(startTime = 0) {
+async function hydrateRecordingLaneBuffer(lane) {
+  if (lane.buffer || !lane.path) return lane.buffer || null;
+  await ensureAudio();
+  const response = await fetch(lane.path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Could not load recording lane (${response.status}).`);
+  const buffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+  lane.buffer = buffer;
+  lane.duration = Math.max(Number(lane.duration) || 0, buffer.duration);
+  if (!lane.waveform?.length) lane.waveform = recordingLaneWaveform(buffer);
+  syncRecordingLaneBounds(lane);
+  savePatch();
+  return buffer;
+}
+
+async function hydrateRecordingLaneBuffers(lanes = recordingLanes) {
+  await Promise.all(lanes.map((lane) => hydrateRecordingLaneBuffer(lane)));
+}
+
+function startRecordingClipSource(lane, clip, startTime, now, destination) {
+  if (!audioContext || !lane.buffer) return;
+  const clipEnd = clip.startTime + clip.duration;
+  if (startTime >= clipEnd) return;
+  const visibleOffset = Math.max(0, startTime - clip.startTime);
+  const sourceOffset = clip.offset + visibleOffset;
+  const playDuration = Math.min(Math.max(0, clip.duration - visibleOffset), Math.max(0, lane.buffer.duration - sourceOffset));
+  if (playDuration <= 0 || sourceOffset >= lane.buffer.duration) return;
+  const source = audioContext.createBufferSource();
+  const gain = audioContext.createGain();
+  source.buffer = lane.buffer;
+  gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+  source.connect(gain).connect(destination);
+  source._recordingGain = gain;
+  source._recordingLaneId = lane.id;
+  source.addEventListener("ended", () => {
+    const index = recordingPlaybackSources.indexOf(source);
+    if (index >= 0) recordingPlaybackSources.splice(index, 1);
+    try {
+      source.disconnect();
+      gain.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }, { once: true });
+  recordingPlaybackSources.push(source);
+  source.start(now + Math.max(0, clip.startTime - startTime), sourceOffset, playDuration);
+}
+
+async function startRecordingLanePlayback(startTime = 0) {
   stopRecordingLanePlayback();
   if (!audioContext || !recordingLanes.length) return;
+  await hydrateRecordingLaneBuffers();
   const now = audioContext.currentTime;
+  const destination = recordingPlaybackGainNode || audioContext.destination;
   for (const lane of recordingLanes) {
-    const offset = Math.max(0, startTime - lane.startTime);
-    if (offset >= lane.duration) continue;
-    const source = audioContext.createBufferSource();
-    source.buffer = lane.buffer;
-    source.connect(recordingPlaybackGainNode || audioContext.destination);
-    source.addEventListener("ended", () => {
-      const index = recordingPlaybackSources.indexOf(source);
-      if (index >= 0) recordingPlaybackSources.splice(index, 1);
-      try {
-        source.disconnect();
-      } catch {
-        // Already disconnected.
-      }
-    }, { once: true });
-    recordingPlaybackSources.push(source);
-    source.start(now + Math.max(0, lane.startTime - startTime), offset);
+    for (const clip of recordingLaneClips(lane)) {
+      startRecordingClipSource(lane, clip, startTime, now, destination);
+    }
   }
 }
 
@@ -3038,8 +3418,9 @@ function stopRecordingTransport({ resetPlayhead = false, render = true } = {}) {
   if (render && activeBottomPanels.timeline) renderRecordingTimelinePanel();
 }
 
-function startRecordingTransport() {
+async function startRecordingTransport() {
   if (!audioContext || !recordingLanes.length || recordingIsActive()) return;
+  await hydrateRecordingLaneBuffers();
   stopRecordingLanePlayback();
   const duration = recordingSequenceDuration();
   const startTime = recordingPlayheadTime >= duration ? 0 : recordingPlayheadTime;
@@ -3047,23 +3428,11 @@ function startRecordingTransport() {
   recordingTransportStartTime = startTime;
   recordingTransportStartedAt = audioContext.currentTime;
   const now = audioContext.currentTime;
+  const destination = recordingPlaybackGainNode || audioContext.destination;
   for (const lane of recordingLanes) {
-    const offset = Math.max(0, startTime - lane.startTime);
-    if (offset >= lane.duration) continue;
-    const source = audioContext.createBufferSource();
-    source.buffer = lane.buffer;
-    source.connect(recordingPlaybackGainNode || audioContext.destination);
-    source.addEventListener("ended", () => {
-      const index = recordingPlaybackSources.indexOf(source);
-      if (index >= 0) recordingPlaybackSources.splice(index, 1);
-      try {
-        source.disconnect();
-      } catch {
-        // Already disconnected.
-      }
-    }, { once: true });
-    recordingPlaybackSources.push(source);
-    source.start(now + Math.max(0, lane.startTime - startTime), offset);
+    for (const clip of recordingLaneClips(lane)) {
+      startRecordingClipSource(lane, clip, startTime, now, destination);
+    }
   }
   renderRecordingTimelinePanel();
   scheduleRecordingTimelineFrame();
@@ -3074,7 +3443,7 @@ function toggleRecordingTransport() {
     stopRecordingTransport();
   } else {
     ensureAudio()
-      .then(startRecordingTransport)
+      .then(() => startRecordingTransport())
       .catch((error) => alert(`Could not play recording: ${error.message}`));
   }
 }
@@ -3083,8 +3452,9 @@ function playRecordingScrubPreview(time, playbackRate = 1) {
   if (!audioContext || !recordingScrubGainNode) return;
   const now = audioContext.currentTime;
   if (now - recordingScrubPreviewLastAt < 0.045) return;
-  const lane = recordingLanes.find((item) => time >= item.startTime && time < item.startTime + item.duration);
-  if (!lane) return;
+  const lane = recordingLanes.find((item) => recordingClipAtTime(item, time));
+  const clip = recordingClipAtTime(lane, time);
+  if (!lane?.buffer || !clip) return;
   if (recordingScrubSource) {
     try {
       recordingScrubSource.gain.gain.cancelScheduledValues(now);
@@ -3094,13 +3464,13 @@ function playRecordingScrubPreview(time, playbackRate = 1) {
       // Source may already have ended.
     }
   }
-  const offset = clamp(time - lane.startTime, 0, Math.max(0, lane.duration - 0.02));
+  const offset = clamp(clip.offset + time - clip.startTime, 0, Math.max(0, lane.buffer.duration - 0.02));
   const source = audioContext.createBufferSource();
   const gain = audioContext.createGain();
   source.buffer = lane.buffer;
   source.playbackRate.value = clamp(Math.abs(playbackRate) || 0.15, 0.08, 4);
   gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(1, now + 0.012);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, normalizeRecordingLaneVolume(lane.volume)), now + 0.012);
   gain.gain.setTargetAtTime(0.0001, now + 0.055, 0.02);
   source.connect(gain).connect(recordingScrubGainNode);
   recordingScrubSource = { source, gain };
@@ -3139,11 +3509,23 @@ function stopRecordingScrubPreview() {
 function recordingTimeFromPointer(event, drag = recordingScrubState) {
   if (!drag) return 0;
   const duration = recordingSequenceDuration();
+  const directScrubTop = drag.rect.top - RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX;
+  const directScrubBottom = drag.rect.bottom + RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX;
+  const directlyOverTimeline = event.clientX >= drag.rect.left
+    && event.clientX <= drag.rect.right
+    && event.clientY >= directScrubTop
+    && event.clientY <= directScrubBottom;
+  if (directlyOverTimeline) {
+    return clamp((event.clientX - drag.rect.left) / Math.max(1, drag.rect.width) * duration, 0, duration);
+  }
+
   const horizontalDelta = event.clientX - drag.lastX;
   if (Math.abs(horizontalDelta) < 1) return drag.lastTime;
   const secondsPerPixel = duration / Math.max(1, drag.rect.width);
   const axisDelta = horizontalDelta * secondsPerPixel;
-  const perpendicular = Math.max(0, Math.abs(event.clientY - drag.startY) - VALUE_SLIDER_PRECISION_THRESHOLD_PX);
+  const perpendicular = directlyOverTimeline
+    ? 0
+    : Math.min(Math.abs(event.clientY - directScrubTop), Math.abs(event.clientY - directScrubBottom));
   const precision = 1 / (1 + Math.pow(perpendicular / VALUE_SLIDER_PRECISION_DISTANCE_PX, VALUE_SLIDER_PRECISION_POWER));
   return clamp(drag.lastTime + axisDelta * precision, 0, duration);
 }
@@ -3200,8 +3582,7 @@ function onRecordingRulerPointerEnd(event) {
 
 function attachRecordingTimelineEvents() {
   const ruler = recordingTimelinePanel.querySelector("[data-recording-timeline-scale]");
-  const trackArea = recordingTimelinePanel.querySelector(".recording-track-area");
-  const scrubSurface = trackArea || ruler;
+  const scrubSurface = ruler;
   scrubSurface?.addEventListener("pointerdown", onRecordingRulerPointerDown);
   scrubSurface?.addEventListener("pointermove", onRecordingRulerPointerMove);
   scrubSurface?.addEventListener("pointerup", onRecordingRulerPointerEnd);
@@ -3210,23 +3591,22 @@ function attachRecordingTimelineEvents() {
   recordingTimelinePanel.querySelector(".recording-lanes")?.addEventListener("click", (event) => {
     if (event.target.closest?.("[data-recording-lane-id]")) return;
     selectedRecordingLaneId = null;
+    selectedRecordingClipId = null;
     renderRecordingTimelinePanel();
+    savePatch();
   });
-  recordingTimelinePanel.querySelector(".recording-track-area")?.addEventListener("click", (event) => {
-    if (event.target.closest?.("[data-recording-lane-id]")) return;
-    if (recordingScrubState?.moved) return;
-    selectedRecordingLaneId = null;
-    renderRecordingTimelinePanel();
-  });
-
   for (const laneButton of recordingTimelinePanel.querySelectorAll("[data-recording-lane-id]")) {
     laneButton.addEventListener("click", (event) => {
       if (recordingScrubState?.moved) return;
       event.stopPropagation();
-      selectedRecordingLaneId = selectedRecordingLaneId === laneButton.dataset.recordingLaneId
-        ? null
-        : laneButton.dataset.recordingLaneId;
+      const clipId = event.target.closest?.("[data-recording-clip-id]")?.dataset.recordingClipId || null;
+      const laneId = laneButton.dataset.recordingLaneId;
+      const toggledOff = selectedRecordingLaneId === laneId
+        && (!clipId || selectedRecordingClipId === clipId);
+      selectedRecordingLaneId = toggledOff ? null : laneId;
+      selectedRecordingClipId = toggledOff ? null : clipId || recordingLaneClips(selectedRecordingLane())?.[0]?.id || null;
       renderRecordingTimelinePanel();
+      savePatch();
     });
   }
 
@@ -3237,7 +3617,26 @@ function attachRecordingTimelineEvents() {
     lane.name = event.target.value;
     const laneButton = recordingTimelinePanel.querySelector(`[data-recording-lane-id="${CSS.escape(lane.id)}"] .recording-lane-label`);
     if (laneButton) laneButton.textContent = lane.name || "Lane";
+    savePatch();
   });
+  recordingTimelinePanel.querySelector("#recordingLaneVolume")?.addEventListener("input", (event) => {
+    const lane = selectedRecordingLane();
+    if (!lane) return;
+    lane.volume = normalizeRecordingLaneVolume(event.target.value);
+    const now = audioContext?.currentTime || 0;
+    for (const source of recordingPlaybackSources) {
+      if (source._recordingLaneId === lane.id && source._recordingGain) {
+        source._recordingGain.gain.setTargetAtTime(lane.volume, now, 0.01);
+      }
+    }
+  });
+  recordingTimelinePanel.querySelector("#recordingLaneVolume")?.addEventListener("change", () => {
+    savePatch();
+    persistSessionToServer().catch((error) => {
+      console.warn("Could not update session metadata after changing lane volume", error);
+    });
+  });
+  recordingTimelinePanel.querySelector("#snipRecordingClipButton")?.addEventListener("click", snipSelectedRecordingClip);
   recordingTimelinePanel.querySelector("#deleteRecordingLaneButton")?.addEventListener("click", deleteSelectedRecordingLane);
 
   if (!selectedRecordingLane()) {
@@ -3261,14 +3660,67 @@ function attachRecordingTimelineEvents() {
   }
 }
 
+function snipSelectedRecordingClip() {
+  const lane = selectedRecordingLane();
+  const clip = selectedRecordingSnipTarget();
+  if (!lane || !clip) return false;
+  const playheadTime = currentRecordingPlayheadTime();
+  const clips = recordingLaneClips(lane);
+  const index = clips.findIndex((item) => item.id === clip.id);
+  if (index < 0) return false;
+  const leftDuration = playheadTime - clip.startTime;
+  const rightDuration = clip.startTime + clip.duration - playheadTime;
+  if (leftDuration <= 0.0005 || rightDuration <= 0.0005) return false;
+  clips.splice(
+    index,
+    1,
+    { ...clip, duration: leftDuration },
+    {
+      ...clip,
+      id: recordingClipId(lane.id, Date.now()),
+      startTime: playheadTime,
+      duration: rightDuration,
+      offset: clip.offset + leftDuration,
+    },
+  );
+  lane.clips = clips;
+  syncRecordingLaneBounds(lane);
+  selectedRecordingClipId = clips[index + 1]?.id || clips[index]?.id || null;
+  stopRecordingTransport({ render: false });
+  renderRecordingTimelinePanel();
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after snipping recording", error);
+  });
+  return true;
+}
+
 function deleteSelectedRecordingLane() {
   const lane = selectedRecordingLane();
   if (!lane) return false;
+  const selectedClip = selectedRecordingClip();
+  if (selectedClip && recordingLaneClips(lane).length > 1) {
+    lane.clips = recordingLaneClips(lane).filter((clip) => clip.id !== selectedClip.id);
+    syncRecordingLaneBounds(lane);
+    selectedRecordingClipId = recordingLaneClips(lane)[0]?.id || null;
+    setRecordingPlayheadTime(Math.min(recordingPlayheadTime, recordingSequenceDuration()));
+    renderRecordingTimelinePanel();
+    savePatch();
+    persistSessionToServer().catch((error) => {
+      console.warn("Could not update session metadata after deleting recording section", error);
+    });
+    return true;
+  }
   const index = recordingLanes.findIndex((item) => item.id === lane.id);
   if (index >= 0) recordingLanes.splice(index, 1);
   selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
   setRecordingPlayheadTime(Math.min(recordingPlayheadTime, recordingSequenceDuration()));
   renderRecordingTimelinePanel();
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after deleting recording lane", error);
+  });
   return true;
 }
 
@@ -3352,6 +3804,24 @@ async function saveRecordingToServer(wavBlob, startedAt = recordingStartedAt || 
   return result;
 }
 
+async function saveSessionRecordingToServer(wavBlob, fileName) {
+  const sessionId = state.sessionId || currentSessionFolderName();
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/recordings`, {
+    method: "POST",
+    headers: {
+      "content-type": "audio/wav",
+      "x-session-name": state.sessionName || defaultSessionName(),
+      "x-recording-file-name": fileName,
+    },
+    body: wavBlob,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Session recording save failed (${response.status}).`);
+  }
+  return result;
+}
+
 function activeRecordingPatchSlots() {
   syncActivePatchSlot();
   return patchSlots.filter((slot) => slot.active !== false && synthSlots.has(slot.id));
@@ -3376,16 +3846,32 @@ async function exportRecordingSession(session) {
   const arrayBuffer = await sourceBlob.arrayBuffer();
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
   const name = nextRecordingLaneName(session);
+  const fileName = recordingExportFileName(name, "lane");
+  const saved = await saveSessionRecordingToServer(audioBufferToWav(decoded), fileName);
+  const laneId = `recording-lane-${recordingLaneCounter++}`;
   recordingLanes.push({
-    id: `recording-lane-${recordingLaneCounter++}`,
+    id: laneId,
     name,
     patchSlotId: session.slotId,
     patchName: session.patchName,
     startTime: recordingLaneStartedAt,
     duration: decoded.duration,
+    volume: 1,
     buffer: decoded,
     waveform: recordingLaneWaveform(decoded),
     createdAt: recordingStartedAt || new Date(),
+    path: saved.path || "",
+    fileName: saved.fileName || fileName,
+    clips: [{
+      id: recordingClipId(laneId),
+      startTime: recordingLaneStartedAt,
+      duration: decoded.duration,
+      offset: 0,
+    }],
+  });
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after recording", error);
   });
   if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
 }
@@ -3393,18 +3879,27 @@ async function exportRecordingSession(session) {
 async function exportRecordingSequence() {
   if (!recordingLanes.length) return;
   await ensureAudio();
+  await hydrateRecordingLaneBuffers();
   const sampleRate = audioContext.sampleRate;
-  const duration = Math.max(...recordingLanes.map((lane) => lane.startTime + lane.duration));
-  const channelCount = Math.max(2, ...recordingLanes.map((lane) => lane.buffer.numberOfChannels));
+  const duration = Math.max(...recordingLanes.map(recordingLaneEnd));
+  const channelCount = Math.max(2, ...recordingLanes.map((lane) => lane.buffer?.numberOfChannels || 1));
   const exportStartedAt = new Date();
   const exportId = recordingExportTimestamp(exportStartedAt);
   const stemFileNames = uniqueRecordingExportFileNames(recordingLanes);
   const offline = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
   for (const lane of recordingLanes) {
-    const source = offline.createBufferSource();
-    source.buffer = lane.buffer;
-    source.connect(offline.destination);
-    source.start(lane.startTime);
+    if (!lane.buffer) continue;
+    const gain = offline.createGain();
+    gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+    gain.connect(offline.destination);
+    for (const clip of recordingLaneClips(lane)) {
+      const playDuration = Math.min(clip.duration, Math.max(0, lane.buffer.duration - clip.offset));
+      if (playDuration <= 0) continue;
+      const source = offline.createBufferSource();
+      source.buffer = lane.buffer;
+      source.connect(gain);
+      source.start(clip.startTime, clip.offset, playDuration);
+    }
   }
   const mixed = await offline.startRendering();
   const mixResult = await saveRecordingToServer(audioBufferToWav(mixed), exportStartedAt, { exportId, fileName: "mix.wav" });
@@ -3414,10 +3909,19 @@ async function exportRecordingSequence() {
   for (let index = 0; index < recordingLanes.length; index += 1) {
     const lane = recordingLanes[index];
     const stem = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
-    const source = stem.createBufferSource();
-    source.buffer = lane.buffer;
-    source.connect(stem.destination);
-    source.start(lane.startTime);
+    if (lane.buffer) {
+      const gain = stem.createGain();
+      gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+      gain.connect(stem.destination);
+      for (const clip of recordingLaneClips(lane)) {
+        const playDuration = Math.min(clip.duration, Math.max(0, lane.buffer.duration - clip.offset));
+        if (playDuration <= 0) continue;
+        const source = stem.createBufferSource();
+        source.buffer = lane.buffer;
+        source.connect(gain);
+        source.start(clip.startTime, clip.offset, playDuration);
+      }
+    }
     const renderedStem = await stem.startRendering();
     await saveRecordingToServer(audioBufferToWav(renderedStem), exportStartedAt, {
       exportId,
@@ -3514,7 +4018,9 @@ async function startRecording() {
   recordingTimelineStartedAt = audioContext.currentTime;
   setRecordingButtonState(true);
   setRecordingPlayheadTime(recordingLaneStartedAt);
-  startRecordingLanePlayback(recordingLaneStartedAt);
+  startRecordingLanePlayback(recordingLaneStartedAt).catch((error) => {
+    console.warn("Could not play existing recording lanes while recording", error);
+  });
   startRecordingMetronome();
   if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
   scheduleRecordingTimelineFrame();
@@ -3797,6 +4303,7 @@ function toggleKeyboardWideLayout() {
   keyboardWideLayout = !keyboardWideLayout;
   renderBottomPanel();
   onStageResize();
+  savePatch();
 }
 
 function toggleBottomPanel(panelName) {
@@ -3804,6 +4311,7 @@ function toggleBottomPanel(panelName) {
   activeBottomPanels[panelName] = !activeBottomPanels[panelName];
   renderBottomPanel();
   onStageResize();
+  savePatch();
 }
 
 function onMidiKeyPointerDown(event) {
@@ -4223,9 +4731,9 @@ function renderPanel() {
     panel.innerHTML = `
       <div class="panel-heading">
         <div>
-          <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
-          <p class="panel-subtitle">Oscillator</p>
+          <h1>Operator</h1>
         </div>
+        ${nodeOutputMeter(node.id)}
       </div>
       <div class="field">
         <label for="nodeName">Name</label>
@@ -4270,6 +4778,14 @@ function renderPanel() {
           </div>
         </div>
         <div class="field">
+          ${parameterLabel("sampleMode", "Sample mode", "node", node.id, "sample.mode")}
+          <select id="sampleMode">
+            <option value="one-shot" ${sample.mode === "one-shot" ? "selected" : ""}>One-shot</option>
+            <option value="loop" ${sample.mode === "loop" ? "selected" : ""}>Loop</option>
+            <option value="ping-pong" ${sample.mode === "ping-pong" ? "selected" : ""}>Ping-pong</option>
+          </select>
+        </div>
+        <div class="field">
           ${parameterLabel("sampleStretch", "Stretch", "node", node.id, "sample.stretch")}
           <div class="field-row">
             <input id="sampleStretchRange" type="range" min="0.1" max="10" step="0.001" value="${sample.stretch}">
@@ -4291,14 +4807,6 @@ function renderPanel() {
               <input id="sampleOverlapRatio" type="number" min="0" max="1" step="0.001" value="${sample.overlapRatio}">
             </div>
           </div>
-        </div>
-        <div class="field">
-          ${parameterLabel("sampleMode", "Sample mode", "node", node.id, "sample.mode")}
-          <select id="sampleMode">
-            <option value="one-shot" ${sample.mode === "one-shot" ? "selected" : ""}>One-shot</option>
-            <option value="loop" ${sample.mode === "loop" ? "selected" : ""}>Loop</option>
-            <option value="ping-pong" ${sample.mode === "ping-pong" ? "selected" : ""}>Ping-pong</option>
-          </select>
         </div>
         <div class="field">
           ${parameterLabel("sampleOriginalPitch", "Original pitch", "node", node.id, "sample.originalPitch")}
@@ -4363,7 +4871,6 @@ function renderPanel() {
     attachPanelRemoveAction();
     panel.querySelector("#nodeName").addEventListener("input", (event) => {
       node.name = event.target.value;
-      panel.querySelector("#nodeHeading").textContent = nodeName(node);
       renderNodes();
       savePatch();
     });
@@ -4881,6 +5388,11 @@ function renderPanel() {
     return;
   }
 
+  if (selection.type === "patch") {
+    renderPatchSettingsPanel();
+    return;
+  }
+
   renderEmptyPanel();
 }
 
@@ -4916,6 +5428,347 @@ function renderMasterEffectsPanel() {
   attachParameterMidiButtons();
 }
 
+function recordingLaneReference(lane) {
+  syncRecordingLaneBounds(lane);
+  return {
+    id: lane.id,
+    name: lane.name,
+    patchSlotId: lane.patchSlotId,
+    patchName: lane.patchName,
+    startTime: lane.startTime,
+    duration: lane.duration,
+    volume: normalizeRecordingLaneVolume(lane.volume),
+    clips: recordingLaneClips(lane).map((clip) => ({
+      id: clip.id,
+      startTime: clip.startTime,
+      duration: clip.duration,
+      offset: clip.offset,
+    })),
+    createdAt: lane.createdAt instanceof Date ? lane.createdAt.toISOString() : lane.createdAt,
+    path: lane.path || "",
+    fileName: lane.fileName || "",
+    waveform: lane.waveform || "",
+  };
+}
+
+function currentSessionData() {
+  syncActivePatchSlot();
+  return {
+    ...currentPatchSessionData(),
+    recordings: recordingLanes.map(recordingLaneReference),
+  };
+}
+
+async function savePatchSnapshotForSession(slot) {
+  const patch = patchForSessionStorage(slot.id === activePatchSlotId ? currentPatchData() : slot.patch);
+  const response = await fetch("/api/patches", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      patchName: patch.patchName,
+      content: patchFileText(patch),
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Patch save failed (${response.status}).`);
+  }
+  return {
+    patchName: result.patchName || safePatchFolderName(patch.patchName),
+    timestamp: result.timestamp || null,
+  };
+}
+
+async function currentSessionDataWithPatchRefs() {
+  const session = currentSessionData();
+  const patchSlotsWithRefs = [];
+  for (const slot of patchSlots) {
+    const patchRef = await savePatchSnapshotForSession(slot);
+    slot.patchRef = patchRef;
+    patchSlotsWithRefs.push({
+      id: slot.id,
+      active: slot.active !== false,
+      patchRef,
+    });
+  }
+  session.patchSlots = patchSlotsWithRefs;
+  return session;
+}
+
+async function saveSessionToServer() {
+  const button = panel.querySelector("#saveSessionButton");
+  await refreshSavedSessionSummaries().catch(() => {
+    // The POST still enforces uniqueness if the preflight check cannot refresh.
+  });
+  if (sessionNameConflict()) {
+    syncSessionNameValidation();
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Saving";
+  }
+
+  try {
+    const result = await persistSessionToServer();
+    if (result.sessionId) state.sessionId = result.sessionId;
+    if (button) button.textContent = "Saved";
+    window.setTimeout(() => {
+      const currentButton = panel.querySelector("#saveSessionButton");
+      if (currentButton) currentButton.textContent = "Save";
+    }, 900);
+  } catch (error) {
+    alert(`Could not save session: ${error.message}`);
+    if (button) button.textContent = "Save";
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function persistSessionToServer() {
+  const session = await currentSessionDataWithPatchRefs();
+  const response = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(session),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Session save failed (${response.status}).`);
+  }
+  if (result.sessionId) state.sessionId = result.sessionId;
+  persistPatchSession();
+  return result;
+}
+
+async function fetchSavedSessions() {
+  const response = await fetch("/api/sessions", { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not list sessions (${response.status}).`);
+  }
+  return Array.isArray(result.sessions) ? result.sessions : [];
+}
+
+function currentSessionFolderName() {
+  return safeSessionFolderName(state.sessionName);
+}
+
+function sessionNameConflict() {
+  const nextName = currentSessionFolderName();
+  return savedSessionSummaries.some((session) => (
+    session.id === nextName && session.id !== state.sessionId
+  ));
+}
+
+function syncSessionNameValidation() {
+  const input = panel.querySelector("#sessionName");
+  const button = panel.querySelector("#saveSessionButton");
+  const error = panel.querySelector("#sessionNameError");
+  const conflict = sessionNameConflict();
+  input?.classList.toggle("is-invalid", conflict);
+  if (button) button.disabled = conflict;
+  if (error) {
+    error.hidden = !conflict;
+    error.textContent = conflict ? "A session with this name already exists." : "";
+  }
+}
+
+async function refreshSavedSessionSummaries() {
+  const sessions = await fetchSavedSessions();
+  savedSessionSummaries = sessions;
+  syncSessionNameValidation();
+  return sessions;
+}
+
+async function fetchSavedSessionData(sessionId) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not load session (${response.status}).`);
+  }
+  return result.session || result;
+}
+
+async function openSessionLibrary() {
+  sessionLibrary = { sessions: [], selectedSessionId: null, loading: true, error: "" };
+  renderSessionLibraryModal();
+  try {
+    const sessions = await refreshSavedSessionSummaries();
+    if (!sessionLibrary) return;
+    sessionLibrary.sessions = sessions;
+    sessionLibrary.selectedSessionId = sessions.find((session) => session.id === state.sessionId)?.id || sessions[0]?.id || null;
+    sessionLibrary.loading = false;
+  } catch (error) {
+    if (!sessionLibrary) return;
+    sessionLibrary.loading = false;
+    sessionLibrary.error = error.message;
+  }
+  renderSessionLibraryModal();
+}
+
+function closeSessionLibrary() {
+  document.querySelector("#sessionLibraryModal")?.remove();
+  sessionLibrary = null;
+}
+
+function renderSessionLibraryModal() {
+  if (!sessionLibrary) return;
+  let backdrop = document.querySelector("#sessionLibraryModal");
+  if (!backdrop) {
+    backdrop = document.createElement("div");
+    backdrop.id = "sessionLibraryModal";
+    backdrop.className = "modal-backdrop";
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closeSessionLibrary();
+    });
+    document.body.appendChild(backdrop);
+  }
+
+  const rows = sessionLibrary.sessions.length
+    ? sessionLibrary.sessions.map((session) => `
+      <button
+        class="patch-library-row ${session.id === sessionLibrary.selectedSessionId ? "selected" : ""}"
+        type="button"
+        data-session-id="${escapeHtml(session.id)}"
+      >
+        <span>${escapeHtml(session.name || defaultSessionName())}</span>
+        <small>${escapeHtml(formatSavedPatchTimestamp(session.savedAt || ""))}</small>
+      </button>
+    `).join("")
+    : `<p class="patch-library-empty">No server-saved sessions yet.</p>`;
+
+  backdrop.innerHTML = `
+    <div class="modal patch-library-modal" role="dialog" aria-modal="true" aria-labelledby="sessionLibraryTitle">
+      <div class="patch-library-heading">
+        <h2 id="sessionLibraryTitle">Load Session</h2>
+        <button class="icon-button compact" id="closeSessionLibraryButton" type="button" aria-label="Close" title="Close">x</button>
+      </div>
+      ${sessionLibrary.error ? `<p class="modal-error">${escapeHtml(sessionLibrary.error)}</p>` : ""}
+      ${sessionLibrary.loading ? `<p class="patch-library-empty">Loading saved sessions...</p>` : `<div class="patch-library-list">${rows}</div>`}
+      <div class="modal-actions">
+        <button class="text-button" id="cancelSessionLibraryButton" type="button">Cancel</button>
+        <button class="text-button primary" id="confirmLoadSessionButton" type="button" ${sessionLibrary.selectedSessionId ? "" : "disabled"}>Load</button>
+      </div>
+    </div>
+  `;
+
+  backdrop.querySelector("#closeSessionLibraryButton").addEventListener("click", closeSessionLibrary);
+  backdrop.querySelector("#cancelSessionLibraryButton").addEventListener("click", closeSessionLibrary);
+  backdrop.querySelectorAll("[data-session-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      sessionLibrary.selectedSessionId = button.dataset.sessionId;
+      renderSessionLibraryModal();
+    });
+  });
+  backdrop.querySelector("#confirmLoadSessionButton").addEventListener("click", async (event) => {
+    if (!sessionLibrary.selectedSessionId) return;
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = "Loading";
+    try {
+      const session = await fetchSavedSessionData(sessionLibrary.selectedSessionId);
+      await applySessionData(session);
+      closeSessionLibrary();
+    } catch (error) {
+      sessionLibrary.error = error.message;
+      renderSessionLibraryModal();
+    }
+  });
+}
+
+async function applySessionData(session) {
+  const slots = Array.isArray(session?.patchSlots)
+    ? await Promise.all(session.patchSlots.map(async (slot) => {
+        if (slot.patchRef?.patchName && slot.patchRef?.timestamp) {
+          try {
+            const patch = await fetchSavedPatchData(slot.patchRef.patchName, slot.patchRef.timestamp);
+            return normalizePatchSlot({ ...slot, patch });
+          } catch {
+            return normalizePatchSlot(slot);
+          }
+        }
+        return normalizePatchSlot(slot);
+      }))
+    : [normalizePatchSlot(null, normalizeDefaultPatch())];
+  const safeSlots = slots.length ? slots : [normalizePatchSlot(null, normalizeDefaultPatch())];
+  const activeSlotId = safeSlots.some((slot) => slot.id === session.activePatchSlotId)
+    ? session.activePatchSlotId
+    : safeSlots[0].id;
+  const activePatch = clonePatch(safeSlots.find((slot) => slot.id === activeSlotId)?.patch || safeSlots[0].patch);
+  const settings = normalizeSessionSettings(session, activePatch);
+
+  flushPendingPatchSave();
+  for (const slotId of [...synthSlots.keys()]) disconnectSynthSlot(slotId);
+  patchSlots = safeSlots;
+  activePatchSlotId = activeSlotId;
+  state.sessionId = settings.sessionId;
+  state.sessionName = settings.sessionName;
+  state.audioInputDeviceId = settings.audioInputDeviceId;
+  state.audioOutputDeviceId = settings.audioOutputDeviceId;
+  state.linkSignalGradientMeters = settings.linkSignalGradientMeters;
+  state.keyboardStartNote = settings.keyboardStartNote;
+  state.keyboardLength = settings.keyboardLength;
+  audioBackend = settings.audioBackend;
+  recordingLanes.splice(0, recordingLanes.length);
+  recordingLanes.push(...normalizeStoredRecordingLanes(session.recordings));
+  const recordingSelection = normalizeStoredRecordingSelection(
+    recordingLanes,
+    session.selectedRecordingLaneId,
+    session.selectedRecordingClipId,
+  );
+  selectedRecordingLaneId = recordingSelection.laneId;
+  selectedRecordingClipId = recordingSelection.clipId;
+  recordingLaneCounter = nextRecordingLaneCounter(recordingLanes);
+  recordingPatchLaneCounters.clear();
+  synthNode = activeSynthSlot()?.node || null;
+  audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
+  applyPatchData(activePatch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
+  refreshSavedSessionSummaries().catch(() => {});
+}
+
+function newSession() {
+  if (!confirm("Start a new session? Unsaved session changes will be lost.")) return;
+  flushPendingPatchSave();
+  for (const slotId of [...synthSlots.keys()]) disconnectSynthSlot(slotId);
+  const patch = normalizeDefaultPatch();
+  patch.patchName = "Untitled Patch";
+  const slot = normalizePatchSlot(null, patch);
+  patchSlots = [slot];
+  activePatchSlotId = slot.id;
+  state.sessionId = "";
+  state.sessionName = defaultSessionName();
+  recordingLanes.splice(0, recordingLanes.length);
+  selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
+  recordingLaneCounter = 1;
+  recordingPatchLaneCounters.clear();
+  applyPatchData(patch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
+  refreshSavedSessionSummaries().catch(() => {});
+}
+
+function cloneSession() {
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  state.sessionId = "";
+  state.sessionName = `${(state.sessionName || defaultSessionName()).trim() || defaultSessionName()} Copy`;
+  patchSlots = patchSlots.map((slot) => ({
+    ...slot,
+    id: patchSlotUid(),
+    patch: clonePatch(slot.patch),
+  }));
+  activePatchSlotId = patchSlots[0]?.id || activePatchSlotId;
+  recordingLanes.splice(0, recordingLanes.length);
+  selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
+  applyPatchData(patchSlots[0].patch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
+}
+
 async function savePatchToServer() {
   const button = panel.querySelector("#savePatchButton");
   if (button) {
@@ -4941,6 +5794,8 @@ async function savePatchToServer() {
       patchName: result.patchName || safePatchFolderName(patch.patchName),
       timestamp: result.timestamp || null,
     };
+    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+    if (slot) slot.patchRef = activeSavedPatchRef;
     if (button) button.textContent = "Saved";
     window.setTimeout(() => {
       const currentButton = panel.querySelector("#savePatchButton");
@@ -4967,6 +5822,8 @@ async function loadSavedPatch(patchName, timestamp) {
   const patch = await fetchSavedPatchData(patchName, timestamp);
   applyPatchData(patch);
   activeSavedPatchRef = { patchName, timestamp };
+  const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+  if (slot) slot.patchRef = activeSavedPatchRef;
 }
 
 function safePatchFolderName(name) {
@@ -5159,11 +6016,11 @@ function renderPatchLibraryModal() {
     try {
       if (patchLibrary.mode === "new-slot") {
         const patch = await fetchSavedPatchData(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
-        addPatchSlot(patch);
         activeSavedPatchRef = {
           patchName: patchLibrary.selectedPatchName,
           timestamp: patchLibrary.selectedTimestamp,
         };
+        addPatchSlot(patch, activeSavedPatchRef);
       } else {
         await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
       }
@@ -5200,10 +6057,32 @@ function nextUntitledPatchName() {
   return `${base} ${patchSlots.length + 1}`;
 }
 
-function addPatchSlot(patch) {
+function uniquePatchCopyName(name) {
+  const base = `${(name || "Untitled Patch").trim() || "Untitled Patch"} Copy`;
+  const names = new Set(patchSlots.map((slot) => slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName));
+  if (!names.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!names.has(candidate)) return candidate;
+  }
+  return `${base} ${patchSlots.length + 1}`;
+}
+
+function cloneActivePatchSlot() {
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  const source = patchSlots.find((slot) => slot.id === activePatchSlotId);
+  if (!source) return;
+  const patch = clonePatch(source.patch);
+  patch.patchName = uniquePatchCopyName(patch.patchName);
+  addPatchSlot(patch);
+}
+
+function addPatchSlot(patch, patchRef = null) {
   flushPendingPatchSave();
   syncActivePatchSlot();
   const slot = normalizePatchSlot(null, patch);
+  slot.patchRef = patchRef;
   patchSlots.push(slot);
   resetPatchHistory(slot.id, slot.patch);
   switchPatchSlot(slot.id);
@@ -5232,6 +6111,9 @@ function switchPatchSlot(slotId) {
   synthNode = activeSynthSlot()?.node || null;
   audioBackendStatus = activeSynthSlot()?.status || audioBackendStatus;
   applyPatchData(slot.patch, { preserveSave: false });
+  state.selected = { type: "patch", id: "patch" };
+  renderPatchTabs();
+  renderPanel();
   savePatch();
 }
 
@@ -5281,14 +6163,9 @@ function applyPatchData(patch, options = {}) {
   const normalized = normalizePatch(patch);
   state.patchName = normalized.patchName;
   state.maxVoices = normalized.maxVoices;
-  state.audioInputDeviceId = normalized.audioInputDeviceId;
-  state.audioOutputDeviceId = normalized.audioOutputDeviceId;
   state.audioOutPosition = normalized.audioOutPosition;
-  state.linkSignalGradientMeters = normalized.linkSignalGradientMeters;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
-  state.keyboardStartNote = normalized.keyboardStartNote;
-  state.keyboardLength = normalized.keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -5315,22 +6192,12 @@ function newPatch() {
 
   const midiChannel = state.midiChannel;
   const midiInputId = state.midiInputId;
-  const keyboardStartNote = state.keyboardStartNote;
-  const keyboardLength = state.keyboardLength;
-  const audioInputDeviceId = state.audioInputDeviceId;
-  const audioOutputDeviceId = state.audioOutputDeviceId;
-  const linkSignalGradientMeters = state.linkSignalGradientMeters;
   const normalized = normalizeDefaultPatch();
   state.patchName = "Untitled Patch";
   state.maxVoices = normalized.maxVoices;
-  state.audioInputDeviceId = audioInputDeviceId;
-  state.audioOutputDeviceId = audioOutputDeviceId;
   state.audioOutPosition = normalized.audioOutPosition;
-  state.linkSignalGradientMeters = linkSignalGradientMeters;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
-  state.keyboardStartNote = keyboardStartNote;
-  state.keyboardLength = keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -6287,6 +7154,20 @@ function linkMeter(linkId) {
   `;
 }
 
+function nodeOutputMeter(nodeId) {
+  const level = nodeOutputMeterLevel(nodeId);
+  return `
+    <div class="link-meter node-output-meter" data-node-meter="${escapeHtml(nodeId)}" aria-label="Operator output signal meter">
+      <div class="link-meter-channel">
+        <span class="link-meter-label">out</span>
+        <span class="link-meter-track" aria-hidden="true">
+          <span class="link-meter-fill" data-link-meter-fill="output" style="transform: scaleY(${clamp(level, 0, 1)})"></span>
+        </span>
+      </div>
+    </div>
+  `;
+}
+
 function envelopeMeter(linkId) {
   const levels = linkMeterLevels.get(linkId) || { input: 0, output: 0, envelope: 0 };
   return `
@@ -7148,22 +8029,6 @@ function openMidiBindingModal(bindingId = null, preset = null) {
 }
 
 function renderEmptyPanel() {
-  const midiChannelOptions = [
-    `<option value="all" ${state.midiChannel === "all" ? "selected" : ""}>All channels</option>`,
-    ...Array.from({ length: 16 }, (_, index) => {
-      const channel = String(index + 1);
-      return `<option value="${channel}" ${state.midiChannel === channel ? "selected" : ""}>Channel ${channel}</option>`;
-    }),
-  ].join("");
-  const inputs = midiInputs();
-  const hasSelectedInput = state.midiInputId === "all" || inputs.some((input) => input.id === state.midiInputId);
-  const midiInputOptions = [
-    `<option value="all" ${state.midiInputId === "all" ? "selected" : ""}>All inputs</option>`,
-    ...inputs.map((input) => (
-      `<option value="${escapeHtml(input.id)}" ${state.midiInputId === input.id ? "selected" : ""}>${escapeHtml(input.name || "MIDI input")}</option>`
-    )),
-    ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
-  ].join("");
   const audioInputOptions = audioDeviceOptions(
     audioInputDevices(),
     selectedAudioDeviceId("input"),
@@ -7184,35 +8049,22 @@ function renderEmptyPanel() {
 
   panel.innerHTML = `
     <div class="panel-empty">
-      <h1>Patch</h1>
-      <p class="panel-subtitle">File, audio, and MIDI settings</p>
+      <h1>Session</h1>
+      <p class="panel-subtitle">Workspace, audio, keyboard, and recordings</p>
       <div class="field">
-        <label for="patchName">Name</label>
-        <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
+        <label for="sessionName">Name</label>
+        <input id="sessionName" type="text" value="${escapeHtml(state.sessionName)}" autocomplete="off">
+        <p class="field-error" id="sessionNameError" hidden></p>
       </div>
       <div class="panel-actions">
-        <button class="text-button" id="newPatchButton" type="button">New</button>
-        <button class="text-button" id="savePatchButton" type="button">Save</button>
-        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <button class="text-button" id="newSessionButton" type="button">New</button>
+        <button class="text-button" id="saveSessionButton" type="button">Save</button>
+        <button class="text-button" id="loadSessionButton" type="button">Load</button>
+        <button class="text-button" id="cloneSessionButton" type="button">Clone</button>
       </div>
-      ${patchSlots.length > 1 ? `
-        <label class="toggle-row patch-active-row" for="patchActive">
-          <input id="patchActive" type="checkbox" ${patchSlots.find((slot) => slot.id === activePatchSlotId)?.active === false ? "" : "checked"}>
-          <span>Active</span>
-        </label>
-      ` : ""}
-      <div class="settings-pair">
-        <div class="field">
-          <label for="maxVoices">Max voices</label>
-          <div class="field-row">
-            <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
-            <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
-          </div>
-        </div>
-        <div class="field">
-          <label for="audioEngine">Audio engine</label>
-          <select id="audioEngine">${audioBackendOptions}</select>
-        </div>
+      <div class="field">
+        <label for="audioEngine">Audio engine</label>
+        <select id="audioEngine">${audioBackendOptions}</select>
       </div>
       <label class="toggle-row">
         <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
@@ -7230,16 +8082,6 @@ function renderEmptyPanel() {
       </div>
       <div class="settings-pair">
         <div class="field">
-          <label for="midiInput">MIDI input</label>
-          <select id="midiInput">${midiInputOptions}</select>
-        </div>
-        <div class="field">
-          <label for="midiChannel">Channel</label>
-          <select id="midiChannel">${midiChannelOptions}</select>
-        </div>
-      </div>
-      <div class="settings-pair">
-        <div class="field">
           <label for="keyboardStartNote">Keyboard start</label>
           <select id="keyboardStartNote">${keyboardStartNoteOptions(state.keyboardStartNote)}</select>
         </div>
@@ -7251,36 +8093,26 @@ function renderEmptyPanel() {
           </div>
         </div>
       </div>
-      ${renderMidiBindingsSection()}
-      ${patchSlots.length > 1 ? panelRemoveAction("Remove current patch tab from this set", "Remove patch", "removePatchTabButton") : ""}
+      ${recordingLanes.length ? `<p class="panel-subtitle">${recordingLanes.length} multitrack lane${recordingLanes.length === 1 ? "" : "s"} in this session</p>` : ""}
     </div>
   `;
 
-  panel.querySelector("#patchName").addEventListener("input", (event) => {
-    state.patchName = event.target.value;
+  panel.querySelector("#sessionName").addEventListener("input", (event) => {
+    state.sessionName = event.target.value;
     renderAppTitle();
-    renderPatchTabs();
+    syncSessionNameValidation();
+    clearTimeout(pendingSessionNameCheck);
+    pendingSessionNameCheck = setTimeout(() => {
+      pendingSessionNameCheck = null;
+      refreshSavedSessionSummaries().catch(() => {
+        // The server-side save still reports conflicts if the freshness check fails.
+      });
+    }, 250);
     savePatch();
   });
-  panel.querySelector("#patchName").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.currentTarget.blur();
-    }
+  panel.querySelector("#sessionName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
   });
-  panel.querySelector("#patchActive")?.addEventListener("change", (event) => {
-    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
-    if (!slot) return;
-    slot.active = event.target.checked;
-    if (!slot.active) panicSynths(activePatchSlotId);
-    syncSynthSlotActive(activePatchSlotId);
-    renderPatchTabs();
-    savePatch();
-  });
-  bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
-    state.maxVoices = Math.round(value);
-    sendGraph();
-    savePatch();
-  }, { defaultValue: DEFAULT_MAX_VOICES });
   panel.querySelector("#audioEngine").addEventListener("change", (event) => {
     audioBackend = normalizeAudioBackend(event.target.value);
     try {
@@ -7288,6 +8120,7 @@ function renderEmptyPanel() {
     } catch {
       // The URL flag still carries the backend choice when storage is unavailable.
     }
+    savePatch();
     const url = new URL(window.location.href);
     if (audioBackend === DEFAULT_AUDIO_BACKEND) {
       url.searchParams.delete("engine");
@@ -7331,9 +8164,112 @@ function renderEmptyPanel() {
     renderPanel();
     savePatch();
   });
+  panel.querySelector("#newSessionButton").addEventListener("click", newSession);
+  panel.querySelector("#saveSessionButton").addEventListener("click", saveSessionToServer);
+  panel.querySelector("#loadSessionButton").addEventListener("click", openSessionLibrary);
+  panel.querySelector("#cloneSessionButton").addEventListener("click", cloneSession);
+  syncSessionNameValidation();
+  refreshSavedSessionSummaries().catch(() => {
+    // Name validation is best-effort until save.
+  });
+  bindKeyboardStartNoteControl();
+  bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
+    state.keyboardLength = Math.round(value);
+    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
+    savePatch();
+  }, { defaultValue: DEFAULT_KEYBOARD_LENGTH });
+}
+
+function renderPatchSettingsPanel() {
+  const midiChannelOptions = [
+    `<option value="all" ${state.midiChannel === "all" ? "selected" : ""}>All channels</option>`,
+    ...Array.from({ length: 16 }, (_, index) => {
+      const channel = String(index + 1);
+      return `<option value="${channel}" ${state.midiChannel === channel ? "selected" : ""}>Channel ${channel}</option>`;
+    }),
+  ].join("");
+  const inputs = midiInputs();
+  const hasSelectedInput = state.midiInputId === "all" || inputs.some((input) => input.id === state.midiInputId);
+  const midiInputOptions = [
+    `<option value="all" ${state.midiInputId === "all" ? "selected" : ""}>All inputs</option>`,
+    ...inputs.map((input) => (
+      `<option value="${escapeHtml(input.id)}" ${state.midiInputId === input.id ? "selected" : ""}>${escapeHtml(input.name || "MIDI input")}</option>`
+    )),
+    ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
+  ].join("");
+  panel.innerHTML = `
+    <div class="panel-empty">
+      <h1>Patch</h1>
+      <p class="panel-subtitle">Patch file, voices, and MIDI settings</p>
+      <div class="field">
+        <label for="patchName">Name</label>
+        <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
+      </div>
+      <div class="panel-actions">
+        <button class="text-button" id="newPatchButton" type="button">New</button>
+        <button class="text-button" id="savePatchButton" type="button">Save</button>
+        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <button class="text-button" id="clonePatchButton" type="button">Clone</button>
+      </div>
+      <div class="settings-pair patch-voice-row">
+        ${patchSlots.length > 1 ? `
+          <label class="toggle-row patch-active-row" for="patchActive">
+            <input id="patchActive" type="checkbox" ${patchSlots.find((slot) => slot.id === activePatchSlotId)?.active === false ? "" : "checked"}>
+            <span>Active</span>
+          </label>
+        ` : ""}
+        <div class="field">
+          <label for="maxVoices">Max voices</label>
+          <div class="field-row">
+            <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+            <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+          </div>
+        </div>
+      </div>
+      <div class="settings-pair">
+        <div class="field">
+          <label for="midiInput">MIDI input</label>
+          <select id="midiInput">${midiInputOptions}</select>
+        </div>
+        <div class="field">
+          <label for="midiChannel">Channel</label>
+          <select id="midiChannel">${midiChannelOptions}</select>
+        </div>
+      </div>
+      ${renderMidiBindingsSection()}
+      ${patchSlots.length > 1 ? panelRemoveAction("Remove current patch tab from this set", "Remove patch", "removePatchTabButton") : ""}
+    </div>
+  `;
+
+  panel.querySelector("#patchName").addEventListener("input", (event) => {
+    state.patchName = event.target.value;
+    renderAppTitle();
+    renderPatchTabs();
+    savePatch();
+  });
+  panel.querySelector("#patchName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    }
+  });
+  panel.querySelector("#patchActive")?.addEventListener("change", (event) => {
+    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+    if (!slot) return;
+    slot.active = event.target.checked;
+    if (!slot.active) panicSynths(activePatchSlotId);
+    syncSynthSlotActive(activePatchSlotId);
+    renderPatchTabs();
+    savePatch();
+  });
+  bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
+    state.maxVoices = Math.round(value);
+    sendGraph();
+    savePatch();
+  }, { defaultValue: DEFAULT_MAX_VOICES });
   panel.querySelector("#savePatchButton").addEventListener("click", savePatchToServer);
   panel.querySelector("#newPatchButton").addEventListener("click", newPatch);
   panel.querySelector("#loadPatchButton").addEventListener("click", openPatchLibrary);
+  panel.querySelector("#clonePatchButton").addEventListener("click", cloneActivePatchSlot);
   panel.querySelector("#removePatchTabButton")?.addEventListener("click", removeActivePatchSlot);
   panel.querySelector("#midiInput").addEventListener("change", (event) => {
     state.midiInputId = event.target.value;
@@ -7349,18 +8285,13 @@ function renderEmptyPanel() {
     updateMidiStatus();
     savePatch();
   });
-  bindKeyboardStartNoteControl();
-  bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
-    state.keyboardLength = Math.round(value);
-    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
-    savePatch();
-  }, { defaultValue: DEFAULT_KEYBOARD_LENGTH });
   attachMidiBindingEvents();
 }
 
 function select(type, id) {
   state.selected = { type, id };
   render();
+  savePatch();
 }
 
 function render() {
@@ -7375,9 +8306,9 @@ function render() {
 }
 
 function renderAppTitle() {
-  const patchName = state.patchName?.trim() || "Untitled Patch";
-  appTitle.textContent = "Visual FM";
-  document.title = `Visual FM - ${patchName}`;
+  const sessionName = state.sessionName?.trim() || defaultSessionName();
+  appTitle.textContent = `Visual FM - ${sessionName}`;
+  document.title = `Visual FM - ${sessionName}`;
 }
 
 function renderPatchTabs() {
@@ -7387,7 +8318,7 @@ function renderPatchTabs() {
       const name = slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName;
       return `
         <button
-          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""} ${slot.active === false ? "inactive" : ""}"
+          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""} ${slot.id === activePatchSlotId && state.selected.type === "patch" ? "selected" : ""} ${slot.active === false ? "inactive" : ""}"
           type="button"
           data-patch-slot-id="${escapeHtml(slot.id)}"
           title="${escapeHtml(`${name || "Untitled Patch"}${slot.active === false ? " (inactive)" : ""}`)}"
@@ -7397,9 +8328,18 @@ function renderPatchTabs() {
     <button class="patch-tab patch-tab-add" id="addPatchTabButton" type="button" aria-label="Add patch tab" title="Add patch tab">+</button>
   `;
   patchTabs.querySelectorAll("[data-patch-slot-id]").forEach((button) => {
-    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      if (button.dataset.patchSlotId === activePatchSlotId) {
+        select("patch", "patch");
+      }
+    });
     button.addEventListener("click", (event) => {
       event.stopPropagation();
+      if (button.dataset.patchSlotId === activePatchSlotId) {
+        select("patch", "patch");
+        return;
+      }
       switchPatchSlot(button.dataset.patchSlotId);
     });
   });
@@ -8445,12 +9385,28 @@ stage.addEventListener("click", (event) => {
   if (event.target === stage || event.target === canvasViewport || event.target === nodeLayer || event.target === wireLayer) {
     state.selected = { type: null, id: null };
     render();
+    savePatch();
   }
 });
 
 audioOut.addEventListener("click", (event) => {
   event.stopPropagation();
   select("audio", "audio");
+});
+
+sessionTitleButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  state.selected = { type: null, id: null };
+  render();
+  savePatch();
+});
+
+sessionTitleButton?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  state.selected = { type: null, id: null };
+  render();
+  savePatch();
 });
 
 window.addEventListener("resize", onStageResize);

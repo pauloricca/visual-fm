@@ -109,13 +109,15 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .brand {
@@ -130,6 +132,12 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.brand:focus-visible {
+  outline: 2px solid rgba(117, 208, 164, 0.65);
+  outline-offset: 6px;
+  border-radius: 8px;
 }
 
 .brand-mark {
@@ -163,6 +171,7 @@ select {
   background: rgba(23, 25, 29, 0.8);
   color: var(--muted);
   cursor: pointer;
+  pointer-events: auto;
   font-size: 12px;
   font-weight: 760;
   overflow: hidden;
@@ -177,9 +186,16 @@ select {
 }
 
 .patch-tab.active {
-  border-color: rgba(117, 208, 164, 0.52);
-  background: rgba(117, 208, 164, 0.18);
+  border-color: rgba(117, 208, 164, 0.4);
+  background: rgba(117, 208, 164, 0.12);
   color: var(--text);
+}
+
+.patch-tab.selected {
+  border-color: rgba(244, 189, 91, 0.72);
+  background: linear-gradient(180deg, rgba(244, 189, 91, 0.22), rgba(117, 208, 164, 0.13));
+  color: var(--text);
+  box-shadow: 0 0 0 1px rgba(244, 189, 91, 0.3);
 }
 
 .patch-tab.inactive {
@@ -984,7 +1000,9 @@ select {
 }
 
 .recording-track-area {
+  --recording-lane-gutter: 126px;
   display: grid;
+  grid-template-columns: var(--recording-lane-gutter) minmax(0, 1fr);
   grid-template-rows: 32px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
@@ -995,6 +1013,7 @@ select {
 }
 
 .recording-ruler {
+  grid-column: 2;
   position: relative;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(7, 8, 10, 0.32);
@@ -1056,6 +1075,7 @@ select {
 }
 
 .recording-lanes {
+  grid-column: 1 / -1;
   position: relative;
   display: grid;
   align-content: start;
@@ -1067,6 +1087,9 @@ select {
 
 .recording-lane {
   position: relative;
+  display: grid;
+  grid-template-columns: var(--recording-lane-gutter) minmax(0, 1fr);
+  align-items: stretch;
   min-height: 31px;
   width: 100%;
   border: 0;
@@ -1097,15 +1120,26 @@ select {
 }
 
 .recording-lane-label {
-  position: absolute;
+  position: relative;
   z-index: 2;
-  top: 50%;
-  left: 18px;
-  transform: translateY(-50%);
-  color: rgba(241, 244, 242, 0.72);
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 12px 0 14px;
+  color: rgba(241, 244, 242, 0.86);
   font-size: 11px;
-  font-weight: 780;
+  font-weight: 820;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   pointer-events: none;
+}
+
+.recording-lane-clip-area {
+  position: relative;
+  min-width: 0;
+  min-height: 31px;
 }
 
 .recording-lane-clip {
@@ -1120,22 +1154,28 @@ select {
 }
 
 .recording-lane.is-selected .recording-lane-clip {
+  border-color: rgba(117, 208, 164, 0.56);
+  background: rgba(117, 208, 164, 0.52);
+}
+
+.recording-lane.is-selected .recording-lane-clip.is-selected {
   border-color: rgba(130, 255, 185, 0.82);
   background: rgba(117, 208, 164, 0.72);
   box-shadow: 0 0 12px rgba(117, 208, 164, 0.18);
 }
 
-.recording-lane-clip span {
+.recording-clip-duration {
   position: absolute;
-  z-index: 2;
+  z-index: 3;
   right: 7px;
   top: 50%;
   transform: translateY(-50%);
-  color: rgba(8, 17, 13, 0.88);
+  color: rgba(7, 13, 11, 0.88);
   font-size: 10px;
   font-weight: 840;
   line-height: 1;
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .recording-waveform {
@@ -1144,7 +1184,7 @@ select {
   inset: 2px 8px;
   width: calc(100% - 16px);
   height: calc(100% - 4px);
-  opacity: 0.78;
+  opacity: 0.68;
   pointer-events: none;
 }
 
@@ -1153,7 +1193,7 @@ select {
 }
 
 .recording-lane.is-selected .recording-waveform {
-  opacity: 0.9;
+  opacity: 0.78;
 }
 
 .recording-lane-clip.is-live {
@@ -1162,6 +1202,7 @@ select {
 }
 
 .recording-lane-empty {
+  grid-column: 1 / -1;
   display: grid;
   place-items: center;
   min-height: 72px;
@@ -1175,12 +1216,17 @@ select {
 }
 
 .recording-side {
-  display: grid;
-  grid-template-rows: auto auto auto auto;
-  align-content: stretch;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   min-width: 0;
   min-height: 0;
+  height: 100%;
+}
+
+.recording-side .field {
+  gap: 8px;
+  margin: 0;
 }
 
 .recording-status {
@@ -1221,13 +1267,53 @@ select {
 
 .recording-lane-name-field input {
   width: 100%;
-  height: 38px;
+  height: 40px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 7px;
   background: var(--surface-2);
   color: var(--text);
   outline: none;
   padding: 0 10px;
+}
+
+.recording-lane-volume-field {
+  display: grid;
+  grid-template-rows: auto 28px;
+  gap: 6px;
+  min-height: 0;
+  margin: 0;
+}
+
+.recording-lane-volume-field input {
+  width: 100%;
+  height: 28px;
+  accent-color: var(--green);
+}
+
+.recording-lane-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+  margin-top: auto;
+}
+
+.recording-lane-actions .icon-button {
+  width: 100%;
+  height: 42px;
+}
+
+.recording-lane-actions .icon-button svg {
+  width: 19px;
+  height: 19px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.recording-lane-actions .icon-button.danger {
+  color: #ffb0be;
 }
 
 .recording-transport-actions {
@@ -1267,7 +1353,8 @@ select {
 }
 
 .patch-active-row {
-  margin: -6px 0 18px;
+  min-height: 38px;
+  margin: 20px 0 18px;
 }
 
 .midi-keyboard-panel {
@@ -1636,6 +1723,10 @@ select {
   transition: transform 55ms linear;
 }
 
+.node-output-meter {
+  margin-top: 0;
+}
+
 .envelope-meter {
   align-items: center;
   height: 18px;
@@ -1664,7 +1755,7 @@ select {
 
 .panel-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin: 0 0 18px;
 }
@@ -1681,6 +1772,10 @@ select {
 
 .settings-pair .field {
   min-width: 0;
+}
+
+.patch-voice-row {
+  align-items: start;
 }
 
 .sample-stretch-settings .field-row {
@@ -2011,6 +2106,18 @@ select {
   color: #f0a8b4;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.field-error {
+  margin: -2px 0 0;
+  color: #f0a8b4;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.field input.is-invalid {
+  border-color: rgba(240, 91, 112, 0.78);
+  box-shadow: 0 0 0 1px rgba(240, 91, 112, 0.28);
 }
 
 .modal-actions {

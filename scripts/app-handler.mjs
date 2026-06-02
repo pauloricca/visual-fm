@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, normalize, relative, sep } from "node:path";
 
 const mimeTypes = new Map([
@@ -7,6 +7,8 @@ const mimeTypes = new Map([
   [".js", "text/javascript; charset=utf-8"],
   [".json", "application/json; charset=utf-8"],
   [".map", "application/json; charset=utf-8"],
+  [".yaml", "application/x-yaml; charset=utf-8"],
+  [".yml", "application/x-yaml; charset=utf-8"],
   [".svg", "image/svg+xml"],
   [".wav", "audio/wav"],
   [".mp3", "audio/mpeg"],
@@ -21,6 +23,7 @@ const mimeTypes = new Map([
 
 export function createAppRequestHandler(rootDir) {
   const savedDir = join(rootDir, "patches");
+  const sessionsDir = join(rootDir, "sessions");
   const recordingsDir = join(rootDir, "recordings");
   const samplesDir = join(rootDir, "samples");
 
@@ -50,6 +53,16 @@ export function createAppRequestHandler(rootDir) {
       || "Untitled Patch";
   }
 
+  function safeSessionFolderName(name) {
+    return String(name || "Untitled Session")
+      .trim()
+      .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+      .replace(/\s+/g, " ")
+      .replace(/^\.+|\.+$/g, "")
+      .slice(0, 96)
+      || "Untitled Session";
+  }
+
   function safeTimestampName(name) {
     const timestamp = String(name || "").trim();
     return /^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-[0-9]+)?$/.test(timestamp)
@@ -66,6 +79,64 @@ export function createAppRequestHandler(rootDir) {
       .slice(0, 96);
     const wavName = fileName.toLowerCase().endsWith(".wav") ? fileName : `${fileName}.wav`;
     return /^[^/\\]+\.wav$/i.test(wavName) ? wavName : null;
+  }
+
+  function sessionDirectory(sessionName) {
+    const folderName = safeSessionFolderName(sessionName);
+    const directory = join(sessionsDir, folderName);
+    const relativePath = relative(sessionsDir, directory);
+    if (relativePath.startsWith("..") || relativePath.includes(`..${sep}`)) return null;
+    return { sessionId: folderName, folderName, directory };
+  }
+
+  function sessionFilePath(sessionId) {
+    const sessionDir = sessionDirectory(sessionId);
+    if (!sessionDir) return null;
+    return { ...sessionDir, filePath: join(sessionDir.directory, "session.yaml") };
+  }
+
+  function encodeSessionJson(session) {
+    return Buffer.from(JSON.stringify(session), "utf8").toString("base64");
+  }
+
+  function decodeSessionJson(encoded) {
+    return Buffer.from(encoded, "base64").toString("utf8");
+  }
+
+  function yamlScalar(value) {
+    if (typeof value === "string") return JSON.stringify(value);
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (value === null) return "null";
+    return JSON.stringify(value);
+  }
+
+  function toYaml(value, indent = 0) {
+    const space = " ".repeat(indent);
+    if (Array.isArray(value)) {
+      if (value.length === 0) return `${space}[]`;
+      return value.map((item) => `${space}-\n${toYaml(item, indent + 2)}`).join("\n");
+    }
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value);
+      if (entries.length === 0) return `${space}{}`;
+      return entries.map(([key, item]) => {
+        if (Array.isArray(item) && item.length === 0) return `${space}${key}: []`;
+        if (item && typeof item === "object" && Object.keys(item).length === 0) return `${space}${key}: {}`;
+        if (item && typeof item === "object") return `${space}${key}:\n${toYaml(item, indent + 2)}`;
+        return `${space}${key}: ${yamlScalar(item)}`;
+      }).join("\n");
+    }
+    return `${space}${yamlScalar(value)}`;
+  }
+
+  function sessionFileText(session) {
+    return `# Visual FM session\n# visual-fm-session-json: ${encodeSessionJson(session)}\n${toYaml(session)}\n`;
+  }
+
+  function parseSessionFile(text) {
+    const encoded = /^# visual-fm-session-json: (.+)$/m.exec(text)?.[1];
+    if (encoded) return JSON.parse(decodeSessionJson(encoded.trim()));
+    return JSON.parse(text);
   }
 
   function safeSampleFileName(name) {
@@ -148,6 +219,31 @@ export function createAppRequestHandler(rootDir) {
       })
       .filter((patch) => patch.timestamps.length > 0)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }
+
+  function listSavedSessions() {
+    if (!existsSync(sessionsDir)) return [];
+    return readdirSync(sessionsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && safeSessionFolderName(entry.name) === entry.name)
+      .map((entry) => {
+        const filePath = join(sessionsDir, entry.name, "session.yaml");
+        if (!existsSync(filePath) || !statSync(filePath).isFile()) return null;
+        try {
+          const session = parseSessionFile(readFileSync(filePath, "utf8"));
+          const name = session.sessionName || "Untitled Session";
+          if (entry.name !== safeSessionFolderName(name)) return null;
+          const stats = statSync(filePath);
+          return {
+            id: entry.name,
+            name,
+            savedAt: session.savedAt || stats.mtime.toISOString(),
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
   }
 
   function listSamples() {
@@ -257,6 +353,154 @@ export function createAppRequestHandler(rootDir) {
       "cache-control": "no-store",
     });
     createReadStream(patchPath.filePath).pipe(response);
+  }
+
+  async function handleSessionsRequest(request, response) {
+    if (request.method === "GET") {
+      jsonResponse(response, 200, { sessions: listSavedSessions() });
+      return;
+    }
+
+    if (request.method !== "POST") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+
+    const body = await readRequestBody(request, 25 * 1024 * 1024);
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      jsonResponse(response, 400, { error: "Invalid JSON body." });
+      return;
+    }
+
+    const sessionName = typeof payload.sessionName === "string" && payload.sessionName.trim()
+      ? payload.sessionName.trim()
+      : "Untitled Session";
+    const nextSessionId = safeSessionFolderName(sessionName);
+    const previousSessionId = typeof payload.sessionId === "string" && payload.sessionId.trim()
+      ? safeSessionFolderName(payload.sessionId)
+      : "";
+    const sessionPath = sessionFilePath(nextSessionId);
+    if (!sessionPath) {
+      jsonResponse(response, 400, { error: "Invalid session name." });
+      return;
+    }
+    const replacingSameSession = previousSessionId && previousSessionId === nextSessionId;
+    if (!replacingSameSession && existsSync(sessionPath.filePath)) {
+      jsonResponse(response, 409, { error: "A session with that name already exists." });
+      return;
+    }
+
+    const savedAt = new Date().toISOString();
+    const patchSlots = Array.isArray(payload.patchSlots) ? payload.patchSlots.map((slot) => ({
+      id: slot.id,
+      active: slot.active !== false,
+      patchRef: slot.patchRef?.patchName && slot.patchRef?.timestamp ? {
+        patchName: slot.patchRef.patchName,
+        timestamp: slot.patchRef.timestamp,
+      } : null,
+    })) : [];
+    const session = {
+      ...payload,
+      sessionId: nextSessionId,
+      sessionName,
+      savedAt,
+      patchSlots,
+      recordings: Array.isArray(payload.recordings) ? payload.recordings.map((lane) => ({
+        id: lane.id,
+        name: lane.name,
+        patchSlotId: lane.patchSlotId,
+        patchName: lane.patchName,
+        startTime: lane.startTime,
+        duration: lane.duration,
+        volume: lane.volume,
+        clips: Array.isArray(lane.clips) ? lane.clips.map((clip) => ({
+          id: clip.id,
+          startTime: clip.startTime,
+          duration: clip.duration,
+          offset: clip.offset,
+        })) : [],
+        createdAt: lane.createdAt,
+        path: lane.path,
+        fileName: lane.fileName,
+        waveform: lane.waveform,
+      })) : [],
+    };
+
+    mkdirSync(sessionPath.directory, { recursive: true });
+    writeFileSync(sessionPath.filePath, sessionFileText(session), "utf8");
+
+    jsonResponse(response, 201, { sessionId: nextSessionId, savedAt });
+  }
+
+  async function handleSavedSessionRequest(request, response, url) {
+    if (request.method !== "GET") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    const segments = url.pathname.split("/").map((segment) => decodeURIComponent(segment));
+    const sessionId = segments[3];
+    if (segments.length !== 4 || !sessionId) {
+      jsonResponse(response, 404, { error: "Saved session not found." });
+      return;
+    }
+    const sessionPath = sessionFilePath(sessionId);
+    if (!sessionPath || !existsSync(sessionPath.filePath) || !statSync(sessionPath.filePath).isFile()) {
+      jsonResponse(response, 404, { error: "Saved session not found." });
+      return;
+    }
+    jsonResponse(response, 200, { session: parseSessionFile(readFileSync(sessionPath.filePath, "utf8")) });
+  }
+
+  async function handleSessionRecordingRequest(request, response, url) {
+    if (request.method !== "POST") {
+      jsonResponse(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    const segments = url.pathname.split("/").map((segment) => decodeURIComponent(segment));
+    const sessionId = segments[3];
+    if (segments.length !== 5 || segments[4] !== "recordings") {
+      jsonResponse(response, 404, { error: "Session recording endpoint not found." });
+      return;
+    }
+    const sessionDir = sessionDirectory(sessionId);
+    if (!sessionDir) {
+      jsonResponse(response, 400, { error: "Invalid session id." });
+      return;
+    }
+    const recording = await readRequestBuffer(request);
+    if (!recording.length) {
+      jsonResponse(response, 400, { error: "Recording content is required." });
+      return;
+    }
+    const requestedName = safeRecordingFileName(request.headers["x-recording-file-name"]);
+    if (!requestedName) {
+      jsonResponse(response, 400, { error: "A valid recording file name is required." });
+      return;
+    }
+    const recordingDirectory = join(sessionDir.directory, "recordings");
+    mkdirSync(recordingDirectory, { recursive: true });
+    const base = requestedName.replace(/\.wav$/i, "");
+    let fileName = requestedName;
+    let filePath = join(recordingDirectory, fileName);
+    let counter = 2;
+    while (existsSync(filePath)) {
+      fileName = `${base} ${counter}.wav`;
+      filePath = join(recordingDirectory, fileName);
+      counter += 1;
+    }
+    const relativeFile = relative(recordingDirectory, filePath);
+    if (relativeFile.startsWith("..") || relativeFile.includes(`..${sep}`)) {
+      jsonResponse(response, 400, { error: "Invalid recording path." });
+      return;
+    }
+    writeFileSync(filePath, recording);
+    jsonResponse(response, 201, {
+      fileName,
+      path: `/sessions/${encodeURIComponent(sessionDir.sessionId)}/recordings/${encodeURIComponent(fileName)}`,
+    });
   }
 
   async function handleRecordingRequest(request, response) {
@@ -373,6 +617,13 @@ export function createAppRequestHandler(rootDir) {
       return;
     }
 
+    if (url.pathname === "/api/sessions") {
+      handleSessionsRequest(request, response).catch((error) => {
+        jsonResponse(response, 500, { error: error.message || "Session request failed." });
+      });
+      return;
+    }
+
     if (url.pathname === "/api/recordings") {
       handleRecordingRequest(request, response).catch((error) => {
         jsonResponse(response, 500, { error: error.message || "Recording request failed." });
@@ -390,6 +641,20 @@ export function createAppRequestHandler(rootDir) {
     if (url.pathname.startsWith("/api/patches/")) {
       handleSavedPatchRequest(request, response, url).catch((error) => {
         jsonResponse(response, 500, { error: error.message || "Patch request failed." });
+      });
+      return;
+    }
+
+    if (url.pathname.endsWith("/recordings") && url.pathname.startsWith("/api/sessions/")) {
+      handleSessionRecordingRequest(request, response, url).catch((error) => {
+        jsonResponse(response, 500, { error: error.message || "Session recording request failed." });
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith("/api/sessions/")) {
+      handleSavedSessionRequest(request, response, url).catch((error) => {
+        jsonResponse(response, 500, { error: error.message || "Session request failed." });
       });
       return;
     }
