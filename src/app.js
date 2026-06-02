@@ -124,6 +124,8 @@ const RATIO_SLIDER_MAX = 16;
 const RATIO_SLOW_SLIDER_MAX = 0.1;
 const FINE_SLIDER_SCALE = 0.1;
 const VALUE_SLIDER_DRAG_THRESHOLD_PX = 4;
+const VALUE_SLIDER_EDIT_TAP_MAX_MS = 220;
+const VALUE_SLIDER_EDIT_TAP_MOVE_PX = 3;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
 const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
 const VALUE_SLIDER_PRECISION_POWER = 1.45;
@@ -4542,7 +4544,10 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
 
   enhanceValueSlider(number, range, min, max, step);
   number.addEventListener("input", (event) => commitValue(event.target.value, { updateNumber: false, valueMin: inputMin, valueMax: inputMax }));
-  number.addEventListener("focus", (event) => event.target.select());
+  number.addEventListener("focus", (event) => {
+    if (event.target.readOnly) return;
+    event.target.select();
+  });
   number.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       commitValue(event.currentTarget.value, { valueMin: inputMin, valueMax: inputMax });
@@ -4599,6 +4604,12 @@ function enhanceValueSlider(number, range, min, max, step) {
   number.setAttribute("inputmode", "decimal");
 
   number.addEventListener("focus", () => {
+    if (number.readOnly && number.dataset.valueSliderAllowEditFocus !== "true") {
+      number.blur();
+      clearValueSliderTextSelection(number);
+      return;
+    }
+    delete number.dataset.valueSliderAllowEditFocus;
     control.classList.add("is-editing");
     number.readOnly = false;
     number.value = formatEditableValue(Number(number.value), step);
@@ -4607,6 +4618,7 @@ function enhanceValueSlider(number, range, min, max, step) {
     control.classList.remove("is-editing");
     number.readOnly = true;
     syncValueSliderNumber(number, range, Number(number.value));
+    clearValueSliderTextSelection(number);
   });
 
   syncValueSliderProgress(range, min, max);
@@ -4683,7 +4695,21 @@ function trimNumberString(value) {
   return value.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
+function clearValueSliderTextSelection(number) {
+  const originalType = number.getAttribute("type");
+  try {
+    if (originalType === "number") number.setAttribute("type", "text");
+    number.setSelectionRange?.(0, 0);
+  } catch {
+    // Some input types/browsers do not expose text selection ranges.
+  } finally {
+    if (originalType === "number") number.setAttribute("type", originalType);
+  }
+  window.getSelection?.()?.removeAllRanges?.();
+}
+
 function focusValueSliderNumber(number) {
+  number.dataset.valueSliderAllowEditFocus = "true";
   number.readOnly = false;
   number.focus({ preventScroll: true });
   number.select();
@@ -4719,6 +4745,8 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
       started: false,
       startX: event.clientX,
       startY: event.clientY,
+      startTime: event.timeStamp,
+      maxDelta: 0,
       lastAxis: pointerAxis,
     };
 
@@ -4734,6 +4762,7 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     const totalDelta = Math.hypot(dx, dy);
+    drag.maxDelta = Math.max(drag.maxDelta, totalDelta);
     if (!drag.started) {
       if (totalDelta < VALUE_SLIDER_DRAG_THRESHOLD_PX) return;
       if (drag.scrollableTouchGesture && Math.abs(dy) > Math.abs(dx)) {
@@ -4776,7 +4805,14 @@ function bindPrecisionRangeDrag(range, min, max, commitValue) {
     } catch {
       // Touch scrolling can cancel capture before the slider sees pointerup.
     }
-    if (event.type === "pointerup" && !drag.started && number && number.offsetParent !== null) {
+    const releaseDelta = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    drag.maxDelta = Math.max(drag.maxDelta, releaseDelta);
+    const durationMs = event.timeStamp - drag.startTime;
+    const editTap = event.type === "pointerup"
+      && !drag.started
+      && durationMs <= VALUE_SLIDER_EDIT_TAP_MAX_MS
+      && drag.maxDelta <= VALUE_SLIDER_EDIT_TAP_MOVE_PX;
+    if (editTap && number && number.offsetParent !== null) {
       focusValueSliderNumber(number);
     }
     control.classList?.remove("is-dragging");
