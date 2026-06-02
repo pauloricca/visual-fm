@@ -11,7 +11,7 @@
       <div class="canvas-column">
         <section class="stage" id="stage" aria-label="Visual FM patch canvas">
           <div class="topbar">
-            <div class="brand">
+            <div class="brand" id="sessionTitleButton" role="button" tabindex="0" aria-label="Session settings" title="Session settings">
               <span class="brand-mark"></span>
               <span id="appTitle">Visual FM - Visual FM Patch</span>
             </div>
@@ -72,6 +72,15 @@
               <span class="record-dot" aria-hidden="true"></span>
               <span class="control-caption">Rec</span>
             </button>
+            <button class="bottom-panel-toggle floating-control-button" id="timelinePanelButton" type="button" aria-label="Toggle recording timeline" aria-pressed="false" title="Recording timeline" data-bottom-panel-toggle="timeline">
+              <svg class="timeline-icon" viewBox="0 0 32 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h24M4 17h24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>
+                <rect x="7" y="4" width="8" height="6" rx="2" fill="currentColor"/>
+                <rect x="17" y="14" width="9" height="6" rx="2" fill="currentColor"/>
+                <path d="M12 2v20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+              </svg>
+              <span class="control-caption">Tracks</span>
+            </button>
             <button class="bottom-panel-toggle floating-control-button" id="keyboardPanelButton" type="button" aria-label="Toggle MIDI keyboard" aria-pressed="false" title="MIDI keyboard" data-bottom-panel-toggle="keyboard">
               <svg class="panel-icon" viewBox="0 0 32 24" aria-hidden="true" focusable="false">
                 <rect x="3" y="4" width="26" height="16" rx="5" fill="none" stroke="currentColor" stroke-width="3"/>
@@ -96,6 +105,7 @@
         </section>
 
         <section class="bottom-panel" id="bottomPanel" aria-label="MIDI performance controls" hidden>
+          <div class="recording-timeline-panel" id="recordingTimelinePanel" hidden></div>
           <div class="midi-knob-panel" id="midiKnobPanel" hidden></div>
           <div class="midi-keyboard-panel" id="midiKeyboardPanel" hidden></div>
         </section>

@@ -6,7 +6,9 @@ import {
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
+  DEFAULT_MAX_VOICES,
   DEFAULT_NODE_QUANTISE,
+  DEFAULT_SAMPLE,
   FREQUENCY_MODES,
   LINK_DISTORTION_TYPES,
   LINK_FILTER_TYPES,
@@ -36,6 +38,7 @@ import {
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
   WAVE_TYPES,
+  defaultPatch,
   keyMap,
 } from "./constants.js";
 import { parsePatchFile, patchFileText } from "./patch-format.js";
@@ -47,6 +50,7 @@ import {
   normalizeModulationTarget,
   normalizeNodeQuantise,
   normalizePatch,
+  normalizeSample,
   normalizeSignalMode,
 } from "./patch-normalize.js";
 import { audioBufferToWav, mediaRecorderOptions } from "./recording.js";
@@ -66,6 +70,7 @@ const nodeLayer = document.querySelector("#nodeLayer");
 const wireLayer = document.querySelector("#wireLayer");
 const panel = document.querySelector("#panel");
 const appTitle = document.querySelector("#appTitle");
+const sessionTitleButton = document.querySelector("#sessionTitleButton");
 const patchTabs = document.querySelector("#patchTabs");
 const addNodeButton = document.querySelector("#addNodeButton");
 const recordButton = document.querySelector("#recordButton");
@@ -81,8 +86,10 @@ const fineSliderButton = document.querySelector("#fineSliderButton");
 const cloneModifierButton = document.querySelector("#cloneModifierButton");
 const keyboardPanelButton = document.querySelector("#keyboardPanelButton");
 const knobPanelButton = document.querySelector("#knobPanelButton");
+const timelinePanelButton = document.querySelector("#timelinePanelButton");
 const fullscreenButton = document.querySelector("#fullscreenButton");
 const bottomPanel = document.querySelector("#bottomPanel");
+const recordingTimelinePanel = document.querySelector("#recordingTimelinePanel");
 const midiKeyboardPanel = document.querySelector("#midiKeyboardPanel");
 const midiKnobPanel = document.querySelector("#midiKnobPanel");
 const AUDIO_BACKEND_STORAGE_KEY = "visual-fm.audioBackend";
@@ -95,15 +102,15 @@ const CANVAS_ZOOM_MAX = 2.5;
 const AUDIO_BACKENDS = {
   js: {
     label: "JS AudioWorklet",
-    moduleUrl: "./src/audio-worklet.js?v=custom-wave-2",
+    moduleUrl: "./src/audio-worklet.js?v=sample-wave-16",
     processorName: "visual-fm-engine",
   },
   wasm: {
     label: "Rust WASM",
-    moduleUrl: "./src/audio-worklet-wasm.js?v=custom-wave-2",
+    moduleUrl: "./src/audio-worklet-wasm.js?v=sample-wave-16",
     processorName: "visual-fm-wasm-engine",
     processorOptions: async () => {
-      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=custom-wave-2", window.location.href).href;
+      const wasmUrl = new URL("./src/wasm/visual-fm-kernel.wasm?v=sample-wave-16", window.location.href).href;
       const response = await fetch(wasmUrl);
       if (!response.ok) {
         throw new Error(`Could not fetch WASM kernel (${response.status}).`);
@@ -129,6 +136,9 @@ const VALUE_SLIDER_EDIT_TAP_MOVE_PX = 3;
 const VALUE_SLIDER_PRECISION_THRESHOLD_PX = 5;
 const VALUE_SLIDER_PRECISION_DISTANCE_PX = 55;
 const VALUE_SLIDER_PRECISION_POWER = 1.45;
+const RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX = 20;
+const VALUE_SLIDER_RESET_TAP_DISTANCE_PX = 14;
+const VALUE_SLIDER_RESET_TAP_MAX_MS = 360;
 const MIDI_KNOB_TOUCH_SCALE = 1.65;
 const MIDI_KNOB_TOUCH_PRECISION_THRESHOLD_PX = 28;
 const NODE_LAYOUT_HALF_WIDTH = 71;
@@ -136,6 +146,21 @@ const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
 const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
 const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
+const RECORDING_TEMPO_MIN = 40;
+const RECORDING_TEMPO_MAX = 220;
+const RECORDING_DEFAULT_TEMPO = 120;
+const RECORDING_COUNTDOWN_BEATS = 4;
+const RECORDING_TIMELINE_MIN_SECONDS = 8;
+const RECORDING_RULER_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+const RECORDING_RULER_MINOR_TARGET_TICKS = 36;
+const RECORDING_RULER_LABEL_TARGET_TICKS = 6;
+const RECORDING_WAVEFORM_POINTS = 72;
+const RECORDING_WAVEFORM_SILENCE_FLOOR = 0.003;
+const RECORDING_WAVEFORM_MIN_VISUAL_PEAK = 0.08;
+const MIDI_NOTE_OPTIONS = Array.from({ length: 128 }, (_, value) => ({
+  value,
+  label: `${midiNoteLabel(value)} (${value})`,
+}));
 
 function audioContextConstructor() {
   return window.AudioContext || window.webkitAudioContext;
@@ -193,13 +218,21 @@ async function toggleFullscreen() {
 const patchSession = loadPatchSession();
 const state = {
   ...patchSession.activePatch,
-  selected: { type: null, id: null },
+  sessionId: patchSession.sessionId,
+  sessionName: patchSession.sessionName,
+  audioInputDeviceId: patchSession.audioInputDeviceId,
+  audioOutputDeviceId: patchSession.audioOutputDeviceId,
+  linkSignalGradientMeters: patchSession.linkSignalGradientMeters,
+  keyboardStartNote: patchSession.keyboardStartNote,
+  keyboardLength: patchSession.keyboardLength,
+  selected: patchSession.selected || { type: null, id: null },
 };
 
 let audioContext = null;
 let synthNode = null;
 const synthSlots = new Map();
 let outputGainNode = null;
+let recordingPlaybackGainNode = null;
 let audioInputStream = null;
 let audioInputSource = null;
 let audioOutputSinkDestination = null;
@@ -210,11 +243,43 @@ let audioReadyPromise = null;
 let audioWorkletModulePromise = null;
 let mediaRecorder = null;
 let recordingChunks = [];
+let recordingSessions = [];
 let recordingStartedAt = null;
+let recordingLaneStartedAt = 0;
 let recordingStarting = false;
 let recordingSavedTimer = null;
+let recordingCountdownTimer = null;
+let recordingCountdownBeat = 0;
+let recordingCountdownActive = false;
+let recordingMetronomeTimer = null;
+let recordingTimelineFrame = null;
+let recordingTimelineStartedAt = 0;
+let recordingTimelineTempo = RECORDING_DEFAULT_TEMPO;
+let recordingMetronomeEnabled = false;
+let recordingLaneCounter = 1;
+const recordingLanes = normalizeStoredRecordingLanes(patchSession.recordings);
+recordingLaneCounter = nextRecordingLaneCounter(recordingLanes);
+const recordingPlaybackSources = [];
+const recordingPatchLaneCounters = new Map();
+const recordingSelection = normalizeStoredRecordingSelection(
+  recordingLanes,
+  patchSession.selectedRecordingLaneId,
+  patchSession.selectedRecordingClipId,
+);
+let selectedRecordingLaneId = recordingSelection.laneId;
+let selectedRecordingClipId = recordingSelection.clipId;
+let recordingPlayheadTime = 0;
+let recordingReturnPlayheadTime = 0;
+let recordingTransportPlaying = false;
+let recordingTransportStartedAt = 0;
+let recordingTransportStartTime = 0;
+let recordingRenderedDuration = RECORDING_TIMELINE_MIN_SECONDS;
+let recordingScrubState = null;
+let recordingScrubGainNode = null;
+let recordingScrubSource = null;
+let recordingScrubPreviewLastAt = 0;
 let audioMuted = false;
-let audioBackend = loadAudioBackend();
+let audioBackend = patchSession.audioBackend || loadAudioBackend();
 let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
 let nodeCounter = 3;
 let linkCounter = 3;
@@ -252,24 +317,27 @@ let keyboardFineSliderActive = false;
 let touchCloneModifierPointerId = null;
 let cloneModifierActive = false;
 const activeBottomPanels = {
-  keyboard: false,
-  knobs: false,
+  timeline: Boolean(patchSession.activeBottomPanels?.timeline),
+  keyboard: Boolean(patchSession.activeBottomPanels?.keyboard),
+  knobs: Boolean(patchSession.activeBottomPanels?.knobs),
 };
 let keyboardWideLayout = false;
 let availableAudioDevices = { inputs: [], outputs: [] };
 let patchLibrary = null;
+let sessionLibrary = null;
+let savedSessionSummaries = [];
+let pendingSessionNameCheck = null;
 let patchSlots = patchSession.slots;
 let activePatchSlotId = patchSession.activeSlotId;
 const patchHistories = new Map();
+let activeSavedPatchRef = null;
 let suppressPatchHistory = false;
 const activeMidiKeyboardPointers = new Map();
 const midiKnobValues = new Map();
 
 syncCounters();
 pruneMidiBindings();
-if (state.selected.id && !nodeById(state.selected.id)) {
-  state.selected = { type: null, id: null };
-}
+state.selected = normalizeStoredSelection(state.selected, state);
 
 function uid(prefix) {
   const next = prefix === "op" ? nodeCounter++ : linkCounter++;
@@ -329,6 +397,10 @@ function patchDataUsesAudioInput(patch) {
   return (patch?.nodes || []).some((node) => node.wave === "audio-input");
 }
 
+function patchDataUsesSamples(patch) {
+  return (patch?.nodes || []).some((node) => node.wave === "sample");
+}
+
 function patchUsesAudioInput() {
   return patchDataUsesAudioInput(state);
 }
@@ -336,6 +408,11 @@ function patchUsesAudioInput() {
 function sessionUsesAudioInput() {
   syncActivePatchSlot();
   return patchSlots.some((slot) => patchDataUsesAudioInput(slot.patch));
+}
+
+function sessionUsesSamples() {
+  syncActivePatchSlot();
+  return patchSlots.some((slot) => patchDataUsesSamples(slot.patch));
 }
 
 function patchSlotUid() {
@@ -347,7 +424,67 @@ function normalizePatchSlot(slot, fallbackPatch = null) {
   const normalized = normalizePatch(slot?.patch || fallbackPatch || normalizeDefaultPatch());
   return {
     id: typeof slot?.id === "string" && slot.id.trim() ? slot.id : patchSlotUid(),
+    active: slot?.active !== false,
+    patchRef: slot?.patchRef || null,
     patch: normalized,
+  };
+}
+
+function defaultSessionName() {
+  return "Untitled Session";
+}
+
+function safeSessionFolderName(name) {
+  return String(name || defaultSessionName())
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96)
+    || defaultSessionName();
+}
+
+function sessionSettingsFromPatch(patch = normalizeDefaultPatch()) {
+  return {
+    sessionId: "",
+    sessionName: defaultSessionName(),
+    audioBackend: loadAudioBackend(),
+    audioInputDeviceId: patch.audioInputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
+    audioOutputDeviceId: patch.audioOutputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
+    linkSignalGradientMeters: Boolean(patch.linkSignalGradientMeters),
+    keyboardStartNote: Number.isFinite(Number(patch.keyboardStartNote))
+      ? clamp(Math.round(Number(patch.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
+      : DEFAULT_KEYBOARD_START_NOTE,
+    keyboardLength: Number.isFinite(Number(patch.keyboardLength))
+      ? clamp(Math.round(Number(patch.keyboardLength)), MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH)
+      : DEFAULT_KEYBOARD_LENGTH,
+  };
+}
+
+function normalizeSessionSettings(source = {}, fallbackPatch = normalizeDefaultPatch()) {
+  const fallback = sessionSettingsFromPatch(fallbackPatch);
+  const sessionName = typeof source.sessionName === "string" && source.sessionName.trim()
+    ? source.sessionName.trim()
+    : fallback.sessionName;
+  return {
+    sessionId: typeof source.sessionId === "string" && source.sessionId.trim() ? source.sessionId : "",
+    sessionName,
+    audioBackend: normalizeAudioBackend(source.audioBackend || fallback.audioBackend),
+    audioInputDeviceId: typeof source.audioInputDeviceId === "string" && source.audioInputDeviceId.trim()
+      ? source.audioInputDeviceId
+      : fallback.audioInputDeviceId,
+    audioOutputDeviceId: typeof source.audioOutputDeviceId === "string" && source.audioOutputDeviceId.trim()
+      ? source.audioOutputDeviceId
+      : fallback.audioOutputDeviceId,
+    linkSignalGradientMeters: source.linkSignalGradientMeters === undefined
+      ? fallback.linkSignalGradientMeters
+      : Boolean(source.linkSignalGradientMeters),
+    keyboardStartNote: Number.isFinite(Number(source.keyboardStartNote))
+      ? clamp(Math.round(Number(source.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
+      : fallback.keyboardStartNote,
+    keyboardLength: Number.isFinite(Number(source.keyboardLength))
+      ? clamp(Math.round(Number(source.keyboardLength)), MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH)
+      : fallback.keyboardLength,
   };
 }
 
@@ -357,7 +494,7 @@ function loadPatchSession() {
     if (!saved) {
       const activePatch = normalizeDefaultPatch();
       const slot = normalizePatchSlot(null, activePatch);
-      return { activePatch, slots: [slot], activeSlotId: slot.id };
+      return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
     }
 
     const parsed = JSON.parse(saved);
@@ -368,22 +505,32 @@ function loadPatchSession() {
         ? parsed.activePatchSlotId
         : safeSlots[0].id;
       const activePatch = clonePatch(safeSlots.find((slot) => slot.id === activeSlotId)?.patch || safeSlots[0].patch);
-      return { activePatch, slots: safeSlots, activeSlotId };
+      return {
+        ...normalizeSessionSettings(parsed, activePatch),
+        activePatch,
+        slots: safeSlots,
+        activeSlotId,
+        recordings: Array.isArray(parsed.recordings) ? parsed.recordings : [],
+        activeBottomPanels: normalizeStoredBottomPanels(parsed.activeBottomPanels),
+        selected: normalizeStoredSelection(parsed.selected, activePatch),
+        selectedRecordingLaneId: parsed.selectedRecordingLaneId || null,
+        selectedRecordingClipId: parsed.selectedRecordingClipId || null,
+      };
     }
 
     const activePatch = normalizePatch(parsed);
     const slot = normalizePatchSlot(null, activePatch);
-    return { activePatch, slots: [slot], activeSlotId: slot.id };
+    return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
   } catch {
     const activePatch = normalizeDefaultPatch();
     const slot = normalizePatchSlot(null, activePatch);
-    return { activePatch, slots: [slot], activeSlotId: slot.id };
+    return { ...sessionSettingsFromPatch(activePatch), activePatch, slots: [slot], activeSlotId: slot.id };
   }
 }
 
 function savePatch() {
   try {
-    const nextPatch = clonePatch(currentPatchData());
+    const nextPatch = patchForSessionStorage(currentPatchData());
     recordPatchHistory(nextPatch);
     syncActivePatchSlot();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(currentPatchSessionData()));
@@ -395,32 +542,127 @@ function savePatch() {
 
 function currentPatchSessionData() {
   return {
-    version: 2,
+    version: 3,
+    sessionId: state.sessionId,
+    sessionName: state.sessionName,
+    audioBackend,
+    audioInputDeviceId: state.audioInputDeviceId,
+    audioOutputDeviceId: state.audioOutputDeviceId,
+    linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
+    keyboardStartNote: state.keyboardStartNote,
+    keyboardLength: state.keyboardLength,
+    recordings: recordingLanes.map(recordingLaneReference),
+    activeBottomPanels: { ...activeBottomPanels },
+    selected: selectionForSessionStorage(state.selected),
+    selectedRecordingLaneId,
+    selectedRecordingClipId,
     activePatchSlotId,
     patchSlots: patchSlots.map((slot) => ({
       id: slot.id,
-      patch: slot.id === activePatchSlotId ? currentPatchData() : slot.patch,
+      active: slot.active !== false,
+      patchRef: slot.patchRef || null,
+      patch: patchForSessionStorage(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
     })),
+  };
+}
+
+function selectionForSessionStorage(selection) {
+  if (!selection?.type) return { type: null, id: null };
+  if (selection.type === "nodes") {
+    return {
+      type: "nodes",
+      ids: Array.isArray(selection.ids) ? selection.ids : [],
+    };
+  }
+  return {
+    type: selection.type,
+    id: selection.id || null,
+  };
+}
+
+function normalizeStoredBottomPanels(panels = {}) {
+  return {
+    timeline: Boolean(panels.timeline),
+    keyboard: Boolean(panels.keyboard),
+    knobs: Boolean(panels.knobs),
+  };
+}
+
+function isSelectionValid(selection, patch = state) {
+  if (!selection?.type) return true;
+  if (selection.type === "patch") return true;
+  if (selection.type === "audio") return true;
+  if (selection.type === "node") return Boolean(nodeByIdInPatch(patch, selection.id));
+  if (selection.type === "link") return Boolean(linkByIdInPatch(patch, selection.id));
+  if (selection.type === "nodes") {
+    return Array.isArray(selection.ids) && selection.ids.some((id) => nodeByIdInPatch(patch, id));
+  }
+  return false;
+}
+
+function normalizeStoredSelection(selection = {}, patch = state) {
+  if (!isSelectionValid(selection, patch)) return { type: null, id: null };
+  if (selection.type === "nodes") {
+    return {
+      type: "nodes",
+      ids: selection.ids.filter((id) => nodeByIdInPatch(patch, id)),
+    };
+  }
+  return selection?.type ? { type: selection.type, id: selection.id || null } : { type: null, id: null };
+}
+
+function patchForSessionStorage(patch) {
+  const {
+    audioInputDeviceId,
+    audioOutputDeviceId,
+    linkSignalGradientMeters,
+    keyboardStartNote,
+    keyboardLength,
+    ...patchData
+  } = patch;
+  return {
+    ...patchData,
+    midiBindings: clonePatch(patch.midiBindings || []),
+    masterEffects: clonePatch(patch.masterEffects || {}),
+    audioOutPosition: patch.audioOutPosition ? { ...patch.audioOutPosition } : patch.audioOutPosition,
+    nodes: (patch.nodes || []).map((node) => ({
+      ...node,
+      quantise: node.quantise ? { ...node.quantise } : node.quantise,
+      customWave: node.customWave ? clonePatch(node.customWave) : node.customWave,
+      sample: node.sample ? sampleGraphMeta(node.sample) : node.sample,
+    })),
+    links: clonePatch(patch.links || []),
   };
 }
 
 function syncActivePatchSlot() {
   const slot = patchSlots.find((item) => item.id === activePatchSlotId);
-  if (slot) slot.patch = clonePatch(currentPatchData());
+  if (slot) slot.patch = runtimePatchSnapshot(currentPatchData());
+}
+
+function runtimePatchSnapshot(patch) {
+  return {
+    ...patch,
+    midiBindings: clonePatch(patch.midiBindings || []),
+    masterEffects: clonePatch(patch.masterEffects || {}),
+    audioOutPosition: patch.audioOutPosition ? { ...patch.audioOutPosition } : patch.audioOutPosition,
+    nodes: (patch.nodes || []).map((node) => ({
+      ...node,
+      quantise: node.quantise ? { ...node.quantise } : node.quantise,
+      customWave: node.customWave ? clonePatch(node.customWave) : node.customWave,
+      sample: node.sample ? { ...node.sample } : node.sample,
+    })),
+    links: clonePatch(patch.links || []),
+  };
 }
 
 function currentPatchData() {
   return {
     patchName: state.patchName,
     maxVoices: state.maxVoices,
-    audioInputDeviceId: state.audioInputDeviceId,
-    audioOutputDeviceId: state.audioOutputDeviceId,
     audioOutPosition: state.audioOutPosition,
-    linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     midiChannel: state.midiChannel,
     midiInputId: state.midiInputId,
-    keyboardStartNote: state.keyboardStartNote,
-    keyboardLength: state.keyboardLength,
     midiBindings: state.midiBindings,
     masterEffects: state.masterEffects,
     nodes: state.nodes,
@@ -434,10 +676,11 @@ function patchHistoryForSlot(slotId = activePatchSlotId) {
     const patch = slotId === activePatchSlotId
       ? currentPatchData()
       : patchSlots.find((slot) => slot.id === slotId)?.patch || normalizeDefaultPatch();
+    const snapshot = patchForSessionStorage(patch);
     history = {
       undo: [],
       redo: [],
-      current: clonePatch(patch),
+      current: clonePatch(snapshot),
     };
     patchHistories.set(slotId, history);
   }
@@ -449,10 +692,11 @@ function patchDataEquals(a, b) {
 }
 
 function resetPatchHistory(slotId, patch) {
+  const snapshot = patchForSessionStorage(patch);
   patchHistories.set(slotId, {
     undo: [],
     redo: [],
-    current: clonePatch(patch),
+    current: clonePatch(snapshot),
   });
   syncHistoryButtons();
 }
@@ -517,10 +761,11 @@ function syncHistoryButtons() {
 
 function initializePatchHistories() {
   for (const slot of patchSlots) {
+    const patch = slot.id === activePatchSlotId ? currentPatchData() : slot.patch;
     patchHistories.set(slot.id, {
       undo: [],
       redo: [],
-      current: clonePatch(slot.id === activePatchSlotId ? currentPatchData() : slot.patch),
+      current: clonePatch(patchForSessionStorage(patch)),
     });
   }
 }
@@ -667,6 +912,85 @@ function nodeParameterDefinitions(node) {
         node.audioInputGain = value;
       },
     }] : []),
+    ...(node.wave === "sample" ? [{
+      id: "sample.mode",
+      label: "Sample mode",
+      type: "choice",
+      options: [
+        { value: "one-shot", label: "One-shot" },
+        { value: "loop", label: "Loop" },
+        { value: "ping-pong", label: "Ping-pong" },
+      ],
+      get: () => sampleGraphMeta(node.sample).mode,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { mode: value });
+      },
+    },
+    {
+      id: "sample.start",
+      label: "Sample start",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).start,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { start: value });
+      },
+    },
+    {
+      id: "sample.end",
+      label: "Sample end",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).end,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { end: value });
+      },
+    },
+    {
+      id: "sample.stretch",
+      label: "Stretch",
+      type: "number",
+      min: 0.1,
+      max: 10,
+      get: () => sampleGraphMeta(node.sample).stretch,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { stretch: value });
+      },
+    },
+    {
+      id: "sample.cycleLength",
+      label: "Cycle length",
+      type: "number",
+      min: 1,
+      max: 16384,
+      get: () => sampleGraphMeta(node.sample).cycleLength,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { cycleLength: value });
+      },
+    },
+    {
+      id: "sample.overlapRatio",
+      label: "Overlap ratio",
+      type: "number",
+      min: 0,
+      max: 1,
+      get: () => sampleGraphMeta(node.sample).overlapRatio,
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { overlapRatio: value });
+      },
+    },
+    {
+      id: "sample.originalPitch",
+      label: "Original pitch",
+      type: "choice",
+      options: midiNoteOptions().map(({ value, label }) => ({ value: String(value), label })),
+      get: () => String(sampleGraphMeta(node.sample).originalPitch),
+      set: (value) => {
+        node.sample = updateSampleMetadata(node.sample, { originalPitch: Number(value) });
+      },
+    }] : []),
   ];
 
   return definitions;
@@ -675,7 +999,6 @@ function nodeParameterDefinitions(node) {
 function linkParameterDefinitions(link, patch = state) {
   const targetNameLabel = targetName(link.to, new Set(), patch);
   const modulationTargets = modulationTargetsForLink(link, patch);
-  const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
   const definitions = [
     ...(modulationTargets.length ? [{
       id: "modulationTarget",
@@ -688,7 +1011,6 @@ function linkParameterDefinitions(link, patch = state) {
       get: () => link.modulationTarget,
       set: (value) => {
         link.modulationTarget = value;
-        if (value === "mix") link.amount = clamp(link.amount, 0, 1);
       },
     }] : []),
     {
@@ -696,7 +1018,7 @@ function linkParameterDefinitions(link, patch = state) {
       label: "Amplitude",
       type: "number",
       min: 0,
-      max: amountMax,
+      max: LINK_AMOUNT_INPUT_MAX,
       get: () => link.amount,
       set: (value) => {
         link.amount = value;
@@ -1187,6 +1509,14 @@ function updatePanelForMidiNumber(smoothing, value) {
     if (node && smoothing.parameter === "audioInputGain") {
       setPanelNumberPair("audioInputGain", "audioInputGainRange", value);
     }
+    if (node && smoothing.parameter === "sample.start") {
+      setPanelNumberPair("sampleStart", "sampleStartRange", value);
+      renderSampleWaveformPreview(node);
+    }
+    if (node && smoothing.parameter === "sample.end") {
+      setPanelNumberPair("sampleEnd", "sampleEndRange", value);
+      renderSampleWaveformPreview(node);
+    }
     return;
   }
 
@@ -1385,6 +1715,7 @@ function selectNodes(ids) {
     state.selected = { type: "nodes", ids: uniqueIds };
   }
   render();
+  savePatch();
 }
 
 function addNodeToSelection(id) {
@@ -1603,17 +1934,33 @@ function audioOutPosition() {
   return state.audioOutPosition;
 }
 
-function bezierPath(from, to) {
+function bezierControlPoints(from, to, offset = 0) {
   const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
-  return `M ${from.x} ${from.y} C ${from.x} ${from.y + distance}, ${to.x} ${to.y - distance}, ${to.x} ${to.y}`;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const normal = { x: -dy / length, y: dx / length };
+  return {
+    p0: from,
+    p1: {
+      x: from.x + normal.x * offset,
+      y: from.y + distance + normal.y * offset,
+    },
+    p2: {
+      x: to.x + normal.x * offset,
+      y: to.y - distance + normal.y * offset,
+    },
+    p3: to,
+  };
 }
 
-function bezierPoint(from, to, t = 0.5) {
-  const distance = Math.max(90, Math.abs(to.y - from.y) * 0.7 + Math.abs(to.x - from.x) * 0.22);
-  const p0 = from;
-  const p1 = { x: from.x, y: from.y + distance };
-  const p2 = { x: to.x, y: to.y - distance };
-  const p3 = to;
+function bezierPath(from, to, offset = 0) {
+  const { p1, p2 } = bezierControlPoints(from, to, offset);
+  return `M ${from.x} ${from.y} C ${p1.x} ${p1.y}, ${p2.x} ${p2.y}, ${to.x} ${to.y}`;
+}
+
+function bezierPoint(from, to, t = 0.5, offset = 0) {
+  const { p0, p1, p2, p3 } = bezierControlPoints(from, to, offset);
   const u = 1 - t;
   return {
     x: u ** 3 * p0.x + 3 * u ** 2 * t * p1.x + 3 * u * t ** 2 * p2.x + t ** 3 * p3.x,
@@ -1621,16 +1968,27 @@ function bezierPoint(from, to, t = 0.5) {
   };
 }
 
-function feedbackPath(nodeId) {
-  const from = nodeOutputPoint(nodeId);
-  const to = nodeInputPoint(nodeId);
-  const loopWidth = 118;
-  return `M ${from.x} ${from.y} C ${from.x + loopWidth} ${from.y + 54}, ${to.x + loopWidth} ${to.y - 54}, ${to.x} ${to.y}`;
+function parallelLinkOffset(link) {
+  if (!link) return 0;
+  const siblings = state.links.filter((item) => item.from === link.from && item.to === link.to);
+  if (siblings.length <= 1) return 0;
+  const index = siblings.findIndex((item) => item.id === link.id);
+  if (index === -1) return 0;
+  return (index - (siblings.length - 1) / 2) * 18;
 }
 
-function feedbackMidpoint(nodeId) {
+function feedbackPath(nodeId, offset = 0) {
+  const from = nodeOutputPoint(nodeId);
+  const to = nodeInputPoint(nodeId);
+  const loopWidth = 118 + Math.abs(offset) * 1.45;
+  const side = offset < 0 ? -1 : 1;
+  return `M ${from.x} ${from.y} C ${from.x + loopWidth * side} ${from.y + 54}, ${to.x + loopWidth * side} ${to.y - 54}, ${to.x} ${to.y}`;
+}
+
+function feedbackMidpoint(nodeId, offset = 0) {
   const node = nodeById(nodeId);
-  return { x: node.x + 92, y: node.y };
+  const side = offset < 0 ? -1 : 1;
+  return { x: node.x + (92 + Math.abs(offset) * 1.05) * side, y: node.y };
 }
 
 function linkEndpointPoint(to, visited = new Set(), context = null) {
@@ -1653,8 +2011,9 @@ function linkInputPoint(id, visited = new Set(), context = null) {
   visited.delete(id);
   if (!to) return null;
 
-  if (link.from === link.to) return feedbackMidpoint(link.from);
-  return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T);
+  const offset = parallelLinkOffset(link);
+  if (link.from === link.to) return feedbackMidpoint(link.from, offset);
+  return bezierPoint(nodeOutputPoint(link.from), to, LINK_INPUT_T, offset);
 }
 
 function linkGeometry(link, visited = new Set(), context = null) {
@@ -1665,14 +2024,15 @@ function linkGeometry(link, visited = new Set(), context = null) {
   visited.delete(link.id);
   if (!to) return null;
 
-  const path = link.from === link.to ? feedbackPath(link.from) : bezierPath(from, to);
-  const midpoint = link.from === link.to ? feedbackMidpoint(link.from) : bezierPoint(from, to, LINK_INPUT_T);
+  const offset = parallelLinkOffset(link);
+  const path = link.from === link.to ? feedbackPath(link.from, offset) : bezierPath(from, to, offset);
+  const midpoint = link.from === link.to ? feedbackMidpoint(link.from, offset) : bezierPoint(from, to, LINK_INPUT_T, offset);
   return { from, to, path, midpoint };
 }
 
 function graphPayload(patch = state) {
   return {
-    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave }) => ({
+    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave, sample }) => ({
       id,
       wave,
       frequencyMode,
@@ -1682,6 +2042,7 @@ function graphPayload(patch = state) {
       speed,
       audioInputGain,
       customWave: normalizeCustomWave(customWave),
+      sample: sampleGraphMeta(sample),
     })),
     links: patch.links.map((link) => ({
       id: link.id,
@@ -1705,6 +2066,52 @@ function graphPayload(patch = state) {
   };
 }
 
+function sampleGraphMeta(sample) {
+  const normalized = normalizeSample({ ...sample, data: [] });
+  return {
+    ...normalized,
+    data: [],
+  };
+}
+
+function updateSampleMetadata(sample, updates = {}) {
+  const data = sample?.data || [];
+  return {
+    ...sample,
+    ...sampleGraphMeta({ ...sample, ...updates }),
+    data,
+  };
+}
+
+function replaceSampleAudioPreservingMetadata(currentSample, nextSample) {
+  const metadata = sampleGraphMeta(currentSample);
+  return normalizeSample({
+    ...nextSample,
+    mode: metadata.mode,
+    start: metadata.start,
+    end: metadata.end,
+    stretch: metadata.stretch,
+    cycleLength: metadata.cycleLength,
+    overlapRatio: metadata.overlapRatio,
+    originalPitch: metadata.originalPitch,
+    data: nextSample?.data || [],
+  });
+}
+
+function sampleDataSignature(sample) {
+  const data = sample?.data;
+  const length = data?.length || 0;
+  if (!length) return "";
+  return [
+    sample.storageKey || "",
+    sample.path || "",
+    sample.fileName || "",
+    sample.name || "",
+    sample.sampleRate || 0,
+    length,
+  ].join(":");
+}
+
 function activeSynthSlot() {
   return synthSlots.get(activePatchSlotId) || null;
 }
@@ -1716,6 +2123,41 @@ function postGraph(slotId = activePatchSlotId, patch = state) {
     type: "graph",
     payload: graphPayload(patch),
   });
+  syncSampleDataToSlot(slot, patch);
+}
+
+function syncSampleDataToSlot(slot, patch = state) {
+  if (!slot?.node || !patch) return;
+  if (!slot.sampleDataSignatures) slot.sampleDataSignatures = new Map();
+  const liveNodeIds = new Set();
+  for (const node of patch.nodes || []) {
+    liveNodeIds.add(node.id);
+    if (node.wave !== "sample") continue;
+    const sample = node.sample || {};
+    const signature = sampleDataSignature(sample);
+    if (!signature || slot.sampleDataSignatures.get(node.id) === signature) continue;
+    const source = sample.data;
+    const data = source instanceof Float32Array
+      ? new Float32Array(source)
+      : Float32Array.from(Array.isArray(source) ? source : [], (value) => clamp(Number(value) || 0, -1, 1));
+    if (!data.length) continue;
+    slot.node.port.postMessage({
+      type: "sampleData",
+      payload: {
+        nodeId: node.id,
+        name: sample.name || "",
+        sampleRate: Number.isFinite(Number(sample.sampleRate)) ? Math.max(1, Math.round(Number(sample.sampleRate))) : audioContext?.sampleRate || 44100,
+        storageKey: sample.storageKey || "",
+        fileName: sample.fileName || "",
+        path: sample.path || "",
+        data,
+      },
+    }, [data.buffer]);
+    slot.sampleDataSignatures.set(node.id, signature);
+  }
+  for (const nodeId of slot.sampleDataSignatures.keys()) {
+    if (!liveNodeIds.has(nodeId)) slot.sampleDataSignatures.delete(nodeId);
+  }
 }
 
 function sendGraph({ immediate = false } = {}) {
@@ -1804,11 +2246,23 @@ function disconnectOutputRoutes() {
   }
 }
 
+function disconnectRecordingPlaybackRoute() {
+  if (!recordingPlaybackGainNode) return;
+  try {
+    recordingPlaybackGainNode.disconnect();
+  } catch {
+    // Disconnect can throw if no route exists yet.
+  }
+}
+
 function connectOutputRoute(destination) {
   if (!outputGainNode || !destination) return;
   disconnectOutputRoutes();
+  disconnectRecordingPlaybackRoute();
   outputGainNode.connect(destination);
   if (recorderDestination) outputGainNode.connect(recorderDestination);
+  if (recordingPlaybackGainNode) recordingPlaybackGainNode.connect(destination);
+  if (recordingScrubGainNode) recordingScrubGainNode.connect(destination);
 }
 
 function stopOutputSinkElement() {
@@ -1887,6 +2341,15 @@ function sendLinkParam(id, parameter, value) {
   scheduleLinkParamGraphSync();
 }
 
+function sendNodeParam(id, parameter, value) {
+  const slot = activeSynthSlot();
+  if (!slot?.node) return;
+  slot.node.port.postMessage({
+    type: "nodeParam",
+    payload: { id, parameter, value },
+  });
+}
+
 function panicSynths(slotId = null) {
   if (slotId) {
     synthSlots.get(slotId)?.node.port.postMessage({ type: "panic" });
@@ -1897,11 +2360,28 @@ function panicSynths(slotId = null) {
   }
 }
 
+function syncSynthMuteState(slotId = null) {
+  const message = { type: "setMuted", payload: { muted: audioMuted } };
+  if (slotId) {
+    synthSlots.get(slotId)?.node.port.postMessage(message);
+    return;
+  }
+  for (const slot of synthSlots.values()) {
+    slot.node.port.postMessage(message);
+  }
+}
+
+function clearLinkMeterLevels() {
+  linkMeterLevels.clear();
+  scheduleLinkMeterPaint();
+}
+
 function scheduleLinkMeterPaint() {
   if (pendingLinkMeterFrame) return;
   pendingLinkMeterFrame = requestAnimationFrame(() => {
     pendingLinkMeterFrame = null;
     updateSelectedLinkMeter();
+    updateSelectedNodeMeter();
     if (state.linkSignalGradientMeters) updateWireSignalMeters();
   });
 }
@@ -1947,6 +2427,20 @@ function updateSelectedLinkMeter() {
   if (envelopeFill) envelopeFill.style.transform = `scaleY(${clamp(levels.envelope || 0, 0, 1)})`;
 }
 
+function nodeOutputMeterLevel(nodeId) {
+  return state.links
+    .filter((link) => link.from === nodeId)
+    .reduce((level, link) => Math.max(level, linkMeterLevels.get(link.id)?.output || 0), 0);
+}
+
+function updateSelectedNodeMeter() {
+  const meter = panel.querySelector("[data-node-meter]");
+  if (!meter) return;
+  const level = nodeOutputMeterLevel(meter.dataset.nodeMeter);
+  const outputFill = meter.querySelector("[data-link-meter-fill='output']");
+  if (outputFill) outputFill.style.transform = `scaleY(${clamp(level, 0, 1)})`;
+}
+
 function wireMeterGradientId(linkId) {
   return `wire-signal-meter-${linkId}`;
 }
@@ -1972,9 +2466,10 @@ function updateWireSignalMeters() {
 }
 
 function syncOutputMute() {
-  if (!outputGainNode) return;
   const value = audioMuted ? 0 : 1;
-  outputGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (outputGainNode) outputGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (recordingPlaybackGainNode) recordingPlaybackGainNode.gain.setTargetAtTime(value, audioContext?.currentTime || 0, 0.01);
+  if (recordingScrubGainNode) recordingScrubGainNode.gain.setTargetAtTime(value * 0.5, audioContext?.currentTime || 0, 0.01);
 }
 
 function setAudioStatusLabel(text) {
@@ -2100,9 +2595,18 @@ async function setupAudio() {
   }
 
   await resumeAudioContext();
+  syncBackendForPatch();
 
   if (!outputGainNode) {
     outputGainNode = audioContext.createGain();
+    syncOutputMute();
+  }
+  if (!recordingPlaybackGainNode) {
+    recordingPlaybackGainNode = audioContext.createGain();
+    syncOutputMute();
+  }
+  if (!recordingScrubGainNode) {
+    recordingScrubGainNode = audioContext.createGain();
     syncOutputMute();
   }
 
@@ -2139,10 +2643,15 @@ async function setupAudio() {
   updateAudioStatus({ inputBlocked });
 }
 
+function syncBackendForPatch() {
+  // Samples are supported by both audio backends.
+}
+
 async function ensureSynthSlots() {
   syncActivePatchSlot();
   for (const slot of patchSlots) {
     await ensureSynthSlot(slot);
+    syncSynthSlotActive(slot.id);
   }
 
   for (const [slotId, synthSlot] of synthSlots) {
@@ -2163,6 +2672,7 @@ async function ensureSynthSlot(slot) {
   const existing = synthSlots.get(slot.id);
   if (existing) {
     postGraph(slot.id, slot.patch);
+    syncSynthSlotActive(slot.id);
     return existing;
   }
 
@@ -2175,18 +2685,39 @@ async function ensureSynthSlot(slot) {
     outputChannelCount: [2],
     processorOptions,
   });
-  const synthSlot = { id: slot.id, node, status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true } };
+  const synthSlot = {
+    id: slot.id,
+    node,
+    sampleDataSignatures: new Map(),
+    status: audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true },
+  };
   synthSlots.set(slot.id, synthSlot);
-  node.connect(outputGainNode);
   node.port.onmessage = (event) => handleWorkletMessageForSlot(slot.id, event);
   if (audioInputSource) audioInputSource.connect(node);
   postGraph(slot.id, slot.patch);
+  syncSynthMuteState(slot.id);
+  syncSynthSlotActive(slot.id);
   if (slot.id === activePatchSlotId) {
     synthNode = node;
     audioBackendStatus = synthSlot.status;
     updateAudioStatus();
   }
   return synthSlot;
+}
+
+function syncSynthSlotActive(slotId) {
+  const synthSlot = synthSlots.get(slotId);
+  if (!synthSlot || !outputGainNode) return;
+  const slot = patchSlots.find((item) => item.id === slotId);
+  const shouldConnect = slot?.active !== false;
+  try {
+    synthSlot.node.disconnect(outputGainNode);
+  } catch {
+    // The node may not currently be connected to the output.
+  }
+  if (shouldConnect) {
+    synthSlot.node.connect(outputGainNode);
+  }
 }
 
 async function ensureAudioInput() {
@@ -2300,13 +2831,13 @@ function setRecordingButtonState(isRecording) {
   recordButton.title = isRecording ? "Stop recording" : "Start recording";
 }
 
-function showRecordingSavedState() {
+function showRecordingSavedState(caption = "Saved", label = "Recording saved") {
   clearTimeout(recordingSavedTimer);
   recordButton.classList.remove("recording");
   recordButton.classList.add("saved");
-  if (recordButtonCaption) recordButtonCaption.textContent = "Saved";
-  recordButton.setAttribute("aria-label", "Recording saved");
-  recordButton.title = "Recording saved";
+  if (recordButtonCaption) recordButtonCaption.textContent = caption;
+  recordButton.setAttribute("aria-label", label);
+  recordButton.title = label;
   recordingSavedTimer = window.setTimeout(() => {
     recordButton.classList.remove("saved");
     if (recordButtonCaption) recordButtonCaption.textContent = "Rec";
@@ -2316,32 +2847,1094 @@ function showRecordingSavedState() {
   }, 1200);
 }
 
-async function saveRecordingToServer(wavBlob) {
+function recordingSequenceDuration() {
+  const laneEnd = recordingLanes.reduce((max, lane) => Math.max(max, recordingLaneEnd(lane)), 0);
+  const liveEnd = recordingIsActive()
+    ? recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt)
+    : 0;
+  return Math.max(RECORDING_TIMELINE_MIN_SECONDS, laneEnd, liveEnd);
+}
+
+function recordingIsActive() {
+  return recordingSessions.some((session) => session.recorder?.state === "recording");
+}
+
+function currentRecordingPlayheadTime() {
+  if (recordingIsActive()) {
+    return recordingLaneStartedAt + Math.max(0, audioContext.currentTime - recordingTimelineStartedAt);
+  }
+  if (recordingTransportPlaying && audioContext) {
+    return recordingTransportStartTime + Math.max(0, audioContext.currentTime - recordingTransportStartedAt);
+  }
+  return recordingPlayheadTime;
+}
+
+function setRecordingPlayheadTime(time, { render = false } = {}) {
+  recordingPlayheadTime = clamp(Number(time) || 0, 0, recordingSequenceDuration());
+  if (render && activeBottomPanels.timeline) {
+    renderRecordingTimelinePanel();
+  } else {
+    updateRecordingTimelinePlayhead();
+  }
+}
+
+function recordingTimelinePointerRect(element) {
+  const trackArea = element?.closest?.(".recording-track-area") || recordingTimelinePanel?.querySelector(".recording-track-area");
+  const ruler = trackArea?.querySelector("[data-recording-timeline-scale]");
+  const rect = (ruler || trackArea || element)?.getBoundingClientRect?.();
+  return rect && rect.width > 0 ? rect : null;
+}
+
+function formatTimelineTime(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  const wholeSeconds = Math.floor(total % 60);
+  const tenths = Math.floor((total - Math.floor(total)) * 10);
+  return `${minutes}:${String(wholeSeconds).padStart(2, "0")}.${tenths}`;
+}
+
+function formatRulerTime(seconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(totalSeconds / 60);
+  const wholeSeconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}`;
+}
+
+function recordingRulerStep(duration, targetTicks) {
+  const rawStep = Math.max(0.5, duration / Math.max(1, targetTicks));
+  return RECORDING_RULER_STEPS.find((step) => step >= rawStep) || RECORDING_RULER_STEPS.at(-1);
+}
+
+function recordingRulerTicks(duration) {
+  const minorStep = recordingRulerStep(duration, RECORDING_RULER_MINOR_TARGET_TICKS);
+  const labelStep = Math.max(minorStep, recordingRulerStep(duration, RECORDING_RULER_LABEL_TARGET_TICKS));
+  const ticks = [];
+  const tickCount = Math.ceil(duration / minorStep);
+  for (let index = 0; index <= tickCount; index += 1) {
+    const time = Math.min(duration, index * minorStep);
+    const labeled = Math.abs(time / labelStep - Math.round(time / labelStep)) < 0.001 || index === 0;
+    ticks.push({
+      time,
+      left: time / duration * 100,
+      labeled,
+      major: labeled || Math.abs(time / labelStep * 2 - Math.round(time / labelStep * 2)) < 0.001,
+    });
+  }
+  return ticks;
+}
+
+function recordingTimelineScale() {
+  return recordingTimelinePanel?.querySelector("[data-recording-timeline-scale]");
+}
+
+function updateRecordingTimelinePlayhead() {
+  if (!activeBottomPanels.timeline || !recordingTimelinePanel) return;
+  const nextDuration = recordingSequenceDuration();
+  if (recordingIsActive() && nextDuration > recordingRenderedDuration + 0.25) {
+    renderRecordingTimelinePanel();
+    return;
+  }
+  const scale = recordingTimelineScale();
+  const playhead = recordingTimelinePanel.querySelector("[data-recording-playhead]");
+  const timeLabel = recordingTimelinePanel.querySelector("[data-recording-playhead-time]");
+  const liveClips = recordingTimelinePanel.querySelectorAll("[data-recording-live-clip]");
+  const snipButton = recordingTimelinePanel.querySelector("#snipRecordingClipButton");
+  if (!scale || !playhead) return;
+  const duration = nextDuration;
+  const playheadTime = clamp(currentRecordingPlayheadTime(), 0, duration);
+  recordingPlayheadTime = playheadTime;
+  const percent = duration > 0 ? playheadTime / duration * 100 : 0;
+  playhead.style.left = `${percent}%`;
+  if (timeLabel) timeLabel.textContent = formatTimelineTime(playheadTime);
+  if (snipButton) snipButton.disabled = !selectedRecordingSnipTarget();
+  if (liveClips.length) {
+    const liveWidth = `${Math.max(1.5, (Math.max(0, playheadTime - recordingLaneStartedAt) / duration * 100))}%`;
+    for (const liveClip of liveClips) liveClip.style.width = liveWidth;
+  }
+}
+
+function scheduleRecordingTimelineFrame() {
+  if (recordingTimelineFrame !== null) return;
+  recordingTimelineFrame = window.requestAnimationFrame(() => {
+    recordingTimelineFrame = null;
+    updateRecordingTimelinePlayhead();
+    if (recordingTransportPlaying && recordingPlayheadTime >= recordingSequenceDuration()) {
+      stopRecordingTransport({ resetPlayhead: false });
+      return;
+    }
+    if (recordingIsActive() || recordingTransportPlaying) scheduleRecordingTimelineFrame();
+  });
+}
+
+function normalizeRecordingLaneVolume(value) {
+  return clamp(Number.isFinite(Number(value)) ? Number(value) : 1, 0, 2);
+}
+
+function recordingClipId(laneId, index = 1) {
+  return `${laneId}-clip-${index}`;
+}
+
+function normalizeStoredRecordingLanes(lanes = []) {
+  if (!Array.isArray(lanes)) return [];
+  return lanes.map((lane, index) => {
+    const laneId = lane?.id || `recording-lane-${index + 1}`;
+    const duration = Math.max(0, Number(lane?.duration) || 0);
+    const startTime = Math.max(0, Number(lane?.startTime) || 0);
+    const clips = Array.isArray(lane?.clips) && lane.clips.length
+      ? lane.clips.map((clip, clipIndex) => ({
+          id: clip.id || recordingClipId(laneId, clipIndex + 1),
+          startTime: Math.max(0, Number(clip.startTime) || 0),
+          duration: Math.max(0, Number(clip.duration) || 0),
+          offset: Math.max(0, Number(clip.offset) || 0),
+        }))
+      : [{
+          id: recordingClipId(laneId),
+          startTime,
+          duration,
+          offset: 0,
+        }];
+    return syncRecordingLaneBounds({
+      ...lane,
+      id: laneId,
+      name: lane?.name || "",
+      patchSlotId: lane?.patchSlotId || "",
+      patchName: lane?.patchName || "",
+      startTime,
+      duration,
+      volume: normalizeRecordingLaneVolume(lane?.volume),
+      buffer: null,
+      waveform: Array.isArray(lane?.waveform) ? lane.waveform : [],
+      createdAt: lane?.createdAt ? new Date(lane.createdAt) : new Date(),
+      path: lane?.path || "",
+      fileName: lane?.fileName || "",
+      clips,
+    });
+  });
+}
+
+function nextRecordingLaneCounter(lanes = []) {
+  return lanes.reduce((next, lane) => {
+    const match = /^recording-lane-(\d+)$/.exec(lane.id || "");
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
+function normalizeStoredRecordingSelection(lanes = [], laneId = null, clipId = null) {
+  const lane = lanes.find((item) => item.id === laneId);
+  if (!lane) return { laneId: null, clipId: null };
+  const clips = recordingLaneClips(lane);
+  const clip = clips.find((item) => item.id === clipId) || clips[0] || null;
+  return { laneId: lane.id, clipId: clip?.id || null };
+}
+
+function recordingLaneClips(lane) {
+  if (!lane) return [];
+  const clips = Array.isArray(lane.clips) && lane.clips.length
+    ? lane.clips
+    : [{
+        id: recordingClipId(lane.id),
+        startTime: Number(lane.startTime) || 0,
+        duration: Number(lane.duration) || lane.buffer?.duration || 0,
+        offset: 0,
+      }];
+  return clips
+    .map((clip, index) => ({
+      id: clip.id || recordingClipId(lane.id, index + 1),
+      startTime: Math.max(0, Number(clip.startTime) || 0),
+      duration: Math.max(0, Number(clip.duration) || 0),
+      offset: Math.max(0, Number(clip.offset) || 0),
+    }))
+    .filter((clip) => clip.duration > 0);
+}
+
+function syncRecordingLaneBounds(lane) {
+  const clips = recordingLaneClips(lane);
+  if (!clips.length) {
+    lane.startTime = 0;
+    lane.duration = 0;
+    lane.clips = [];
+    return lane;
+  }
+  const startTime = Math.min(...clips.map((clip) => clip.startTime));
+  const endTime = Math.max(...clips.map((clip) => clip.startTime + clip.duration));
+  lane.startTime = startTime;
+  lane.duration = Math.max(0, endTime - startTime);
+  lane.volume = normalizeRecordingLaneVolume(lane.volume);
+  lane.clips = clips;
+  return lane;
+}
+
+function recordingLaneEnd(lane) {
+  const clips = recordingLaneClips(lane);
+  return clips.reduce((max, clip) => Math.max(max, clip.startTime + clip.duration), 0);
+}
+
+function selectedRecordingClip() {
+  const lane = selectedRecordingLane();
+  if (!lane) return null;
+  const clips = recordingLaneClips(lane);
+  return clips.find((clip) => clip.id === selectedRecordingClipId) || clips[0] || null;
+}
+
+function recordingClipAtTime(lane, time, { includeEdges = true } = {}) {
+  const epsilon = 0.0005;
+  return recordingLaneClips(lane).find((clip) => {
+    const start = clip.startTime;
+    const end = clip.startTime + clip.duration;
+    return includeEdges
+      ? time >= start - epsilon && time <= end + epsilon
+      : time > start + epsilon && time < end - epsilon;
+  }) || null;
+}
+
+function selectedRecordingSnipTarget() {
+  const lane = selectedRecordingLane();
+  if (!lane) return null;
+  const playheadTime = currentRecordingPlayheadTime();
+  const selectedClip = selectedRecordingClip();
+  if (selectedClip) {
+    const start = selectedClip.startTime;
+    const end = selectedClip.startTime + selectedClip.duration;
+    if (playheadTime > start + 0.0005 && playheadTime < end - 0.0005) return selectedClip;
+  }
+  return recordingClipAtTime(lane, playheadTime, { includeEdges: false });
+}
+
+function recordingClipWaveform(lane, clip) {
+  const waveform = lane.waveform || [];
+  const sourceDuration = Math.max(lane.buffer?.duration || 0, ...recordingLaneClips(lane).map((item) => item.offset + item.duration));
+  if (!waveform.length || !clip || sourceDuration <= 0) return waveform;
+  const start = clamp(clip.offset / sourceDuration, 0, 1);
+  const end = clamp((clip.offset + clip.duration) / sourceDuration, start, 1);
+  const first = Math.floor(start * waveform.length);
+  const last = Math.max(first + 1, Math.ceil(end * waveform.length));
+  return waveform.slice(first, last);
+}
+
+function selectedRecordingLane() {
+  return recordingLanes.find((lane) => lane.id === selectedRecordingLaneId) || null;
+}
+
+function recordingLaneWaveform(buffer) {
+  if (!buffer?.length) return [];
+  const points = [];
+  const length = buffer.length;
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+  for (let index = 0; index < RECORDING_WAVEFORM_POINTS; index += 1) {
+    const start = Math.floor(index / RECORDING_WAVEFORM_POINTS * length);
+    const end = Math.max(start + 1, Math.floor((index + 1) / RECORDING_WAVEFORM_POINTS * length));
+    let peak = 0;
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      let sample = 0;
+      for (const channel of channels) sample += Math.abs(channel[sampleIndex] || 0);
+      peak = Math.max(peak, sample / Math.max(1, channels.length));
+    }
+    points.push(clamp(peak, 0, 1));
+  }
+  return points;
+}
+
+function recordingWaveformSvg(source) {
+  const waveform = Array.isArray(source) ? source : source?.waveform || [];
+  if (!waveform.length) return "";
+  const width = 100;
+  const height = 28;
+  const center = height / 2;
+  const peakCeiling = Math.max(...waveform);
+  const visualScale = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+    ? Math.max(peakCeiling, RECORDING_WAVEFORM_MIN_VISUAL_PEAK)
+    : 1;
+  const step = width / Math.max(1, waveform.length - 1);
+  const upper = waveform.map((peak, index) => {
+    const x = index * step;
+    const displayPeak = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+      ? clamp(Math.pow(clamp(peak / visualScale, 0, 1), 0.72), 0, 1)
+      : 0;
+    const y = center - Math.max(1, displayPeak * center * 0.92);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  const lower = waveform.slice().reverse().map((peak, reverseIndex) => {
+    const index = waveform.length - 1 - reverseIndex;
+    const x = index * step;
+    const displayPeak = peakCeiling > RECORDING_WAVEFORM_SILENCE_FLOOR
+      ? clamp(Math.pow(clamp(peak / visualScale, 0, 1), 0.72), 0, 1)
+      : 0;
+    const y = center + Math.max(1, displayPeak * center * 0.92);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  return `
+    <svg class="recording-waveform" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <polygon points="${upper.concat(lower).join(" ")}"></polygon>
+    </svg>
+  `;
+}
+
+function renderRecordingTimelinePanel() {
+  if (!recordingTimelinePanel) return;
+  const duration = recordingSequenceDuration();
+  recordingRenderedDuration = duration;
+  const selectedLane = selectedRecordingLane();
+  const selectedClip = selectedRecordingClip();
+  const canSnipSelectedRecording = Boolean(selectedRecordingSnipTarget());
+  const rulerTicks = recordingRulerTicks(duration);
+  const status = recordingCountdownActive
+    ? `Recording in ${Math.max(1, RECORDING_COUNTDOWN_BEATS - recordingCountdownBeat + 1)}`
+    : recordingIsActive()
+      ? "Recording"
+      : "";
+
+  recordingTimelinePanel.innerHTML = `
+    <div class="recording-timeline">
+      <div class="recording-track-area">
+        <div class="recording-ruler" data-recording-timeline-scale>
+          ${rulerTicks.map((tick) => `
+            <span class="recording-ruler-tick ${tick.major ? "is-major" : ""}" style="left: ${tick.left}%">
+              ${tick.labeled ? `<span>${formatRulerTime(tick.time)}</span>` : ""}
+            </span>
+          `).join("")}
+          <span class="recording-playhead" data-recording-playhead>
+            <span data-recording-playhead-time>${formatTimelineTime(currentRecordingPlayheadTime())}</span>
+          </span>
+        </div>
+        <div class="recording-lanes">
+          ${recordingLanes.length ? recordingLanes.map((lane, index) => {
+            syncRecordingLaneBounds(lane);
+            const clips = recordingLaneClips(lane);
+            return `
+              <button class="recording-lane ${lane.id === selectedRecordingLaneId ? "is-selected" : ""}" type="button" data-recording-lane-id="${escapeHtml(lane.id)}">
+                <span class="recording-lane-label">${escapeHtml(lane.name || `Lane ${index + 1}`)}</span>
+                <span class="recording-lane-clip-area">
+                  ${clips.map((clip) => {
+                    const left = clip.startTime / duration * 100;
+                    const width = Math.max(1.5, clip.duration / duration * 100);
+                    const isSelectedClip = lane.id === selectedRecordingLaneId && clip.id === selectedClip?.id;
+                    return `
+                      <span class="recording-lane-clip ${isSelectedClip ? "is-selected" : ""}" data-recording-clip-id="${escapeHtml(clip.id)}" style="left: ${left}%; width: ${width}%">
+                        ${recordingWaveformSvg(recordingClipWaveform(lane, clip))}
+                        <span class="recording-clip-duration">${formatTimelineTime(clip.duration)}</span>
+                      </span>
+                    `;
+                  }).join("")}
+                </span>
+              </button>
+            `;
+          }).join("") : recordingIsActive() ? "" : `
+            <div class="recording-lane recording-lane-empty">
+              <span>Press Rec to capture a lane</span>
+            </div>
+          `}
+          ${recordingIsActive() ? recordingSessions.map((session) => `
+            <div class="recording-lane is-recording">
+              <span class="recording-lane-label">${escapeHtml(previewRecordingLaneName(session))}</span>
+              <span class="recording-lane-clip-area">
+                <span class="recording-lane-clip is-live" data-recording-live-clip style="left: ${(recordingLaneStartedAt / duration * 100).toFixed(3)}%; width: ${Math.max(1.5, ((currentRecordingPlayheadTime() - recordingLaneStartedAt) / duration * 100)).toFixed(3)}%">
+                  <span class="recording-clip-duration">Live</span>
+                </span>
+              </span>
+            </div>
+          `).join("") : ""}
+        </div>
+      </div>
+      <div class="recording-side">
+        ${selectedLane ? `
+          <div class="field recording-lane-name-field">
+            <label for="recordingLaneName">Lane name</label>
+            <input id="recordingLaneName" type="text" value="${escapeHtml(selectedLane.name || "")}" autocomplete="off">
+          </div>
+          <div class="field recording-lane-volume-field">
+            <label for="recordingLaneVolume">Volume</label>
+            <input id="recordingLaneVolume" type="range" min="0" max="2" step="0.01" value="${normalizeRecordingLaneVolume(selectedLane.volume)}">
+          </div>
+          <div class="recording-lane-actions">
+            <button class="icon-button" id="snipRecordingClipButton" type="button" aria-label="Snip at playhead" title="Snip at playhead" ${canSnipSelectedRecording ? "" : "disabled"}>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="6" cy="7" r="2.5" fill="none"></circle>
+                <circle cx="6" cy="17" r="2.5" fill="none"></circle>
+                <path d="M8.1 8.6 19 19M8.1 15.4 19 5" fill="none"></path>
+              </svg>
+            </button>
+            <button class="icon-button danger" id="deleteRecordingLaneButton" type="button" aria-label="${selectedClip ? "Delete selected section" : "Delete lane"}" title="${selectedClip ? "Delete selected section" : "Delete lane"}">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h16" fill="none"></path>
+                <path d="M10 11v6M14 11v6" fill="none"></path>
+                <path d="M6 7l1 14h10l1-14" fill="none"></path>
+                <path d="M9 7V4h6v3" fill="none"></path>
+              </svg>
+            </button>
+          </div>
+        ` : `
+          ${status ? `<div class="recording-status" aria-live="polite">${escapeHtml(status)}</div>` : ""}
+          <div class="field recording-tempo-field">
+            <label for="recordingTempo">Tempo</label>
+            <div class="field-row">
+              <input id="recordingTempoRange" type="range" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
+              <input id="recordingTempo" type="number" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
+            </div>
+          </div>
+          <label class="toggle-row recording-metronome-row" for="recordingMetronome">
+            <input id="recordingMetronome" type="checkbox" ${recordingMetronomeEnabled ? "checked" : ""}>
+            <span>Metronome</span>
+          </label>
+          <div class="recording-transport-actions">
+            <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Stop" : "Play"}" title="${recordingTransportPlaying ? "Stop" : "Play"}">
+              ${recordingTransportPlaying
+                ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="6" width="4" height="12" rx="1"></rect><rect x="13" y="6" width="4" height="12" rx="1"></rect></svg>`
+                : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10-6.5z"></path></svg>`}
+            </button>
+            <button class="icon-button" id="rewindRecordingButton" type="button" aria-label="Move playhead to start" title="Move playhead to start">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5v14" fill="none"></path><path d="M19 6l-10 6 10 6z"></path></svg>
+            </button>
+            <button class="text-button primary" id="exportTimelineButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Export</button>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+  attachRecordingTimelineEvents();
+  updateRecordingTimelinePlayhead();
+}
+
+function playMetronomeTick(accent = false) {
+  if (!audioContext) return;
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  const now = audioContext.currentTime;
+  oscillator.frequency.value = accent ? 1320 : 880;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.12, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+  oscillator.connect(gain).connect(audioContext.destination);
+  oscillator.start(now);
+  oscillator.stop(now + 0.07);
+}
+
+function clearRecordingCountdown() {
+  if (recordingCountdownTimer !== null) {
+    clearTimeout(recordingCountdownTimer);
+    recordingCountdownTimer = null;
+  }
+  recordingCountdownActive = false;
+  recordingCountdownBeat = 0;
+}
+
+function stopRecordingMetronome() {
+  if (recordingMetronomeTimer !== null) {
+    clearInterval(recordingMetronomeTimer);
+    recordingMetronomeTimer = null;
+  }
+}
+
+function startRecordingMetronome() {
+  stopRecordingMetronome();
+  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline || !recordingIsActive()) return;
+  const beatMs = 60000 / recordingTimelineTempo;
+  playMetronomeTick(true);
+  recordingMetronomeTimer = window.setInterval(() => playMetronomeTick(false), beatMs);
+}
+
+function restartRecordingMetronome() {
+  if (recordingIsActive()) startRecordingMetronome();
+}
+
+function stopRecordingLanePlayback() {
+  while (recordingPlaybackSources.length) {
+    const source = recordingPlaybackSources.pop();
+    try {
+      source.stop();
+    } catch {
+      // Source may already have ended.
+    }
+    try {
+      source.disconnect();
+      source._recordingGain?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }
+}
+
+async function hydrateRecordingLaneBuffer(lane) {
+  if (lane.buffer || !lane.path) return lane.buffer || null;
+  await ensureAudio();
+  const response = await fetch(lane.path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Could not load recording lane (${response.status}).`);
+  const buffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+  lane.buffer = buffer;
+  lane.duration = Math.max(Number(lane.duration) || 0, buffer.duration);
+  if (!lane.waveform?.length) lane.waveform = recordingLaneWaveform(buffer);
+  syncRecordingLaneBounds(lane);
+  savePatch();
+  return buffer;
+}
+
+async function hydrateRecordingLaneBuffers(lanes = recordingLanes) {
+  await Promise.all(lanes.map((lane) => hydrateRecordingLaneBuffer(lane)));
+}
+
+function startRecordingClipSource(lane, clip, startTime, now, destination) {
+  if (!audioContext || !lane.buffer) return;
+  const clipEnd = clip.startTime + clip.duration;
+  if (startTime >= clipEnd) return;
+  const visibleOffset = Math.max(0, startTime - clip.startTime);
+  const sourceOffset = clip.offset + visibleOffset;
+  const playDuration = Math.min(Math.max(0, clip.duration - visibleOffset), Math.max(0, lane.buffer.duration - sourceOffset));
+  if (playDuration <= 0 || sourceOffset >= lane.buffer.duration) return;
+  const source = audioContext.createBufferSource();
+  const gain = audioContext.createGain();
+  source.buffer = lane.buffer;
+  gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+  source.connect(gain).connect(destination);
+  source._recordingGain = gain;
+  source._recordingLaneId = lane.id;
+  source.addEventListener("ended", () => {
+    const index = recordingPlaybackSources.indexOf(source);
+    if (index >= 0) recordingPlaybackSources.splice(index, 1);
+    try {
+      source.disconnect();
+      gain.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }, { once: true });
+  recordingPlaybackSources.push(source);
+  source.start(now + Math.max(0, clip.startTime - startTime), sourceOffset, playDuration);
+}
+
+async function startRecordingLanePlayback(startTime = 0) {
+  stopRecordingLanePlayback();
+  if (!audioContext || !recordingLanes.length) return;
+  await hydrateRecordingLaneBuffers();
+  const now = audioContext.currentTime;
+  const destination = recordingPlaybackGainNode || audioContext.destination;
+  for (const lane of recordingLanes) {
+    for (const clip of recordingLaneClips(lane)) {
+      startRecordingClipSource(lane, clip, startTime, now, destination);
+    }
+  }
+}
+
+function stopRecordingTransport({ resetPlayhead = false, render = true } = {}) {
+  recordingTransportPlaying = false;
+  stopRecordingLanePlayback();
+  if (resetPlayhead) setRecordingPlayheadTime(0);
+  if (render && activeBottomPanels.timeline) renderRecordingTimelinePanel();
+}
+
+async function startRecordingTransport() {
+  if (!audioContext || !recordingLanes.length || recordingIsActive()) return;
+  await hydrateRecordingLaneBuffers();
+  stopRecordingLanePlayback();
+  const duration = recordingSequenceDuration();
+  const startTime = recordingPlayheadTime >= duration ? 0 : recordingPlayheadTime;
+  recordingTransportPlaying = true;
+  recordingTransportStartTime = startTime;
+  recordingTransportStartedAt = audioContext.currentTime;
+  const now = audioContext.currentTime;
+  const destination = recordingPlaybackGainNode || audioContext.destination;
+  for (const lane of recordingLanes) {
+    for (const clip of recordingLaneClips(lane)) {
+      startRecordingClipSource(lane, clip, startTime, now, destination);
+    }
+  }
+  renderRecordingTimelinePanel();
+  scheduleRecordingTimelineFrame();
+}
+
+function toggleRecordingTransport() {
+  if (recordingTransportPlaying) {
+    stopRecordingTransport();
+  } else {
+    ensureAudio()
+      .then(() => startRecordingTransport())
+      .catch((error) => alert(`Could not play recording: ${error.message}`));
+  }
+}
+
+function playRecordingScrubPreview(time, playbackRate = 1) {
+  if (!audioContext || !recordingScrubGainNode) return;
+  const now = audioContext.currentTime;
+  if (now - recordingScrubPreviewLastAt < 0.045) return;
+  const lane = recordingLanes.find((item) => recordingClipAtTime(item, time));
+  const clip = recordingClipAtTime(lane, time);
+  if (!lane?.buffer || !clip) return;
+  if (recordingScrubSource) {
+    try {
+      recordingScrubSource.gain.gain.cancelScheduledValues(now);
+      recordingScrubSource.gain.gain.setTargetAtTime(0.0001, now, 0.006);
+      recordingScrubSource.source.stop(now + 0.04);
+    } catch {
+      // Source may already have ended.
+    }
+  }
+  const offset = clamp(clip.offset + time - clip.startTime, 0, Math.max(0, lane.buffer.duration - 0.02));
+  const source = audioContext.createBufferSource();
+  const gain = audioContext.createGain();
+  source.buffer = lane.buffer;
+  source.playbackRate.value = clamp(Math.abs(playbackRate) || 0.15, 0.08, 4);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, normalizeRecordingLaneVolume(lane.volume)), now + 0.012);
+  gain.gain.setTargetAtTime(0.0001, now + 0.055, 0.02);
+  source.connect(gain).connect(recordingScrubGainNode);
+  recordingScrubSource = { source, gain };
+  recordingScrubPreviewLastAt = now;
+  source.addEventListener("ended", () => {
+    if (recordingScrubSource?.source === source) recordingScrubSource = null;
+    try {
+      source.disconnect();
+      gain.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  }, { once: true });
+  source.start(now, offset, 0.12);
+}
+
+function stopRecordingScrubPreview() {
+  try {
+    const now = audioContext?.currentTime || 0;
+    recordingScrubSource?.gain.gain.cancelScheduledValues(now);
+    recordingScrubSource?.gain.gain.setTargetAtTime(0.0001, now, 0.006);
+    recordingScrubSource?.source.stop(now + 0.04);
+  } catch {
+    // Source may already have ended.
+  }
+  try {
+    recordingScrubSource?.source.disconnect();
+    recordingScrubSource?.gain.disconnect();
+  } catch {
+    // Already disconnected.
+  }
+  recordingScrubSource = null;
+  recordingScrubPreviewLastAt = 0;
+}
+
+function recordingTimeFromPointer(event, drag = recordingScrubState) {
+  if (!drag) return 0;
+  const duration = recordingSequenceDuration();
+  const directScrubTop = drag.rect.top - RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX;
+  const directScrubBottom = drag.rect.bottom + RECORDING_TIMELINE_DIRECT_SCRUB_MARGIN_PX;
+  const directlyOverTimeline = event.clientX >= drag.rect.left
+    && event.clientX <= drag.rect.right
+    && event.clientY >= directScrubTop
+    && event.clientY <= directScrubBottom;
+  if (directlyOverTimeline) {
+    return clamp((event.clientX - drag.rect.left) / Math.max(1, drag.rect.width) * duration, 0, duration);
+  }
+
+  const horizontalDelta = event.clientX - drag.lastX;
+  if (Math.abs(horizontalDelta) < 1) return drag.lastTime;
+  const secondsPerPixel = duration / Math.max(1, drag.rect.width);
+  const axisDelta = horizontalDelta * secondsPerPixel;
+  const perpendicular = directlyOverTimeline
+    ? 0
+    : Math.min(Math.abs(event.clientY - directScrubTop), Math.abs(event.clientY - directScrubBottom));
+  const precision = 1 / (1 + Math.pow(perpendicular / VALUE_SLIDER_PRECISION_DISTANCE_PX, VALUE_SLIDER_PRECISION_POWER));
+  return clamp(drag.lastTime + axisDelta * precision, 0, duration);
+}
+
+function onRecordingRulerPointerDown(event) {
+  if (event.button !== 0) return;
+  if (event.target.closest?.("[data-recording-lane-id]")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopRecordingTransport({ render: false });
+  const rect = recordingTimelinePointerRect(event.currentTarget);
+  if (!rect) return;
+  const duration = recordingSequenceDuration();
+  const startTime = clamp((event.clientX - rect.left) / Math.max(1, rect.width) * duration, 0, duration);
+  recordingScrubState = {
+    pointerId: event.pointerId,
+    rect,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    startTime,
+    lastTime: startTime,
+    lastAt: performance.now(),
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  setRecordingPlayheadTime(startTime);
+  ensureAudio()
+    .then(() => playRecordingScrubPreview(startTime, 1))
+    .catch(() => {});
+}
+
+function onRecordingRulerPointerMove(event) {
+  if (!recordingScrubState || event.pointerId !== recordingScrubState.pointerId) return;
+  event.preventDefault();
+  const nextTime = recordingTimeFromPointer(event);
+  const now = performance.now();
+  const dt = Math.max(16, now - recordingScrubState.lastAt) / 1000;
+  const rate = (nextTime - recordingScrubState.lastTime) / dt;
+  if (Math.abs(nextTime - recordingScrubState.startTime) > 0.03) recordingScrubState.moved = true;
+  setRecordingPlayheadTime(nextTime);
+  playRecordingScrubPreview(nextTime, Math.abs(rate) / 1.2);
+  recordingScrubState.lastX = event.clientX;
+  recordingScrubState.lastTime = nextTime;
+  recordingScrubState.lastAt = now;
+}
+
+function onRecordingRulerPointerEnd(event) {
+  if (!recordingScrubState || event.pointerId !== recordingScrubState.pointerId) return;
+  event.preventDefault();
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  recordingScrubState = null;
+  stopRecordingScrubPreview();
+}
+
+function attachRecordingTimelineEvents() {
+  const ruler = recordingTimelinePanel.querySelector("[data-recording-timeline-scale]");
+  const scrubSurface = ruler;
+  scrubSurface?.addEventListener("pointerdown", onRecordingRulerPointerDown);
+  scrubSurface?.addEventListener("pointermove", onRecordingRulerPointerMove);
+  scrubSurface?.addEventListener("pointerup", onRecordingRulerPointerEnd);
+  scrubSurface?.addEventListener("pointercancel", onRecordingRulerPointerEnd);
+  scrubSurface?.addEventListener("lostpointercapture", onRecordingRulerPointerEnd);
+  recordingTimelinePanel.querySelector(".recording-lanes")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("[data-recording-lane-id]")) return;
+    selectedRecordingLaneId = null;
+    selectedRecordingClipId = null;
+    renderRecordingTimelinePanel();
+    savePatch();
+  });
+  for (const laneButton of recordingTimelinePanel.querySelectorAll("[data-recording-lane-id]")) {
+    laneButton.addEventListener("click", (event) => {
+      if (recordingScrubState?.moved) return;
+      event.stopPropagation();
+      const clipId = event.target.closest?.("[data-recording-clip-id]")?.dataset.recordingClipId || null;
+      const laneId = laneButton.dataset.recordingLaneId;
+      const toggledOff = selectedRecordingLaneId === laneId
+        && (!clipId || selectedRecordingClipId === clipId);
+      selectedRecordingLaneId = toggledOff ? null : laneId;
+      selectedRecordingClipId = toggledOff ? null : clipId || recordingLaneClips(selectedRecordingLane())?.[0]?.id || null;
+      renderRecordingTimelinePanel();
+      savePatch();
+    });
+  }
+
+  const laneName = recordingTimelinePanel.querySelector("#recordingLaneName");
+  laneName?.addEventListener("input", (event) => {
+    const lane = selectedRecordingLane();
+    if (!lane) return;
+    lane.name = event.target.value;
+    const laneButton = recordingTimelinePanel.querySelector(`[data-recording-lane-id="${CSS.escape(lane.id)}"] .recording-lane-label`);
+    if (laneButton) laneButton.textContent = lane.name || "Lane";
+    savePatch();
+  });
+  recordingTimelinePanel.querySelector("#recordingLaneVolume")?.addEventListener("input", (event) => {
+    const lane = selectedRecordingLane();
+    if (!lane) return;
+    lane.volume = normalizeRecordingLaneVolume(event.target.value);
+    const now = audioContext?.currentTime || 0;
+    for (const source of recordingPlaybackSources) {
+      if (source._recordingLaneId === lane.id && source._recordingGain) {
+        source._recordingGain.gain.setTargetAtTime(lane.volume, now, 0.01);
+      }
+    }
+  });
+  recordingTimelinePanel.querySelector("#recordingLaneVolume")?.addEventListener("change", () => {
+    savePatch();
+    persistSessionToServer().catch((error) => {
+      console.warn("Could not update session metadata after changing lane volume", error);
+    });
+  });
+  recordingTimelinePanel.querySelector("#snipRecordingClipButton")?.addEventListener("click", snipSelectedRecordingClip);
+  recordingTimelinePanel.querySelector("#deleteRecordingLaneButton")?.addEventListener("click", deleteSelectedRecordingLane);
+
+  if (!selectedRecordingLane()) {
+    bindNumberPair("recordingTempo", "recordingTempoRange", RECORDING_TEMPO_MIN, RECORDING_TEMPO_MAX, (value) => {
+      recordingTimelineTempo = Math.round(value);
+      restartRecordingMetronome();
+      return recordingTimelineTempo;
+    }, { root: recordingTimelinePanel, defaultValue: RECORDING_DEFAULT_TEMPO });
+    recordingTimelinePanel.querySelector("#recordingMetronome")?.addEventListener("change", (event) => {
+      recordingMetronomeEnabled = event.target.checked;
+      restartRecordingMetronome();
+    });
+    recordingTimelinePanel.querySelector("#playRecordingButton")?.addEventListener("click", toggleRecordingTransport);
+    recordingTimelinePanel.querySelector("#rewindRecordingButton")?.addEventListener("click", () => {
+      stopRecordingTransport();
+      setRecordingPlayheadTime(0, { render: true });
+    });
+    recordingTimelinePanel.querySelector("#exportTimelineButton")?.addEventListener("click", () => {
+      exportRecordingSequence().catch((error) => alert(`Could not export recording mix: ${error.message}`));
+    });
+  }
+}
+
+function snipSelectedRecordingClip() {
+  const lane = selectedRecordingLane();
+  const clip = selectedRecordingSnipTarget();
+  if (!lane || !clip) return false;
+  const playheadTime = currentRecordingPlayheadTime();
+  const clips = recordingLaneClips(lane);
+  const index = clips.findIndex((item) => item.id === clip.id);
+  if (index < 0) return false;
+  const leftDuration = playheadTime - clip.startTime;
+  const rightDuration = clip.startTime + clip.duration - playheadTime;
+  if (leftDuration <= 0.0005 || rightDuration <= 0.0005) return false;
+  clips.splice(
+    index,
+    1,
+    { ...clip, duration: leftDuration },
+    {
+      ...clip,
+      id: recordingClipId(lane.id, Date.now()),
+      startTime: playheadTime,
+      duration: rightDuration,
+      offset: clip.offset + leftDuration,
+    },
+  );
+  lane.clips = clips;
+  syncRecordingLaneBounds(lane);
+  selectedRecordingClipId = clips[index + 1]?.id || clips[index]?.id || null;
+  stopRecordingTransport({ render: false });
+  renderRecordingTimelinePanel();
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after snipping recording", error);
+  });
+  return true;
+}
+
+function deleteSelectedRecordingLane() {
+  const lane = selectedRecordingLane();
+  if (!lane) return false;
+  const selectedClip = selectedRecordingClip();
+  if (selectedClip && recordingLaneClips(lane).length > 1) {
+    lane.clips = recordingLaneClips(lane).filter((clip) => clip.id !== selectedClip.id);
+    syncRecordingLaneBounds(lane);
+    selectedRecordingClipId = recordingLaneClips(lane)[0]?.id || null;
+    setRecordingPlayheadTime(Math.min(recordingPlayheadTime, recordingSequenceDuration()));
+    renderRecordingTimelinePanel();
+    savePatch();
+    persistSessionToServer().catch((error) => {
+      console.warn("Could not update session metadata after deleting recording section", error);
+    });
+    return true;
+  }
+  const index = recordingLanes.findIndex((item) => item.id === lane.id);
+  if (index >= 0) recordingLanes.splice(index, 1);
+  selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
+  setRecordingPlayheadTime(Math.min(recordingPlayheadTime, recordingSequenceDuration()));
+  renderRecordingTimelinePanel();
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after deleting recording lane", error);
+  });
+  return true;
+}
+
+function recordingCountdown() {
+  clearRecordingCountdown();
+  if (!recordingMetronomeEnabled || !activeBottomPanels.timeline) return Promise.resolve();
+  recordingCountdownActive = true;
+  renderRecordingTimelinePanel();
+  const beatMs = 60000 / recordingTimelineTempo;
+  return new Promise((resolve) => {
+    const tick = () => {
+      recordingCountdownBeat += 1;
+      playMetronomeTick(recordingCountdownBeat === 1);
+      renderRecordingTimelinePanel();
+      if (recordingCountdownBeat >= RECORDING_COUNTDOWN_BEATS) {
+        recordingCountdownTimer = window.setTimeout(() => {
+          clearRecordingCountdown();
+          renderRecordingTimelinePanel();
+          resolve();
+        }, beatMs);
+        return;
+      }
+      recordingCountdownTimer = window.setTimeout(tick, beatMs);
+    };
+    tick();
+  });
+}
+
+function recordingExportTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`,
+  ].join("_");
+}
+
+function recordingExportFileName(name, fallback = "lane") {
+  return `${String(name || fallback)
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 80) || fallback}.wav`;
+}
+
+function uniqueRecordingExportFileNames(lanes) {
+  const used = new Set(["mix.wav"]);
+  return lanes.map((lane, index) => {
+    const fallback = `Lane ${index + 1}`;
+    const rawName = recordingExportFileName(lane.name, fallback);
+    const base = rawName.replace(/\.wav$/i, "");
+    let fileName = rawName;
+    let counter = 2;
+    while (used.has(fileName.toLowerCase())) {
+      fileName = `${base} ${counter}.wav`;
+      counter += 1;
+    }
+    used.add(fileName.toLowerCase());
+    return fileName;
+  });
+}
+
+async function saveRecordingToServer(wavBlob, startedAt = recordingStartedAt || new Date(), options = {}) {
+  const headers = {
+    "content-type": "audio/wav",
+    "x-recording-started-at": startedAt.toISOString(),
+  };
+  if (options.exportId && options.fileName) {
+    headers["x-recording-export-id"] = options.exportId;
+    headers["x-recording-file-name"] = options.fileName;
+  }
   const response = await fetch("/api/recordings", {
     method: "POST",
-    headers: {
-      "content-type": "audio/wav",
-      "x-recording-started-at": (recordingStartedAt || new Date()).toISOString(),
-    },
+    headers,
     body: wavBlob,
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(result.error || `Recording save failed (${response.status}).`);
   }
+  return result;
 }
 
-async function exportRecording() {
-  const sourceBlob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
+async function saveSessionRecordingToServer(wavBlob, fileName) {
+  const sessionId = state.sessionId || currentSessionFolderName();
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/recordings`, {
+    method: "POST",
+    headers: {
+      "content-type": "audio/wav",
+      "x-session-name": state.sessionName || defaultSessionName(),
+      "x-recording-file-name": fileName,
+    },
+    body: wavBlob,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Session recording save failed (${response.status}).`);
+  }
+  return result;
+}
+
+function activeRecordingPatchSlots() {
+  syncActivePatchSlot();
+  return patchSlots.filter((slot) => slot.active !== false && synthSlots.has(slot.id));
+}
+
+function nextRecordingLaneName(session) {
+  const current = recordingPatchLaneCounters.get(session.slotId) || 0;
+  const next = current + 1;
+  recordingPatchLaneCounters.set(session.slotId, next);
+  return `${session.patchName || "Patch"} ${next}`;
+}
+
+function previewRecordingLaneName(session) {
+  const next = (recordingPatchLaneCounters.get(session.slotId) || 0) + 1;
+  return `${session.patchName || "Patch"} ${next}`;
+}
+
+async function exportRecordingSession(session) {
+  const sourceBlob = new Blob(session.chunks, { type: session.recorder?.mimeType || "audio/webm" });
   if (!sourceBlob.size) return;
 
   const arrayBuffer = await sourceBlob.arrayBuffer();
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-  await saveRecordingToServer(audioBufferToWav(decoded));
+  const name = nextRecordingLaneName(session);
+  const fileName = recordingExportFileName(name, "lane");
+  const saved = await saveSessionRecordingToServer(audioBufferToWav(decoded), fileName);
+  const laneId = `recording-lane-${recordingLaneCounter++}`;
+  recordingLanes.push({
+    id: laneId,
+    name,
+    patchSlotId: session.slotId,
+    patchName: session.patchName,
+    startTime: recordingLaneStartedAt,
+    duration: decoded.duration,
+    volume: 1,
+    buffer: decoded,
+    waveform: recordingLaneWaveform(decoded),
+    createdAt: recordingStartedAt || new Date(),
+    path: saved.path || "",
+    fileName: saved.fileName || fileName,
+    clips: [{
+      id: recordingClipId(laneId),
+      startTime: recordingLaneStartedAt,
+      duration: decoded.duration,
+      offset: 0,
+    }],
+  });
+  savePatch();
+  persistSessionToServer().catch((error) => {
+    console.warn("Could not update session metadata after recording", error);
+  });
+  if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+}
+
+async function exportRecordingSequence() {
+  if (!recordingLanes.length) return;
+  await ensureAudio();
+  await hydrateRecordingLaneBuffers();
+  const sampleRate = audioContext.sampleRate;
+  const duration = Math.max(...recordingLanes.map(recordingLaneEnd));
+  const channelCount = Math.max(2, ...recordingLanes.map((lane) => lane.buffer?.numberOfChannels || 1));
+  const exportStartedAt = new Date();
+  const exportId = recordingExportTimestamp(exportStartedAt);
+  const stemFileNames = uniqueRecordingExportFileNames(recordingLanes);
+  const offline = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
+  for (const lane of recordingLanes) {
+    if (!lane.buffer) continue;
+    const gain = offline.createGain();
+    gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+    gain.connect(offline.destination);
+    for (const clip of recordingLaneClips(lane)) {
+      const playDuration = Math.min(clip.duration, Math.max(0, lane.buffer.duration - clip.offset));
+      if (playDuration <= 0) continue;
+      const source = offline.createBufferSource();
+      source.buffer = lane.buffer;
+      source.connect(gain);
+      source.start(clip.startTime, clip.offset, playDuration);
+    }
+  }
+  const mixed = await offline.startRendering();
+  const mixResult = await saveRecordingToServer(audioBufferToWav(mixed), exportStartedAt, { exportId, fileName: "mix.wav" });
+  if (mixResult.fileName !== "mix.wav") {
+    throw new Error("The recording server needs to be restarted before folder exports are available.");
+  }
+  for (let index = 0; index < recordingLanes.length; index += 1) {
+    const lane = recordingLanes[index];
+    const stem = new OfflineAudioContext(channelCount, Math.ceil(duration * sampleRate), sampleRate);
+    if (lane.buffer) {
+      const gain = stem.createGain();
+      gain.gain.value = normalizeRecordingLaneVolume(lane.volume);
+      gain.connect(stem.destination);
+      for (const clip of recordingLaneClips(lane)) {
+        const playDuration = Math.min(clip.duration, Math.max(0, lane.buffer.duration - clip.offset));
+        if (playDuration <= 0) continue;
+        const source = stem.createBufferSource();
+        source.buffer = lane.buffer;
+        source.connect(gain);
+        source.start(clip.startTime, clip.offset, playDuration);
+      }
+    }
+    const renderedStem = await stem.startRendering();
+    await saveRecordingToServer(audioBufferToWav(renderedStem), exportStartedAt, {
+      exportId,
+      fileName: stemFileNames[index],
+    });
+  }
+  showRecordingSavedState();
 }
 
 async function startRecording() {
-  if (recordingStarting || mediaRecorder?.state === "recording") return;
+  if (recordingStarting || recordingIsActive()) return;
 
   const options = mediaRecorderOptions();
   if (options === null) {
@@ -2351,46 +3944,102 @@ async function startRecording() {
 
   recordingStarting = true;
   recordButton.disabled = true;
+  stopRecordingTransport({ render: false });
+  recordingReturnPlayheadTime = recordingPlayheadTime;
   try {
     await ensureAudio();
+    await recordingCountdown();
   } finally {
     recordingStarting = false;
     recordButton.disabled = false;
   }
-  recordingChunks = [];
+  if (recordingIsActive()) return;
   recordingStartedAt = new Date();
-  mediaRecorder = new MediaRecorder(recorderDestination.stream, options);
-  mediaRecorder.addEventListener("dataavailable", (event) => {
-    if (event.data?.size) recordingChunks.push(event.data);
-  });
-  mediaRecorder.addEventListener("stop", async () => {
+  recordingLaneStartedAt = recordingReturnPlayheadTime;
+  const slots = activeRecordingPatchSlots();
+  if (!slots.length) {
+    alert("No active patches to record.");
+    recordingStartedAt = null;
+    return;
+  }
+
+  let remainingStops = slots.length;
+  const finishRecordingStop = async (session) => {
     recordButton.disabled = true;
     setRecordingButtonState(false);
+    stopRecordingMetronome();
+    stopRecordingLanePlayback();
     try {
-      await exportRecording();
-      showRecordingSavedState();
+      await exportRecordingSession(session);
     } catch (error) {
       alert(`Could not save recording: ${error.message}`);
     } finally {
-      recordButton.disabled = false;
-      mediaRecorder = null;
-      recordingChunks = [];
-      recordingStartedAt = null;
+      try {
+        session.synthSlot.node.disconnect(session.destination);
+      } catch {
+        // The recording tap may already be disconnected.
+      }
+      remainingStops -= 1;
+      if (remainingStops <= 0) {
+        recordButton.disabled = false;
+        mediaRecorder = null;
+        recordingSessions = [];
+        recordingChunks = [];
+        recordingStartedAt = null;
+        recordingLaneStartedAt = 0;
+        setRecordingPlayheadTime(recordingReturnPlayheadTime);
+        showRecordingSavedState(slots.length === 1 ? "Lane" : "Lanes", slots.length === 1 ? "Recording lane captured" : "Recording lanes captured");
+        if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+      }
     }
-  }, { once: true });
-  mediaRecorder.start();
+  };
+
+  recordingSessions = slots.map((slot) => {
+    const synthSlot = synthSlots.get(slot.id);
+    const destination = audioContext.createMediaStreamDestination();
+    synthSlot.node.connect(destination);
+    const recorder = new MediaRecorder(destination.stream, options);
+    const session = {
+      slotId: slot.id,
+      patchName: slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName,
+      synthSlot,
+      destination,
+      recorder,
+      chunks: [],
+    };
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data?.size) session.chunks.push(event.data);
+    });
+    recorder.addEventListener("stop", () => {
+      finishRecordingStop(session);
+    }, { once: true });
+    return session;
+  });
+  mediaRecorder = recordingSessions[0]?.recorder || null;
+  for (const session of recordingSessions) session.recorder.start();
+  recordingTimelineStartedAt = audioContext.currentTime;
   setRecordingButtonState(true);
+  setRecordingPlayheadTime(recordingLaneStartedAt);
+  startRecordingLanePlayback(recordingLaneStartedAt).catch((error) => {
+    console.warn("Could not play existing recording lanes while recording", error);
+  });
+  startRecordingMetronome();
+  if (activeBottomPanels.timeline) renderRecordingTimelinePanel();
+  scheduleRecordingTimelineFrame();
 }
 
 function stopRecording() {
-  if (mediaRecorder?.state === "recording") {
-    mediaRecorder.stop();
+  clearRecordingCountdown();
+  if (recordingIsActive()) {
+    for (const session of recordingSessions) {
+      if (session.recorder?.state === "recording") session.recorder.stop();
+    }
   }
 }
 
 function toggleRecording() {
   if (recordingStarting) return;
-  if (mediaRecorder?.state === "recording") {
+  if (recordingIsActive()) {
     stopRecording();
   } else {
     startRecording().catch((error) => {
@@ -2416,7 +4065,7 @@ function patchForSlotId(slotId) {
 
 function matchingPatchSlots(eventMeta = {}) {
   syncActivePatchSlot();
-  return patchSlots.filter((slot) => patchMatchesMidiEvent(slot.patch, eventMeta));
+  return patchSlots.filter((slot) => slot.active !== false && patchMatchesMidiEvent(slot.patch, eventMeta));
 }
 
 function matchingSynthSlots(eventMeta = {}) {
@@ -2426,11 +4075,16 @@ function matchingSynthSlots(eventMeta = {}) {
 }
 
 function noteOn(note, velocity = 1, eventMeta = {}) {
-  ensureAudio().then(() => {
+  const send = () => {
     for (const slot of matchingSynthSlots(eventMeta)) {
       slot.node.port.postMessage({ type: "noteOn", payload: { note, velocity } });
     }
-  });
+  };
+  if (audioContext && synthNode) {
+    send();
+    return;
+  }
+  ensureAudio().then(send);
 }
 
 function noteOff(note, eventMeta = {}) {
@@ -2620,24 +4274,29 @@ function renderMidiKnobPanel() {
       0,
       127,
       (value) => setMidiKnobValue(binding, value),
-      { root: midiKnobPanel },
+      { root: midiKnobPanel, defaultValue: 0 },
     );
   }
 }
 
 function renderBottomPanel() {
-  if (!bottomPanel || !midiKeyboardPanel || !midiKnobPanel) return;
+  if (!bottomPanel || !midiKeyboardPanel || !midiKnobPanel || !recordingTimelinePanel) return;
+  const showTimeline = activeBottomPanels.timeline;
   const showKeyboard = activeBottomPanels.keyboard;
   const showKnobs = activeBottomPanels.knobs;
-  bottomPanel.hidden = !showKeyboard && !showKnobs;
+  bottomPanel.hidden = !showTimeline && !showKeyboard && !showKnobs;
+  recordingTimelinePanel.hidden = !showTimeline;
   midiKeyboardPanel.hidden = !showKeyboard;
   midiKnobPanel.hidden = !showKnobs;
   appShell?.classList.toggle("keyboard-wide", showKeyboard && keyboardWideLayout);
+  timelinePanelButton?.classList.toggle("is-active", showTimeline);
+  timelinePanelButton?.setAttribute("aria-pressed", String(showTimeline));
   keyboardPanelButton?.classList.toggle("is-active", showKeyboard);
   keyboardPanelButton?.setAttribute("aria-pressed", String(showKeyboard));
   knobPanelButton?.classList.toggle("is-active", showKnobs);
   knobPanelButton?.setAttribute("aria-pressed", String(showKnobs));
 
+  if (showTimeline) renderRecordingTimelinePanel();
   if (showKeyboard) renderMidiKeyboardPanel();
   if (showKnobs) renderMidiKnobPanel();
 }
@@ -2646,6 +4305,7 @@ function toggleKeyboardWideLayout() {
   keyboardWideLayout = !keyboardWideLayout;
   renderBottomPanel();
   onStageResize();
+  savePatch();
 }
 
 function toggleBottomPanel(panelName) {
@@ -2653,6 +4313,7 @@ function toggleBottomPanel(panelName) {
   activeBottomPanels[panelName] = !activeBottomPanels[panelName];
   renderBottomPanel();
   onStageResize();
+  savePatch();
 }
 
 function onMidiKeyPointerDown(event) {
@@ -2807,6 +4468,8 @@ function renderWires() {
     ? document.createElementNS("http://www.w3.org/2000/svg", "defs")
     : null;
   if (defs) wireLayer.appendChild(defs);
+  const endpointLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  endpointLayer.setAttribute("class", "link-endpoint-layer");
 
   for (const link of state.links) {
     if (linkDrag?.mode === "relink" && !linkDrag.duplicate && linkDrag.sourceLinkId === link.id) continue;
@@ -2908,7 +4571,7 @@ function renderWires() {
         handle.append(handleHit, handleDot);
         return handle;
       });
-      group.append(...endpointHandles);
+      endpointLayer.append(...endpointHandles);
     }
 
     wireLayer.appendChild(group);
@@ -2925,6 +4588,8 @@ function renderWires() {
     preview.setAttribute("stroke-dasharray", "7 7");
     wireLayer.appendChild(preview);
   }
+
+  if (endpointLayer.childNodes.length) wireLayer.appendChild(endpointLayer);
 }
 
 function drawAdsr(envelope) {
@@ -3025,6 +4690,7 @@ function renderPanel() {
     const usesPitchControls = isPitchedWave(node.wave);
     const usesSpeedControl = isSpeedWave(node.wave);
     const usesCustomWave = node.wave === "custom";
+    const usesSampleControls = node.wave === "sample";
     const isFixedFrequency = node.frequencyMode === "fixed";
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
@@ -3060,13 +4726,16 @@ function renderPanel() {
     const speedValue = Number.isFinite(Number(node.speed)) ? node.speed : 8;
     const usesAudioInputGain = node.wave === "audio-input";
     const audioInputGainValue = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
+    const sample = sampleGraphMeta(node.sample);
+    const sampleName = sample.name || "No sample selected";
+    const showSampleStretchDetails = Math.abs(sample.stretch - 1) > 0.001;
 
     panel.innerHTML = `
       <div class="panel-heading">
         <div>
-          <h1 id="nodeHeading">${escapeHtml(nodeName(node))}</h1>
-          <p class="panel-subtitle">Oscillator</p>
+          <h1>Operator</h1>
         </div>
+        ${nodeOutputMeter(node.id)}
       </div>
       <div class="field">
         <label for="nodeName">Name</label>
@@ -3084,6 +4753,68 @@ function renderPanel() {
           <button class="custom-wave-preview" id="customWavePreview" type="button" aria-label="Edit custom wave" title="Edit custom wave">
             ${customWaveSvg(ensureCustomWave(node).points)}
           </button>
+        </div>
+      ` : ""}
+      ${usesSampleControls ? `
+        <div class="field">
+          <label for="sampleFileButton">Sample file</label>
+          <button class="sample-file-button" id="sampleFileButton" type="button" title="${escapeHtml(sampleName)}">
+            ${escapeHtml(sample.name || "Choose file")}
+          </button>
+          <div class="sample-waveform-preview" id="sampleWaveformPreview">
+            ${sampleWaveformSvg(node.sample)}
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleStart", "Sample start", "node", node.id, "sample.start")}
+          <div class="field-row">
+            <input id="sampleStartRange" type="range" min="0" max="1" step="0.001" value="${sample.start}">
+            <input id="sampleStart" type="number" min="0" max="1" step="0.001" value="${sample.start}">
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleEnd", "Sample end", "node", node.id, "sample.end")}
+          <div class="field-row">
+            <input id="sampleEndRange" type="range" min="0" max="1" step="0.001" value="${sample.end}">
+            <input id="sampleEnd" type="number" min="0" max="1" step="0.001" value="${sample.end}">
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleMode", "Sample mode", "node", node.id, "sample.mode")}
+          <select id="sampleMode">
+            <option value="one-shot" ${sample.mode === "one-shot" ? "selected" : ""}>One-shot</option>
+            <option value="loop" ${sample.mode === "loop" ? "selected" : ""}>Loop</option>
+            <option value="ping-pong" ${sample.mode === "ping-pong" ? "selected" : ""}>Ping-pong</option>
+          </select>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleStretch", "Stretch", "node", node.id, "sample.stretch")}
+          <div class="field-row">
+            <input id="sampleStretchRange" type="range" min="0.1" max="10" step="0.001" value="${sample.stretch}">
+            <input id="sampleStretch" type="number" min="0.001" step="0.001" value="${sample.stretch}">
+          </div>
+        </div>
+        <div class="settings-pair sample-stretch-settings" ${showSampleStretchDetails ? "" : "hidden"}>
+          <div class="field">
+            ${parameterLabel("sampleCycleLength", "Cycle length", "node", node.id, "sample.cycleLength")}
+            <div class="field-row">
+              <input id="sampleCycleLengthRange" type="range" min="64" max="16384" step="1" value="${sample.cycleLength}">
+              <input id="sampleCycleLength" type="number" min="1" step="1" value="${sample.cycleLength}">
+            </div>
+          </div>
+          <div class="field">
+            ${parameterLabel("sampleOverlapRatio", "Overlap ratio", "node", node.id, "sample.overlapRatio")}
+            <div class="field-row">
+              <input id="sampleOverlapRatioRange" type="range" min="0" max="1" step="0.001" value="${sample.overlapRatio}">
+              <input id="sampleOverlapRatio" type="number" min="0" max="1" step="0.001" value="${sample.overlapRatio}">
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          ${parameterLabel("sampleOriginalPitch", "Original pitch", "node", node.id, "sample.originalPitch")}
+          <select id="sampleOriginalPitch">
+            ${midiNoteOptions().map(({ value, label }) => `<option value="${value}" ${sample.originalPitch === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
         </div>
       ` : ""}
       ${usesPitchControls ? `
@@ -3142,7 +4873,6 @@ function renderPanel() {
     attachPanelRemoveAction();
     panel.querySelector("#nodeName").addEventListener("input", (event) => {
       node.name = event.target.value;
-      panel.querySelector("#nodeHeading").textContent = nodeName(node);
       renderNodes();
       savePatch();
     });
@@ -3160,6 +4890,15 @@ function renderPanel() {
         });
       } else {
         if (node.wave === "custom") ensureCustomWave(node);
+        if (node.wave === "sample") {
+          node.sample = updateSampleMetadata(node.sample);
+          syncBackendForPatch();
+          if (audioContext) {
+            ensureAudio().then(() => sendGraph({ immediate: true })).catch(() => {
+              setAudioStatusLabel("Audio could not start");
+            });
+          }
+        }
         reconcileAudioInput();
       }
       pruneMidiBindings();
@@ -3177,55 +4916,107 @@ function renderPanel() {
       panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
         node.frequencyMode = event.target.value;
         render();
-        sendGraph();
+        sendNodeParam(node.id, "frequencyMode", node.frequencyMode);
         savePatch();
       });
       bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
+        const parameter = node.frequencyMode === "fixed" ? "frequency" : "ratio";
         if (node.frequencyMode === "fixed") {
           node.frequency = value;
         } else {
           node.ratio = value;
         }
         renderNodes();
-        sendGraph();
+        sendNodeParam(node.id, parameter, value);
         savePatch();
-      }, { inputMax: frequencyInputMax });
+      }, { inputMax: frequencyInputMax, defaultValue: () => (node.frequencyMode === "fixed" ? 440 : 1) });
       panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
         renderPanel();
-        sendGraph();
+        sendNodeParam(node.id, "quantise.enabled", node.quantise.enabled);
         savePatch();
       });
       if (usesQuantiseControls) {
         panel.querySelector("#quantiseRoot").addEventListener("change", (event) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), root: event.target.value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.root", node.quantise.root);
           savePatch();
         });
         panel.querySelector("#quantiseScale").addEventListener("change", (event) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), scale: event.target.value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.scale", node.quantise.scale);
           savePatch();
         });
         bindNumberPair("quantiseGlide", "quantiseGlideRange", 0, 4, (value) => {
           node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
-          sendGraph();
+          sendNodeParam(node.id, "quantise.glide", node.quantise.glide);
           savePatch();
-        });
+        }, { defaultValue: DEFAULT_NODE_QUANTISE.glide });
       }
     }
     if (usesSpeedControl) {
       bindNumberPair("speed", "speedRange", 0.01, 60, (value) => {
         node.speed = value;
         renderNodes();
-        sendGraph();
+        sendNodeParam(node.id, "speed", value);
         savePatch();
-      });
+      }, { defaultValue: 8 });
     }
     if (usesAudioInputGain) {
       bindNumberPair("audioInputGain", "audioInputGainRange", 0, 4, (value) => {
         node.audioInputGain = value;
-        sendGraph();
+        sendNodeParam(node.id, "audioInputGain", value);
+        savePatch();
+      }, { defaultValue: 1 });
+    }
+    if (usesSampleControls) {
+      panel.querySelector("#sampleFileButton")?.addEventListener("click", () => {
+        openSamplePickerModal(node.id);
+      });
+      panel.querySelector("#sampleMode")?.addEventListener("change", (event) => {
+        node.sample = updateSampleMetadata(node.sample, { mode: event.target.value });
+        sendNodeParam(node.id, "sample.mode", node.sample.mode);
+        savePatch();
+      });
+      bindNumberPair("sampleStart", "sampleStartRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { start: value });
+        renderSampleWaveformPreview(node);
+        renderNodes();
+        sendNodeParam(node.id, "sample.start", node.sample.start);
+        savePatch();
+        return node.sample.start;
+      }, { defaultValue: DEFAULT_SAMPLE.start });
+      bindNumberPair("sampleEnd", "sampleEndRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { end: value });
+        renderSampleWaveformPreview(node);
+        renderNodes();
+        sendNodeParam(node.id, "sample.end", node.sample.end);
+        savePatch();
+        return node.sample.end;
+      }, { defaultValue: DEFAULT_SAMPLE.end });
+      bindNumberPair("sampleStretch", "sampleStretchRange", 0.1, 10, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { stretch: value });
+        sendNodeParam(node.id, "sample.stretch", node.sample.stretch);
+        savePatch();
+        const stretchSettings = panel.querySelector(".sample-stretch-settings");
+        if (stretchSettings) stretchSettings.hidden = Math.abs(node.sample.stretch - 1) <= 0.001;
+        return node.sample.stretch;
+      }, { inputMin: 0.001, inputMax: 1000, defaultValue: DEFAULT_SAMPLE.stretch });
+      bindNumberPair("sampleCycleLength", "sampleCycleLengthRange", 64, 16384, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { cycleLength: value });
+        sendNodeParam(node.id, "sample.cycleLength", node.sample.cycleLength);
+        savePatch();
+        return node.sample.cycleLength;
+      }, { inputMin: 1, inputMax: 262144, defaultValue: DEFAULT_SAMPLE.cycleLength });
+      bindNumberPair("sampleOverlapRatio", "sampleOverlapRatioRange", 0, 1, (value) => {
+        node.sample = updateSampleMetadata(node.sample, { overlapRatio: value });
+        sendNodeParam(node.id, "sample.overlapRatio", node.sample.overlapRatio);
+        savePatch();
+        return node.sample.overlapRatio;
+      }, { defaultValue: DEFAULT_SAMPLE.overlapRatio });
+      panel.querySelector("#sampleOriginalPitch")?.addEventListener("change", (event) => {
+        node.sample = updateSampleMetadata(node.sample, { originalPitch: Number(event.target.value) });
+        sendNodeParam(node.id, "sample.originalPitch", node.sample.originalPitch);
         savePatch();
       });
     }
@@ -3251,7 +5042,7 @@ function renderPanel() {
     const targetKind = linkTargetKind(link);
     const modulationTargets = modulationTargetsForLink(link);
     const amountMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_SLIDER_MAX;
-    const amountInputMax = link.modulationTarget === "mix" ? 1 : LINK_AMOUNT_INPUT_MAX;
+    const amountInputMax = LINK_AMOUNT_INPUT_MAX;
     const usesEnvelopeControls = !link.drone;
     const signalMode = normalizeSignalMode(link.signalMode);
     const usesFollowerControls = signalMode !== "raw";
@@ -3449,33 +5240,33 @@ function renderPanel() {
       link.amount = value;
       sendLinkParam(link.id, "amount", value);
       schedulePatchSave();
-    }, { inputMax: amountInputMax });
+    }, { inputMax: amountInputMax, defaultValue: 0 });
 
     if (link.to === "audio") {
       bindNumberPair("pan", "panRange", -1, 1, (value) => {
         link.pan = value;
         sendLinkParam(link.id, "pan", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: 0 });
     }
 
     bindNumberPair("velocitySensitivity", "velocitySensitivityRange", VELOCITY_SENSITIVITY_MIN, VELOCITY_SENSITIVITY_MAX, (value) => {
       link.velocitySensitivity = value;
       sendLinkParam(link.id, "velocitySensitivity", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: () => (link.to === "audio" ? 1 : 0) });
 
     bindNumberPair("noise", "noiseRange", 0, 1, (value) => {
       link.noise = value;
       sendLinkParam(link.id, "noise", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: 0 });
 
     bindNumberPair("linkDelay", "linkDelayRange", 0, 3, (value) => {
       link.delay = value;
       sendLinkParam(link.id, "delay", value);
       schedulePatchSave();
-    });
+    }, { defaultValue: 0 });
 
     panel.querySelector("#envelopeEnabled").addEventListener("change", (event) => {
       link.drone = !event.target.checked;
@@ -3487,10 +5278,7 @@ function renderPanel() {
 
     panel.querySelector("#modulationTarget")?.addEventListener("change", (event) => {
       link.modulationTarget = event.target.value;
-      if (link.modulationTarget === "mix") {
-        link.amount = clamp(link.amount, 0, 1);
-        renderPanel();
-      }
+      renderPanel();
       sendGraph();
       savePatch();
     });
@@ -3508,13 +5296,13 @@ function renderPanel() {
         link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), attack: value };
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: DEFAULT_LINK_FOLLOWER.attack });
 
       bindNumberPair("followerRelease", "followerReleaseRange", 0.001, 4, (value) => {
         link.follower = { ...(link.follower || DEFAULT_LINK_FOLLOWER), release: value };
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: DEFAULT_LINK_FOLLOWER.release });
     }
 
     panel.querySelector("#filterEnabled").addEventListener("change", (event) => {
@@ -3546,13 +5334,13 @@ function renderPanel() {
         link.filter.cutoff = value;
         sendLinkParam(link.id, "filter.cutoff", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: () => defaultFilterCutoff(link.filter.type) });
 
       bindNumberPair("filterResonance", "filterResonanceRange", filterResonanceMin, filterResonanceMax, (value) => {
         link.filter.resonance = value;
         sendLinkParam(link.id, "filter.resonance", value);
         schedulePatchSave();
-      });
+      }, { defaultValue: () => defaultFilterResonance(link.filter.type) });
     }
 
     panel.querySelector("#distortionEnabled").addEventListener("change", (event) => {
@@ -3582,7 +5370,7 @@ function renderPanel() {
         };
         sendLinkParam(link.id, "distortion.gain", value);
         schedulePatchSave();
-      }, { inputMin: 0.1 });
+      }, { inputMin: 0.1, defaultValue: DEFAULT_LINK_DISTORTION.gain });
     }
 
     if (usesEnvelopeControls) {
@@ -3594,11 +5382,16 @@ function renderPanel() {
           refreshAdsrView(link.envelope);
           sendGraph();
           savePatch();
-        });
+        }, { defaultValue: () => defaultEnvelopeValue(link, name) });
       }
     }
 
     attachParameterMidiButtons();
+    return;
+  }
+
+  if (selection.type === "patch") {
+    renderPatchSettingsPanel();
     return;
   }
 
@@ -3630,11 +5423,352 @@ function renderMasterEffectsPanel() {
         effect[key] = value;
         sendGraph();
         savePatch();
-      });
+      }, { defaultValue: defaultPatch.masterEffects[effectName]?.[key] });
     }
   }
 
   attachParameterMidiButtons();
+}
+
+function recordingLaneReference(lane) {
+  syncRecordingLaneBounds(lane);
+  return {
+    id: lane.id,
+    name: lane.name,
+    patchSlotId: lane.patchSlotId,
+    patchName: lane.patchName,
+    startTime: lane.startTime,
+    duration: lane.duration,
+    volume: normalizeRecordingLaneVolume(lane.volume),
+    clips: recordingLaneClips(lane).map((clip) => ({
+      id: clip.id,
+      startTime: clip.startTime,
+      duration: clip.duration,
+      offset: clip.offset,
+    })),
+    createdAt: lane.createdAt instanceof Date ? lane.createdAt.toISOString() : lane.createdAt,
+    path: lane.path || "",
+    fileName: lane.fileName || "",
+    waveform: lane.waveform || "",
+  };
+}
+
+function currentSessionData() {
+  syncActivePatchSlot();
+  return {
+    ...currentPatchSessionData(),
+    recordings: recordingLanes.map(recordingLaneReference),
+  };
+}
+
+async function savePatchSnapshotForSession(slot) {
+  const patch = patchForSessionStorage(slot.id === activePatchSlotId ? currentPatchData() : slot.patch);
+  const response = await fetch("/api/patches", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      patchName: patch.patchName,
+      content: patchFileText(patch),
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Patch save failed (${response.status}).`);
+  }
+  return {
+    patchName: result.patchName || safePatchFolderName(patch.patchName),
+    timestamp: result.timestamp || null,
+  };
+}
+
+async function currentSessionDataWithPatchRefs() {
+  const session = currentSessionData();
+  const patchSlotsWithRefs = [];
+  for (const slot of patchSlots) {
+    const patchRef = await savePatchSnapshotForSession(slot);
+    slot.patchRef = patchRef;
+    patchSlotsWithRefs.push({
+      id: slot.id,
+      active: slot.active !== false,
+      patchRef,
+    });
+  }
+  session.patchSlots = patchSlotsWithRefs;
+  return session;
+}
+
+async function saveSessionToServer() {
+  const button = panel.querySelector("#saveSessionButton");
+  await refreshSavedSessionSummaries().catch(() => {
+    // The POST still enforces uniqueness if the preflight check cannot refresh.
+  });
+  if (sessionNameConflict()) {
+    syncSessionNameValidation();
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Saving";
+  }
+
+  try {
+    const result = await persistSessionToServer();
+    if (result.sessionId) state.sessionId = result.sessionId;
+    if (button) button.textContent = "Saved";
+    window.setTimeout(() => {
+      const currentButton = panel.querySelector("#saveSessionButton");
+      if (currentButton) currentButton.textContent = "Save";
+    }, 900);
+  } catch (error) {
+    alert(`Could not save session: ${error.message}`);
+    if (button) button.textContent = "Save";
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function persistSessionToServer() {
+  const session = await currentSessionDataWithPatchRefs();
+  const response = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(session),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Session save failed (${response.status}).`);
+  }
+  if (result.sessionId) state.sessionId = result.sessionId;
+  persistPatchSession();
+  return result;
+}
+
+async function fetchSavedSessions() {
+  const response = await fetch("/api/sessions", { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not list sessions (${response.status}).`);
+  }
+  return Array.isArray(result.sessions) ? result.sessions : [];
+}
+
+function currentSessionFolderName() {
+  return safeSessionFolderName(state.sessionName);
+}
+
+function sessionNameConflict() {
+  const nextName = currentSessionFolderName();
+  return savedSessionSummaries.some((session) => (
+    session.id === nextName && session.id !== state.sessionId
+  ));
+}
+
+function syncSessionNameValidation() {
+  const input = panel.querySelector("#sessionName");
+  const button = panel.querySelector("#saveSessionButton");
+  const error = panel.querySelector("#sessionNameError");
+  const conflict = sessionNameConflict();
+  input?.classList.toggle("is-invalid", conflict);
+  if (button) button.disabled = conflict;
+  if (error) {
+    error.hidden = !conflict;
+    error.textContent = conflict ? "A session with this name already exists." : "";
+  }
+}
+
+async function refreshSavedSessionSummaries() {
+  const sessions = await fetchSavedSessions();
+  savedSessionSummaries = sessions;
+  syncSessionNameValidation();
+  return sessions;
+}
+
+async function fetchSavedSessionData(sessionId) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `Could not load session (${response.status}).`);
+  }
+  return result.session || result;
+}
+
+async function openSessionLibrary() {
+  sessionLibrary = { sessions: [], selectedSessionId: null, loading: true, error: "" };
+  renderSessionLibraryModal();
+  try {
+    const sessions = await refreshSavedSessionSummaries();
+    if (!sessionLibrary) return;
+    sessionLibrary.sessions = sessions;
+    sessionLibrary.selectedSessionId = sessions.find((session) => session.id === state.sessionId)?.id || sessions[0]?.id || null;
+    sessionLibrary.loading = false;
+  } catch (error) {
+    if (!sessionLibrary) return;
+    sessionLibrary.loading = false;
+    sessionLibrary.error = error.message;
+  }
+  renderSessionLibraryModal();
+}
+
+function closeSessionLibrary() {
+  document.querySelector("#sessionLibraryModal")?.remove();
+  sessionLibrary = null;
+}
+
+function renderSessionLibraryModal() {
+  if (!sessionLibrary) return;
+  let backdrop = document.querySelector("#sessionLibraryModal");
+  if (!backdrop) {
+    backdrop = document.createElement("div");
+    backdrop.id = "sessionLibraryModal";
+    backdrop.className = "modal-backdrop";
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closeSessionLibrary();
+    });
+    document.body.appendChild(backdrop);
+  }
+
+  const rows = sessionLibrary.sessions.length
+    ? sessionLibrary.sessions.map((session) => `
+      <button
+        class="patch-library-row ${session.id === sessionLibrary.selectedSessionId ? "selected" : ""}"
+        type="button"
+        data-session-id="${escapeHtml(session.id)}"
+      >
+        <span>${escapeHtml(session.name || defaultSessionName())}</span>
+        <small>${escapeHtml(formatSavedPatchTimestamp(session.savedAt || ""))}</small>
+      </button>
+    `).join("")
+    : `<p class="patch-library-empty">No server-saved sessions yet.</p>`;
+
+  backdrop.innerHTML = `
+    <div class="modal patch-library-modal" role="dialog" aria-modal="true" aria-labelledby="sessionLibraryTitle">
+      <div class="patch-library-heading">
+        <h2 id="sessionLibraryTitle">Load Session</h2>
+        <button class="icon-button compact" id="closeSessionLibraryButton" type="button" aria-label="Close" title="Close">x</button>
+      </div>
+      ${sessionLibrary.error ? `<p class="modal-error">${escapeHtml(sessionLibrary.error)}</p>` : ""}
+      ${sessionLibrary.loading ? `<p class="patch-library-empty">Loading saved sessions...</p>` : `<div class="patch-library-list">${rows}</div>`}
+      <div class="modal-actions">
+        <button class="text-button" id="cancelSessionLibraryButton" type="button">Cancel</button>
+        <button class="text-button primary" id="confirmLoadSessionButton" type="button" ${sessionLibrary.selectedSessionId ? "" : "disabled"}>Load</button>
+      </div>
+    </div>
+  `;
+
+  backdrop.querySelector("#closeSessionLibraryButton").addEventListener("click", closeSessionLibrary);
+  backdrop.querySelector("#cancelSessionLibraryButton").addEventListener("click", closeSessionLibrary);
+  backdrop.querySelectorAll("[data-session-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      sessionLibrary.selectedSessionId = button.dataset.sessionId;
+      renderSessionLibraryModal();
+    });
+  });
+  backdrop.querySelector("#confirmLoadSessionButton").addEventListener("click", async (event) => {
+    if (!sessionLibrary.selectedSessionId) return;
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = "Loading";
+    try {
+      const session = await fetchSavedSessionData(sessionLibrary.selectedSessionId);
+      await applySessionData(session);
+      closeSessionLibrary();
+    } catch (error) {
+      sessionLibrary.error = error.message;
+      renderSessionLibraryModal();
+    }
+  });
+}
+
+async function applySessionData(session) {
+  const slots = Array.isArray(session?.patchSlots)
+    ? await Promise.all(session.patchSlots.map(async (slot) => {
+        if (slot.patchRef?.patchName && slot.patchRef?.timestamp) {
+          try {
+            const patch = await fetchSavedPatchData(slot.patchRef.patchName, slot.patchRef.timestamp);
+            return normalizePatchSlot({ ...slot, patch });
+          } catch {
+            return normalizePatchSlot(slot);
+          }
+        }
+        return normalizePatchSlot(slot);
+      }))
+    : [normalizePatchSlot(null, normalizeDefaultPatch())];
+  const safeSlots = slots.length ? slots : [normalizePatchSlot(null, normalizeDefaultPatch())];
+  const activeSlotId = safeSlots.some((slot) => slot.id === session.activePatchSlotId)
+    ? session.activePatchSlotId
+    : safeSlots[0].id;
+  const activePatch = clonePatch(safeSlots.find((slot) => slot.id === activeSlotId)?.patch || safeSlots[0].patch);
+  const settings = normalizeSessionSettings(session, activePatch);
+
+  flushPendingPatchSave();
+  for (const slotId of [...synthSlots.keys()]) disconnectSynthSlot(slotId);
+  patchSlots = safeSlots;
+  activePatchSlotId = activeSlotId;
+  state.sessionId = settings.sessionId;
+  state.sessionName = settings.sessionName;
+  state.audioInputDeviceId = settings.audioInputDeviceId;
+  state.audioOutputDeviceId = settings.audioOutputDeviceId;
+  state.linkSignalGradientMeters = settings.linkSignalGradientMeters;
+  state.keyboardStartNote = settings.keyboardStartNote;
+  state.keyboardLength = settings.keyboardLength;
+  audioBackend = settings.audioBackend;
+  recordingLanes.splice(0, recordingLanes.length);
+  recordingLanes.push(...normalizeStoredRecordingLanes(session.recordings));
+  const recordingSelection = normalizeStoredRecordingSelection(
+    recordingLanes,
+    session.selectedRecordingLaneId,
+    session.selectedRecordingClipId,
+  );
+  selectedRecordingLaneId = recordingSelection.laneId;
+  selectedRecordingClipId = recordingSelection.clipId;
+  recordingLaneCounter = nextRecordingLaneCounter(recordingLanes);
+  recordingPatchLaneCounters.clear();
+  synthNode = activeSynthSlot()?.node || null;
+  audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
+  applyPatchData(activePatch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
+  refreshSavedSessionSummaries().catch(() => {});
+}
+
+function newSession() {
+  if (!confirm("Start a new session? Unsaved session changes will be lost.")) return;
+  flushPendingPatchSave();
+  for (const slotId of [...synthSlots.keys()]) disconnectSynthSlot(slotId);
+  const patch = normalizeDefaultPatch();
+  patch.patchName = "Untitled Patch";
+  const slot = normalizePatchSlot(null, patch);
+  patchSlots = [slot];
+  activePatchSlotId = slot.id;
+  state.sessionId = "";
+  state.sessionName = defaultSessionName();
+  recordingLanes.splice(0, recordingLanes.length);
+  selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
+  recordingLaneCounter = 1;
+  recordingPatchLaneCounters.clear();
+  applyPatchData(patch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
+  refreshSavedSessionSummaries().catch(() => {});
+}
+
+function cloneSession() {
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  state.sessionId = "";
+  state.sessionName = `${(state.sessionName || defaultSessionName()).trim() || defaultSessionName()} Copy`;
+  patchSlots = patchSlots.map((slot) => ({
+    ...slot,
+    id: patchSlotUid(),
+    patch: clonePatch(slot.patch),
+  }));
+  activePatchSlotId = patchSlots[0]?.id || activePatchSlotId;
+  recordingLanes.splice(0, recordingLanes.length);
+  selectedRecordingLaneId = null;
+  selectedRecordingClipId = null;
+  applyPatchData(patchSlots[0].patch, { preserveSave: false });
+  initializePatchHistories();
+  persistPatchSession();
 }
 
 async function savePatchToServer() {
@@ -3645,7 +5779,7 @@ async function savePatchToServer() {
   }
 
   try {
-    const patch = currentPatchData();
+    const patch = patchForSessionStorage(currentPatchData());
     const response = await fetch("/api/patches", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3658,6 +5792,12 @@ async function savePatchToServer() {
     if (!response.ok) {
       throw new Error(result.error || `Save failed (${response.status}).`);
     }
+    activeSavedPatchRef = {
+      patchName: result.patchName || safePatchFolderName(patch.patchName),
+      timestamp: result.timestamp || null,
+    };
+    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+    if (slot) slot.patchRef = activeSavedPatchRef;
     if (button) button.textContent = "Saved";
     window.setTimeout(() => {
       const currentButton = panel.querySelector("#savePatchButton");
@@ -3683,6 +5823,38 @@ async function fetchSavedPatches() {
 async function loadSavedPatch(patchName, timestamp) {
   const patch = await fetchSavedPatchData(patchName, timestamp);
   applyPatchData(patch);
+  activeSavedPatchRef = { patchName, timestamp };
+  const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+  if (slot) slot.patchRef = activeSavedPatchRef;
+}
+
+function safePatchFolderName(name) {
+  return String(name || "Untitled Patch")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 96)
+    || "Untitled Patch";
+}
+
+function savedPatchSelectionForCurrentPatch(patches) {
+  const currentPatchName = safePatchFolderName(state.patchName);
+  const savedRefPatchName = activeSavedPatchRef?.patchName || "";
+  const savedRefMatchesCurrent = savedRefPatchName && safePatchFolderName(savedRefPatchName) === currentPatchName;
+  const patch = (savedRefMatchesCurrent ? patches.find((item) => item.name === savedRefPatchName) : null)
+    || patches.find((item) => item.name === currentPatchName)
+    || patches.find((item) => item.name.localeCompare(currentPatchName, undefined, { sensitivity: "base" }) === 0)
+    || patches[0]
+    || null;
+  const timestamp = patch && savedRefMatchesCurrent && activeSavedPatchRef?.timestamp && patch.timestamps.includes(activeSavedPatchRef.timestamp)
+    ? activeSavedPatchRef.timestamp
+    : patch?.timestamps?.[0] || null;
+
+  return {
+    patchName: patch?.name || null,
+    timestamp,
+  };
 }
 
 async function fetchSavedPatchData(patchName, timestamp) {
@@ -3717,9 +5889,10 @@ async function openPatchLibrary(options = {}) {
   try {
     const patches = await fetchSavedPatches();
     if (!patchLibrary) return;
+    const selection = savedPatchSelectionForCurrentPatch(patches);
     patchLibrary.patches = patches;
-    patchLibrary.selectedPatchName = patches[0]?.name || null;
-    patchLibrary.selectedTimestamp = patches[0]?.timestamps?.[0] || null;
+    patchLibrary.selectedPatchName = selection.patchName;
+    patchLibrary.selectedTimestamp = selection.timestamp;
     patchLibrary.loading = false;
   } catch (error) {
     if (!patchLibrary) return;
@@ -3845,7 +6018,11 @@ function renderPatchLibraryModal() {
     try {
       if (patchLibrary.mode === "new-slot") {
         const patch = await fetchSavedPatchData(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
-        addPatchSlot(patch);
+        activeSavedPatchRef = {
+          patchName: patchLibrary.selectedPatchName,
+          timestamp: patchLibrary.selectedTimestamp,
+        };
+        addPatchSlot(patch, activeSavedPatchRef);
       } else {
         await loadSavedPatch(patchLibrary.selectedPatchName, patchLibrary.selectedTimestamp);
       }
@@ -3855,6 +6032,14 @@ function renderPatchLibraryModal() {
       renderPatchLibraryModal();
     }
   });
+
+  if (!patchLibrary.loading) {
+    window.requestAnimationFrame(() => {
+      document.querySelectorAll("#patchLibraryModal .patch-library-row.selected").forEach((row) => {
+        row.scrollIntoView({ block: "nearest" });
+      });
+    });
+  }
 }
 
 function formatSavedPatchTimestamp(timestamp) {
@@ -3874,10 +6059,32 @@ function nextUntitledPatchName() {
   return `${base} ${patchSlots.length + 1}`;
 }
 
-function addPatchSlot(patch) {
+function uniquePatchCopyName(name) {
+  const base = `${(name || "Untitled Patch").trim() || "Untitled Patch"} Copy`;
+  const names = new Set(patchSlots.map((slot) => slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName));
+  if (!names.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}`;
+    if (!names.has(candidate)) return candidate;
+  }
+  return `${base} ${patchSlots.length + 1}`;
+}
+
+function cloneActivePatchSlot() {
+  flushPendingPatchSave();
+  syncActivePatchSlot();
+  const source = patchSlots.find((slot) => slot.id === activePatchSlotId);
+  if (!source) return;
+  const patch = clonePatch(source.patch);
+  patch.patchName = uniquePatchCopyName(patch.patchName);
+  addPatchSlot(patch);
+}
+
+function addPatchSlot(patch, patchRef = null) {
   flushPendingPatchSave();
   syncActivePatchSlot();
   const slot = normalizePatchSlot(null, patch);
+  slot.patchRef = patchRef;
   patchSlots.push(slot);
   resetPatchHistory(slot.id, slot.patch);
   switchPatchSlot(slot.id);
@@ -3906,6 +6113,9 @@ function switchPatchSlot(slotId) {
   synthNode = activeSynthSlot()?.node || null;
   audioBackendStatus = activeSynthSlot()?.status || audioBackendStatus;
   applyPatchData(slot.patch, { preserveSave: false });
+  state.selected = { type: "patch", id: "patch" };
+  renderPatchTabs();
+  renderPanel();
   savePatch();
 }
 
@@ -3955,14 +6165,9 @@ function applyPatchData(patch, options = {}) {
   const normalized = normalizePatch(patch);
   state.patchName = normalized.patchName;
   state.maxVoices = normalized.maxVoices;
-  state.audioInputDeviceId = normalized.audioInputDeviceId;
-  state.audioOutputDeviceId = normalized.audioOutputDeviceId;
   state.audioOutPosition = normalized.audioOutPosition;
-  state.linkSignalGradientMeters = normalized.linkSignalGradientMeters;
   state.midiChannel = normalized.midiChannel;
   state.midiInputId = normalized.midiInputId;
-  state.keyboardStartNote = normalized.keyboardStartNote;
-  state.keyboardLength = normalized.keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -3989,22 +6194,12 @@ function newPatch() {
 
   const midiChannel = state.midiChannel;
   const midiInputId = state.midiInputId;
-  const keyboardStartNote = state.keyboardStartNote;
-  const keyboardLength = state.keyboardLength;
-  const audioInputDeviceId = state.audioInputDeviceId;
-  const audioOutputDeviceId = state.audioOutputDeviceId;
-  const linkSignalGradientMeters = state.linkSignalGradientMeters;
   const normalized = normalizeDefaultPatch();
   state.patchName = "Untitled Patch";
   state.maxVoices = normalized.maxVoices;
-  state.audioInputDeviceId = audioInputDeviceId;
-  state.audioOutputDeviceId = audioOutputDeviceId;
   state.audioOutPosition = normalized.audioOutPosition;
-  state.linkSignalGradientMeters = linkSignalGradientMeters;
   state.midiChannel = midiChannel;
   state.midiInputId = midiInputId;
-  state.keyboardStartNote = keyboardStartNote;
-  state.keyboardLength = keyboardLength;
   state.midiBindings = normalized.midiBindings;
   state.masterEffects = normalized.masterEffects;
   state.nodes = normalized.nodes;
@@ -4048,6 +6243,24 @@ function effectField(effectId, key, label, value, min, max, unit) {
       </div>
     </div>
   `;
+}
+
+function defaultFilterCutoff(type) {
+  if (type === "formant") return 0;
+  if (type === "comb" || type === "comb-notch") return 440;
+  return DEFAULT_LINK_FILTER.cutoff;
+}
+
+function defaultFilterResonance(type) {
+  if (type === "comb" || type === "comb-notch") return 0.45;
+  return DEFAULT_LINK_FILTER.resonance;
+}
+
+function defaultEnvelopeValue(link, name) {
+  const envelope = link?.to === "audio"
+    ? { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 }
+    : { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 };
+  return envelope[name];
 }
 
 function filterTypeLabel(type) {
@@ -4134,6 +6347,65 @@ function customWaveSvg(points, width = 260, height = 82) {
       <g class="custom-wave-points">${pointMarks}</g>
     </svg>
   `;
+}
+
+function sampleWaveformSvg(sample, width = 260, height = 82) {
+  const normalized = normalizeSample(sample);
+  const data = normalized.data || [];
+  const padding = 10;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const centerY = padding + innerHeight / 2;
+  const startX = padding + clamp(normalized.start, 0, 1) * innerWidth;
+  const endX = padding + clamp(normalized.end, 0, 1) * innerWidth;
+  const startLimit = Math.min(startX, endX);
+  const endLimit = Math.max(startX, endX);
+  let waveform = "";
+
+  if (data.length) {
+    const pointCount = Math.min(128, Math.max(24, Math.floor(data.length / 64)));
+    const peaks = [];
+    for (let index = 0; index < pointCount; index += 1) {
+      const sampleStart = Math.floor(index / pointCount * data.length);
+      const sampleEnd = Math.max(sampleStart + 1, Math.floor((index + 1) / pointCount * data.length));
+      let peak = 0;
+      for (let sampleIndex = sampleStart; sampleIndex < sampleEnd; sampleIndex += 1) {
+        peak = Math.max(peak, Math.abs(data[sampleIndex] || 0));
+      }
+      peaks.push(peak);
+    }
+    const peakCeiling = Math.max(0.01, ...peaks);
+    const step = innerWidth / Math.max(1, peaks.length - 1);
+    const upper = peaks.map((peak, index) => {
+      const x = padding + index * step;
+      const y = centerY - peak / peakCeiling * innerHeight * 0.45;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    const lower = peaks.slice().reverse().map((peak, reverseIndex) => {
+      const index = peaks.length - 1 - reverseIndex;
+      const x = padding + index * step;
+      const y = centerY + peak / peakCeiling * innerHeight * 0.45;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    waveform = `<polygon class="sample-waveform-fill" points="${upper.concat(lower).join(" ")}"></polygon>`;
+  }
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Sample waveform" role="img" focusable="false">
+      <line class="sample-waveform-zero" x1="${padding}" y1="${centerY}" x2="${width - padding}" y2="${centerY}"></line>
+      ${waveform}
+      <rect class="sample-waveform-window" x="${startLimit.toFixed(2)}" y="${padding}" width="${Math.max(1, endLimit - startLimit).toFixed(2)}" height="${innerHeight}"></rect>
+      <line class="sample-waveform-marker is-start" x1="${startX.toFixed(2)}" y1="${padding}" x2="${startX.toFixed(2)}" y2="${height - padding}"></line>
+      <line class="sample-waveform-marker is-end" x1="${endX.toFixed(2)}" y1="${padding}" x2="${endX.toFixed(2)}" y2="${height - padding}"></line>
+      <circle class="sample-waveform-point is-start" cx="${startX.toFixed(2)}" cy="${centerY}" r="4"></circle>
+      <circle class="sample-waveform-point is-end" cx="${endX.toFixed(2)}" cy="${centerY}" r="4"></circle>
+    </svg>
+  `;
+}
+
+function renderSampleWaveformPreview(node) {
+  const preview = panel.querySelector("#sampleWaveformPreview");
+  if (preview) preview.innerHTML = sampleWaveformSvg(node.sample);
 }
 
 function openCustomWaveModal(nodeId) {
@@ -4252,14 +6524,14 @@ function openCustomWaveModal(nodeId) {
       renderEditor();
       commit();
       return sustainStart;
-    }, { root: controls });
+    }, { root: controls, defaultValue: DEFAULT_CUSTOM_WAVE.sustainStart });
     bindNumberPair("customSustainEnd", "customSustainEndRange", 0, 1, (value) => {
       const sustainEnd = clamp(value, customWave.sustainStart + 0.001, 1);
       customWave = normalizeCustomWave({ ...customWave, sustainEnd });
       renderEditor();
       commit();
       return sustainEnd;
-    }, { root: controls });
+    }, { root: controls, defaultValue: DEFAULT_CUSTOM_WAVE.sustainEnd });
   };
   const commit = () => {
     const target = nodeById(nodeId);
@@ -4399,9 +6671,419 @@ function customWaveModeOptions(selectedMode) {
     .join("");
 }
 
+function midiNoteLabel(note) {
+  const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const value = clamp(Math.round(Number(note) || 0), 0, 127);
+  return `${names[value % 12]}${Math.floor(value / 12) - 1}`;
+}
+
+function midiNoteOptions() {
+  return MIDI_NOTE_OPTIONS;
+}
+
+function monoDataFromAudioBuffer(decoded) {
+  const length = decoded.length;
+  const mono = new Float32Array(length);
+  for (let index = 0; index < length; index += 1) {
+    let sample = 0;
+    for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+      sample += decoded.getChannelData(channel)[index] || 0;
+    }
+    mono[index] = clamp(sample / Math.max(1, decoded.numberOfChannels), -1, 1);
+  }
+  return mono;
+}
+
+function sampleFromAudioBuffer(decoded, metadata = {}) {
+  return normalizeSample({
+    name: metadata.name || "",
+    fileName: metadata.fileName || metadata.name || "",
+    path: metadata.path || "",
+    sampleRate: decoded.sampleRate,
+    data: monoDataFromAudioBuffer(decoded),
+    start: metadata.start ?? 0,
+    end: metadata.end ?? 1,
+    mode: metadata.mode || "one-shot",
+    originalPitch: metadata.originalPitch ?? 60,
+  });
+}
+
+async function decodeSampleArrayBuffer(arrayBuffer, metadata = {}) {
+  const context = audioContext || createAudioContext();
+  if (!audioContext) audioContext = context;
+  const decoded = await context.decodeAudioData(arrayBuffer.slice(0));
+  return sampleFromAudioBuffer(decoded, metadata);
+}
+
+async function decodeSampleFile(file, reference = {}) {
+  return decodeSampleArrayBuffer(await file.arrayBuffer(), {
+    name: reference.name || file.name,
+    fileName: reference.fileName || file.name,
+    path: reference.path || "",
+  });
+}
+
+async function fetchProjectSamples() {
+  const response = await fetch("/api/samples", { cache: "no-store" });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Could not list samples (${response.status}).`);
+  return Array.isArray(result.samples) ? result.samples : [];
+}
+
+async function uploadSampleFile(file) {
+  const response = await fetch("/api/samples", {
+    method: "POST",
+    headers: {
+      "content-type": file.type || "application/octet-stream",
+      "x-sample-file-name": file.name,
+    },
+    body: file,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Sample import failed (${response.status}).`);
+  return result;
+}
+
+async function uploadSampleBlob(blob, fileName, errorLabel = "Sample import") {
+  const response = await fetch("/api/samples", {
+    method: "POST",
+    headers: {
+      "content-type": blob.type || "application/octet-stream",
+      "x-sample-file-name": fileName,
+    },
+    body: blob,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `${errorLabel} failed (${response.status}).`);
+  return result;
+}
+
+async function uploadRecordingLaneSample(lane) {
+  const blob = audioBufferToWav(lane.buffer);
+  const fileName = recordingExportFileName(lane.name || "track", "track");
+  return uploadSampleBlob(blob, fileName, "Track sample import");
+}
+
+async function decodeProjectSample(sampleInfo) {
+  const response = await fetch(sampleInfo.path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Could not load sample (${response.status}).`);
+  return decodeSampleArrayBuffer(await response.arrayBuffer(), {
+    name: sampleInfo.name,
+    fileName: sampleInfo.name,
+    path: sampleInfo.path,
+  });
+}
+
+async function hydrateReferencedSamples() {
+  let changed = false;
+  for (const slot of patchSlots) {
+    for (const node of slot.patch.nodes || []) {
+      const sample = sampleGraphMeta(node.sample);
+      if (!sample.path || node.sample?.data?.length) continue;
+      try {
+        node.sample = replaceSampleAudioPreservingMetadata(node.sample, await decodeProjectSample(sample));
+        if (slot.id === activePatchSlotId) {
+          const activeNode = state.nodes.find((item) => item.id === node.id);
+          if (activeNode) activeNode.sample = node.sample;
+        }
+        changed = true;
+      } catch {
+        // Missing sample files leave the patch editable; a new sample can be selected.
+      }
+    }
+  }
+  if (!changed) return;
+  renderNodes();
+  if (state.selected.type === "node") renderPanel();
+  sendGraph({ immediate: true });
+  savePatch();
+}
+
+async function applySampleToNode(node, sample) {
+  node.sample = replaceSampleAudioPreservingMetadata(node.sample, sample);
+  syncBackendForPatch();
+  renderPanel();
+  renderNodes();
+  if (audioContext) {
+    await ensureAudio();
+  }
+  sendGraph({ immediate: true });
+  savePatch();
+}
+
+function openSamplePickerModal(nodeId) {
+  const node = nodeById(nodeId);
+  if (!node || node.wave !== "sample") return;
+  document.querySelector("#samplePickerModal")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "samplePickerModal";
+  overlay.className = "modal-backdrop";
+  overlay.innerHTML = `
+    <div class="modal sample-picker-modal" role="dialog" aria-modal="true" aria-labelledby="samplePickerTitle">
+      <div class="patch-library-heading">
+        <h2 id="samplePickerTitle">Sample source</h2>
+      </div>
+      <p class="modal-error" id="samplePickerError" role="alert" hidden></p>
+      <div class="sample-picker-sections">
+        <section class="sample-picker-section">
+          <h3>Samples</h3>
+          <div class="sample-picker-row">
+            <select id="projectSampleSelect" disabled>
+              <option>Loading...</option>
+            </select>
+            <button class="text-button" id="useProjectSampleButton" type="button" disabled>Use</button>
+          </div>
+        </section>
+        <section class="sample-picker-section">
+          <h3>Select File</h3>
+          <div class="sample-picker-row">
+            <div class="sample-file-choice">
+              <button class="text-button" id="chooseSampleImportFileButton" type="button">Choose File</button>
+              <span id="sampleImportFileName">No file chosen</span>
+              <input id="sampleImportFile" type="file" accept="audio/*" hidden>
+            </div>
+            <button class="text-button" id="importSampleFileButton" type="button">Import</button>
+          </div>
+        </section>
+        <section class="sample-picker-section">
+          <h3>Track</h3>
+          <div class="sample-picker-row">
+            <select id="sampleTrackSelect" ${recordingLanes.length ? "" : "disabled"}>
+              ${recordingLanes.length
+                ? recordingLanes.map((lane) => `<option value="${escapeHtml(lane.id)}">${escapeHtml(lane.name || "Track")}</option>`).join("")
+                : `<option>No tracks</option>`}
+            </select>
+            <button class="text-button" id="useTrackSampleButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Use</button>
+          </div>
+        </section>
+        <section class="sample-picker-section">
+          <h3>Record</h3>
+          <div class="sample-recording-fields">
+            <input id="sampleRecordingName" type="text" maxlength="80" value="Sample ${escapeHtml(recordingExportTimestamp())}" aria-label="Recording name">
+            <span class="sample-recording-status" id="sampleRecordingStatus">Ready</span>
+            <button class="text-button" id="toggleSampleRecordingButton" type="button">Start recording</button>
+          </div>
+        </section>
+      </div>
+      <div class="modal-actions">
+        <button class="text-button" id="samplePickerCancel" type="button">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const errorMessage = overlay.querySelector("#samplePickerError");
+  const projectSelect = overlay.querySelector("#projectSampleSelect");
+  const useProjectButton = overlay.querySelector("#useProjectSampleButton");
+  const fileInput = overlay.querySelector("#sampleImportFile");
+  const fileName = overlay.querySelector("#sampleImportFileName");
+  const importButton = overlay.querySelector("#importSampleFileButton");
+  const trackSelect = overlay.querySelector("#sampleTrackSelect");
+  const useTrackButton = overlay.querySelector("#useTrackSampleButton");
+  const sampleRecordingName = overlay.querySelector("#sampleRecordingName");
+  const sampleRecordingStatus = overlay.querySelector("#sampleRecordingStatus");
+  const toggleSampleRecordingButton = overlay.querySelector("#toggleSampleRecordingButton");
+
+  let sampleRecordStream = null;
+  let sampleRecorder = null;
+  let sampleRecordChunks = [];
+  let sampleRecordingCancelled = false;
+
+  const sampleRecordingActive = () => sampleRecorder?.state === "recording";
+  const stopSampleRecordStream = () => {
+    sampleRecordStream?.getTracks().forEach((track) => track.stop());
+    sampleRecordStream = null;
+  };
+  const close = () => {
+    if (sampleRecordingActive()) {
+      sampleRecordingCancelled = true;
+      sampleRecorder.stop();
+    } else {
+      stopSampleRecordStream();
+    }
+    overlay.remove();
+  };
+  const showError = (message) => {
+    errorMessage.textContent = message;
+    errorMessage.hidden = false;
+  };
+  const setSampleRecordingStatus = (message, isRecording = false) => {
+    sampleRecordingStatus.textContent = message;
+    toggleSampleRecordingButton.textContent = isRecording ? "Stop recording" : "Start recording";
+    toggleSampleRecordingButton.classList.toggle("recording", isRecording);
+  };
+  const setPickerActionsDisabled = (disabled) => {
+    useProjectButton.disabled = disabled || projectSelect.disabled || !projectSelect.value;
+    importButton.disabled = disabled;
+    useTrackButton.disabled = disabled || !recordingLanes.length;
+  };
+  const runAction = async (action) => {
+    errorMessage.hidden = true;
+    setPickerActionsDisabled(true);
+    toggleSampleRecordingButton.disabled = true;
+    try {
+      await action();
+      close();
+    } catch (error) {
+      showError(error?.message || "Sample could not load");
+      setPickerActionsDisabled(false);
+      toggleSampleRecordingButton.disabled = false;
+    }
+  };
+  const startSampleRecording = async () => {
+    const options = mediaRecorderOptions();
+    if (options === null) throw new Error("Recording is not supported in this browser.");
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Audio input unavailable.");
+
+    const audioConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+    const deviceId = selectedAudioDeviceId("input");
+    if (deviceId !== DEFAULT_AUDIO_DEVICE_ID) {
+      audioConstraints.deviceId = { exact: deviceId };
+    }
+
+    sampleRecordingCancelled = false;
+    sampleRecordChunks = [];
+    sampleRecordStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    sampleRecorder = new MediaRecorder(sampleRecordStream, options);
+    sampleRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data?.size) sampleRecordChunks.push(event.data);
+    });
+    sampleRecorder.addEventListener("stop", async () => {
+      const chunks = sampleRecordChunks;
+      const mimeType = sampleRecorder?.mimeType || "audio/webm";
+      const sampleName = sampleRecordingName.value.trim() || `Sample ${recordingExportTimestamp()}`;
+      sampleRecorder = null;
+      stopSampleRecordStream();
+      if (sampleRecordingCancelled || !document.body.contains(overlay)) return;
+      toggleSampleRecordingButton.disabled = true;
+      setSampleRecordingStatus("Saving...");
+      try {
+        const sourceBlob = new Blob(chunks, { type: mimeType });
+        if (!sourceBlob.size) throw new Error("No audio was recorded.");
+        const context = audioContext || createAudioContext();
+        if (!audioContext) audioContext = context;
+        const decoded = await context.decodeAudioData(await sourceBlob.arrayBuffer());
+        const fileName = recordingExportFileName(sampleName, "sample");
+        const saved = await uploadSampleBlob(audioBufferToWav(decoded), fileName, "Recorded sample import");
+        await applySampleToNode(node, sampleFromAudioBuffer(decoded, {
+          name: saved.name || fileName,
+          fileName: saved.name || fileName,
+          path: saved.path || "",
+        }));
+        close();
+      } catch (error) {
+        showError(error?.message || "Recorded sample could not load");
+        setPickerActionsDisabled(false);
+        toggleSampleRecordingButton.disabled = false;
+        setSampleRecordingStatus("Ready");
+      }
+    }, { once: true });
+    sampleRecorder.start();
+    setPickerActionsDisabled(true);
+    setSampleRecordingStatus("Recording...", true);
+    toggleSampleRecordingButton.disabled = false;
+  };
+  const stopSampleRecording = () => {
+    if (!sampleRecordingActive()) return;
+    toggleSampleRecordingButton.disabled = true;
+    setSampleRecordingStatus("Stopping...");
+    sampleRecorder.stop();
+  };
+
+  fetchProjectSamples()
+    .then((samples) => {
+      projectSelect.innerHTML = samples.length
+        ? samples.map((sample) => `<option value="${escapeHtml(sample.name)}">${escapeHtml(sample.name)}</option>`).join("")
+        : `<option>No samples</option>`;
+      projectSelect.disabled = samples.length === 0;
+      useProjectButton.disabled = samples.length === 0 || sampleRecordingActive();
+      projectSelect.dataset.samples = JSON.stringify(samples);
+    })
+    .catch((error) => {
+      projectSelect.innerHTML = `<option>Unavailable</option>`;
+      showError(error?.message || "Could not list samples");
+    });
+
+  useProjectButton.addEventListener("click", () => runAction(async () => {
+    const samples = JSON.parse(projectSelect.dataset.samples || "[]");
+    const sampleInfo = samples.find((item) => item.name === projectSelect.value);
+    if (!sampleInfo) throw new Error("Choose a sample.");
+    await applySampleToNode(node, await decodeProjectSample(sampleInfo));
+  }));
+
+  overlay.querySelector("#chooseSampleImportFileButton")?.addEventListener("click", () => {
+    fileInput.click();
+  });
+  fileInput.addEventListener("change", () => {
+    fileName.textContent = fileInput.files?.[0]?.name || "No file chosen";
+  });
+
+  importButton.addEventListener("click", () => runAction(async () => {
+    const file = fileInput.files?.[0];
+    if (!file) throw new Error("Choose a file.");
+    const saved = await uploadSampleFile(file);
+    const sample = await decodeSampleFile(file, {
+      name: saved.name || file.name,
+      fileName: saved.name || file.name,
+      path: saved.path || "",
+    });
+    await applySampleToNode(node, sample);
+  }));
+
+  useTrackButton.addEventListener("click", () => runAction(async () => {
+    const lane = recordingLanes.find((item) => item.id === trackSelect.value);
+    if (!lane) throw new Error("Choose a track.");
+    const saved = await uploadRecordingLaneSample(lane);
+    const sample = sampleFromAudioBuffer(lane.buffer, {
+      name: saved.name || `${lane.name || "track"}.wav`,
+      fileName: saved.name || `${lane.name || "track"}.wav`,
+      path: saved.path || "",
+    });
+    await applySampleToNode(node, sample);
+  }));
+
+  toggleSampleRecordingButton.addEventListener("click", () => {
+    errorMessage.hidden = true;
+    if (sampleRecordingActive()) {
+      stopSampleRecording();
+      return;
+    }
+    toggleSampleRecordingButton.disabled = true;
+    setSampleRecordingStatus("Starting...");
+    startSampleRecording()
+      .catch((error) => {
+        stopSampleRecordStream();
+        showError(error?.message || "Could not start recording.");
+        setPickerActionsDisabled(false);
+        setSampleRecordingStatus("Ready");
+      })
+      .finally(() => {
+        if (!sampleRecordingActive()) toggleSampleRecordingButton.disabled = false;
+      });
+  });
+
+  overlay.querySelector("#samplePickerCancel").addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
+  overlay.tabIndex = -1;
+  overlay.focus();
+}
+
 function nodeFrequencyLabel(node) {
   if (node.wave === "audio-input") return "line in";
   if (node.wave === "noise") return "random";
+  if (node.wave === "sample") {
+    const sample = sampleGraphMeta(node.sample);
+    return sample.name ? midiNoteLabel(sample.originalPitch) : "sample";
+  }
   if (isSpeedWave(node.wave)) {
     const speed = Number(node.speed);
     const label = speed < 10 ? speed.toFixed(2) : speed < 100 ? speed.toFixed(1) : String(Math.round(speed));
@@ -4419,6 +7101,10 @@ function modulationTargetLabel(target, destination = "") {
   const labels = {
     phase: "Phase (default)",
     phaseResetTrigger: "Phase reset trigger",
+    sampleTrigger: "Sample trigger",
+    sampleStart: "Sample start",
+    sampleEnd: "Sample end",
+    sampleStretch: "Sample stretch",
     frequency: "Frequency",
     wave: "Wave type",
     ring: "Ring",
@@ -4470,6 +7156,20 @@ function linkMeter(linkId) {
   `;
 }
 
+function nodeOutputMeter(nodeId) {
+  const level = nodeOutputMeterLevel(nodeId);
+  return `
+    <div class="link-meter node-output-meter" data-node-meter="${escapeHtml(nodeId)}" aria-label="Operator output signal meter">
+      <div class="link-meter-channel">
+        <span class="link-meter-label">out</span>
+        <span class="link-meter-track" aria-hidden="true">
+          <span class="link-meter-fill" data-link-meter-fill="output" style="transform: scaleY(${clamp(level, 0, 1)})"></span>
+        </span>
+      </div>
+    </div>
+  `;
+}
+
 function envelopeMeter(linkId) {
   const levels = linkMeterLevels.get(linkId) || { input: 0, output: 0, envelope: 0 };
   return `
@@ -4493,9 +7193,10 @@ function modulationTargetsForLink(link, patch = state) {
   }
   if (kind === "node") {
     const targetNode = nodeByIdInPatch(patch, link.to);
+    if (targetNode?.wave === "sample") return NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
     return targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
-      ? NODE_MODULATION_TARGETS
-      : NODE_MODULATION_TARGETS.filter((target) => target !== "wave");
+      ? NODE_MODULATION_TARGETS.filter((target) => !target.startsWith("sample"))
+      : NODE_MODULATION_TARGETS.filter((target) => target !== "wave" && !target.startsWith("sample"));
   }
   return [];
 }
@@ -4556,6 +7257,7 @@ function bindNumberPair(numberId, rangeId, min, max, onValue, options = {}) {
   });
   number.addEventListener("blur", (event) => commitValue(event.target.value, { valueMin: inputMin, valueMax: inputMax }));
   range.addEventListener("input", (event) => commitValue(event.target.value));
+  bindValueSliderDefaultReset(number, range, min, max, step, commitValue, options.defaultValue);
   bindPrecisionRangeDrag(range, min, max, commitValue);
 }
 
@@ -4713,6 +7415,78 @@ function focusValueSliderNumber(number) {
   number.readOnly = false;
   number.focus({ preventScroll: true });
   number.select();
+}
+
+function bindValueSliderDefaultReset(number, range, min, max, step, commitValue, defaultValue) {
+  const control = range?.closest(".value-slider") || range;
+  if (!control || control.dataset.valueSliderResetBound) return;
+
+  const resolveDefaultValue = () => {
+    const value = typeof defaultValue === "function" ? defaultValue() : defaultValue;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? snapValueSliderValue(parsed, min, max, step) : null;
+  };
+  if (resolveDefaultValue() === null) return;
+
+  let tapStart = null;
+  let lastTap = null;
+  let lastResetTime = 0;
+
+  const resetValue = (event) => {
+    const now = performance.now();
+    if (now - lastResetTime < 80) return;
+    const value = resolveDefaultValue();
+    if (value === null) return;
+
+    lastResetTime = now;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (number && !number.readOnly) number.blur();
+    commitValue(value);
+  };
+
+  control.dataset.valueSliderResetBound = "true";
+  control.addEventListener("dblclick", resetValue);
+  control.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    tapStart = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      time: performance.now(),
+      x: event.clientX,
+      y: event.clientY,
+    };
+  }, { capture: true });
+  control.addEventListener("pointerup", (event) => {
+    if (!tapStart || event.pointerId !== tapStart.pointerId) return;
+
+    const now = performance.now();
+    const x = event.clientX;
+    const y = event.clientY;
+    const moved = Math.hypot(x - tapStart.x, y - tapStart.y);
+    const tap = {
+      pointerType: tapStart.pointerType,
+      time: now,
+      x,
+      y,
+    };
+    tapStart = null;
+
+    if (moved > VALUE_SLIDER_RESET_TAP_DISTANCE_PX) {
+      lastTap = null;
+      return;
+    }
+
+    const doubleTap = lastTap
+      && tap.pointerType === lastTap.pointerType
+      && now - lastTap.time <= VALUE_SLIDER_RESET_TAP_MAX_MS
+      && Math.hypot(tap.x - lastTap.x, tap.y - lastTap.y) <= VALUE_SLIDER_RESET_TAP_DISTANCE_PX;
+    lastTap = tap;
+    if (doubleTap) {
+      lastTap = null;
+      resetValue(event);
+    }
+  }, { capture: true });
 }
 
 function bindPrecisionRangeDrag(range, min, max, commitValue) {
@@ -5291,22 +8065,6 @@ function openMidiBindingModal(bindingId = null, preset = null) {
 }
 
 function renderEmptyPanel() {
-  const midiChannelOptions = [
-    `<option value="all" ${state.midiChannel === "all" ? "selected" : ""}>All channels</option>`,
-    ...Array.from({ length: 16 }, (_, index) => {
-      const channel = String(index + 1);
-      return `<option value="${channel}" ${state.midiChannel === channel ? "selected" : ""}>Channel ${channel}</option>`;
-    }),
-  ].join("");
-  const inputs = midiInputs();
-  const hasSelectedInput = state.midiInputId === "all" || inputs.some((input) => input.id === state.midiInputId);
-  const midiInputOptions = [
-    `<option value="all" ${state.midiInputId === "all" ? "selected" : ""}>All inputs</option>`,
-    ...inputs.map((input) => (
-      `<option value="${escapeHtml(input.id)}" ${state.midiInputId === input.id ? "selected" : ""}>${escapeHtml(input.name || "MIDI input")}</option>`
-    )),
-    ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
-  ].join("");
   const audioInputOptions = audioDeviceOptions(
     audioInputDevices(),
     selectedAudioDeviceId("input"),
@@ -5327,29 +8085,22 @@ function renderEmptyPanel() {
 
   panel.innerHTML = `
     <div class="panel-empty">
-      <h1>Patch</h1>
-      <p class="panel-subtitle">File, audio, and MIDI settings</p>
+      <h1>Session</h1>
+      <p class="panel-subtitle">Workspace, audio, keyboard, and recordings</p>
       <div class="field">
-        <label for="patchName">Name</label>
-        <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
+        <label for="sessionName">Name</label>
+        <input id="sessionName" type="text" value="${escapeHtml(state.sessionName)}" autocomplete="off">
+        <p class="field-error" id="sessionNameError" hidden></p>
       </div>
       <div class="panel-actions">
-        <button class="text-button" id="newPatchButton" type="button">New</button>
-        <button class="text-button" id="savePatchButton" type="button">Save</button>
-        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <button class="text-button" id="newSessionButton" type="button">New</button>
+        <button class="text-button" id="saveSessionButton" type="button">Save</button>
+        <button class="text-button" id="loadSessionButton" type="button">Load</button>
+        <button class="text-button" id="cloneSessionButton" type="button">Clone</button>
       </div>
-      <div class="settings-pair">
-        <div class="field">
-          <label for="maxVoices">Max voices</label>
-          <div class="field-row">
-            <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
-            <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
-          </div>
-        </div>
-        <div class="field">
-          <label for="audioEngine">Audio engine</label>
-          <select id="audioEngine">${audioBackendOptions}</select>
-        </div>
+      <div class="field">
+        <label for="audioEngine">Audio engine</label>
+        <select id="audioEngine">${audioBackendOptions}</select>
       </div>
       <label class="toggle-row">
         <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
@@ -5367,16 +8118,6 @@ function renderEmptyPanel() {
       </div>
       <div class="settings-pair">
         <div class="field">
-          <label for="midiInput">MIDI input</label>
-          <select id="midiInput">${midiInputOptions}</select>
-        </div>
-        <div class="field">
-          <label for="midiChannel">Channel</label>
-          <select id="midiChannel">${midiChannelOptions}</select>
-        </div>
-      </div>
-      <div class="settings-pair">
-        <div class="field">
           <label for="keyboardStartNote">Keyboard start</label>
           <select id="keyboardStartNote">${keyboardStartNoteOptions(state.keyboardStartNote)}</select>
         </div>
@@ -5388,26 +8129,25 @@ function renderEmptyPanel() {
           </div>
         </div>
       </div>
-      ${renderMidiBindingsSection()}
-      ${patchSlots.length > 1 ? panelRemoveAction("Remove current patch tab from this set", "Remove patch", "removePatchTabButton") : ""}
+      ${recordingLanes.length ? `<p class="panel-subtitle">${recordingLanes.length} multitrack lane${recordingLanes.length === 1 ? "" : "s"} in this session</p>` : ""}
     </div>
   `;
 
-  panel.querySelector("#patchName").addEventListener("input", (event) => {
-    state.patchName = event.target.value;
+  panel.querySelector("#sessionName").addEventListener("input", (event) => {
+    state.sessionName = event.target.value;
     renderAppTitle();
-    renderPatchTabs();
+    syncSessionNameValidation();
+    clearTimeout(pendingSessionNameCheck);
+    pendingSessionNameCheck = setTimeout(() => {
+      pendingSessionNameCheck = null;
+      refreshSavedSessionSummaries().catch(() => {
+        // The server-side save still reports conflicts if the freshness check fails.
+      });
+    }, 250);
     savePatch();
   });
-  panel.querySelector("#patchName").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.currentTarget.blur();
-    }
-  });
-  bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
-    state.maxVoices = Math.round(value);
-    sendGraph();
-    savePatch();
+  panel.querySelector("#sessionName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.currentTarget.blur();
   });
   panel.querySelector("#audioEngine").addEventListener("change", (event) => {
     audioBackend = normalizeAudioBackend(event.target.value);
@@ -5416,6 +8156,7 @@ function renderEmptyPanel() {
     } catch {
       // The URL flag still carries the backend choice when storage is unavailable.
     }
+    savePatch();
     const url = new URL(window.location.href);
     if (audioBackend === DEFAULT_AUDIO_BACKEND) {
       url.searchParams.delete("engine");
@@ -5459,9 +8200,112 @@ function renderEmptyPanel() {
     renderPanel();
     savePatch();
   });
+  panel.querySelector("#newSessionButton").addEventListener("click", newSession);
+  panel.querySelector("#saveSessionButton").addEventListener("click", saveSessionToServer);
+  panel.querySelector("#loadSessionButton").addEventListener("click", openSessionLibrary);
+  panel.querySelector("#cloneSessionButton").addEventListener("click", cloneSession);
+  syncSessionNameValidation();
+  refreshSavedSessionSummaries().catch(() => {
+    // Name validation is best-effort until save.
+  });
+  bindKeyboardStartNoteControl();
+  bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
+    state.keyboardLength = Math.round(value);
+    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
+    savePatch();
+  }, { defaultValue: DEFAULT_KEYBOARD_LENGTH });
+}
+
+function renderPatchSettingsPanel() {
+  const midiChannelOptions = [
+    `<option value="all" ${state.midiChannel === "all" ? "selected" : ""}>All channels</option>`,
+    ...Array.from({ length: 16 }, (_, index) => {
+      const channel = String(index + 1);
+      return `<option value="${channel}" ${state.midiChannel === channel ? "selected" : ""}>Channel ${channel}</option>`;
+    }),
+  ].join("");
+  const inputs = midiInputs();
+  const hasSelectedInput = state.midiInputId === "all" || inputs.some((input) => input.id === state.midiInputId);
+  const midiInputOptions = [
+    `<option value="all" ${state.midiInputId === "all" ? "selected" : ""}>All inputs</option>`,
+    ...inputs.map((input) => (
+      `<option value="${escapeHtml(input.id)}" ${state.midiInputId === input.id ? "selected" : ""}>${escapeHtml(input.name || "MIDI input")}</option>`
+    )),
+    ...(!hasSelectedInput ? [`<option value="${escapeHtml(state.midiInputId)}" selected>Unavailable input</option>`] : []),
+  ].join("");
+  panel.innerHTML = `
+    <div class="panel-empty">
+      <h1>Patch</h1>
+      <p class="panel-subtitle">Patch file, voices, and MIDI settings</p>
+      <div class="field">
+        <label for="patchName">Name</label>
+        <input id="patchName" type="text" value="${escapeHtml(state.patchName)}" autocomplete="off">
+      </div>
+      <div class="panel-actions">
+        <button class="text-button" id="newPatchButton" type="button">New</button>
+        <button class="text-button" id="savePatchButton" type="button">Save</button>
+        <button class="text-button" id="loadPatchButton" type="button">Load</button>
+        <button class="text-button" id="clonePatchButton" type="button">Clone</button>
+      </div>
+      <div class="settings-pair patch-voice-row">
+        ${patchSlots.length > 1 ? `
+          <label class="toggle-row patch-active-row" for="patchActive">
+            <input id="patchActive" type="checkbox" ${patchSlots.find((slot) => slot.id === activePatchSlotId)?.active === false ? "" : "checked"}>
+            <span>Active</span>
+          </label>
+        ` : ""}
+        <div class="field">
+          <label for="maxVoices">Max voices</label>
+          <div class="field-row">
+            <input id="maxVoicesRange" type="range" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+            <input id="maxVoices" type="number" min="${MIN_MAX_VOICES}" max="${MAX_MAX_VOICES}" step="1" value="${state.maxVoices}">
+          </div>
+        </div>
+      </div>
+      <div class="settings-pair">
+        <div class="field">
+          <label for="midiInput">MIDI input</label>
+          <select id="midiInput">${midiInputOptions}</select>
+        </div>
+        <div class="field">
+          <label for="midiChannel">Channel</label>
+          <select id="midiChannel">${midiChannelOptions}</select>
+        </div>
+      </div>
+      ${renderMidiBindingsSection()}
+      ${patchSlots.length > 1 ? panelRemoveAction("Remove current patch tab from this set", "Remove patch", "removePatchTabButton") : ""}
+    </div>
+  `;
+
+  panel.querySelector("#patchName").addEventListener("input", (event) => {
+    state.patchName = event.target.value;
+    renderAppTitle();
+    renderPatchTabs();
+    savePatch();
+  });
+  panel.querySelector("#patchName").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    }
+  });
+  panel.querySelector("#patchActive")?.addEventListener("change", (event) => {
+    const slot = patchSlots.find((item) => item.id === activePatchSlotId);
+    if (!slot) return;
+    slot.active = event.target.checked;
+    if (!slot.active) panicSynths(activePatchSlotId);
+    syncSynthSlotActive(activePatchSlotId);
+    renderPatchTabs();
+    savePatch();
+  });
+  bindNumberPair("maxVoices", "maxVoicesRange", MIN_MAX_VOICES, MAX_MAX_VOICES, (value) => {
+    state.maxVoices = Math.round(value);
+    sendGraph();
+    savePatch();
+  }, { defaultValue: DEFAULT_MAX_VOICES });
   panel.querySelector("#savePatchButton").addEventListener("click", savePatchToServer);
   panel.querySelector("#newPatchButton").addEventListener("click", newPatch);
   panel.querySelector("#loadPatchButton").addEventListener("click", openPatchLibrary);
+  panel.querySelector("#clonePatchButton").addEventListener("click", cloneActivePatchSlot);
   panel.querySelector("#removePatchTabButton")?.addEventListener("click", removeActivePatchSlot);
   panel.querySelector("#midiInput").addEventListener("change", (event) => {
     state.midiInputId = event.target.value;
@@ -5477,18 +8321,13 @@ function renderEmptyPanel() {
     updateMidiStatus();
     savePatch();
   });
-  bindKeyboardStartNoteControl();
-  bindNumberPair("keyboardLength", "keyboardLengthRange", MIN_KEYBOARD_LENGTH, MAX_KEYBOARD_LENGTH, (value) => {
-    state.keyboardLength = Math.round(value);
-    if (activeBottomPanels.keyboard) renderMidiKeyboardPanel();
-    savePatch();
-  });
   attachMidiBindingEvents();
 }
 
 function select(type, id) {
   state.selected = { type, id };
   render();
+  savePatch();
 }
 
 function render() {
@@ -5503,9 +8342,9 @@ function render() {
 }
 
 function renderAppTitle() {
-  const patchName = state.patchName?.trim() || "Untitled Patch";
-  appTitle.textContent = "Visual FM";
-  document.title = `Visual FM - ${patchName}`;
+  const sessionName = state.sessionName?.trim() || defaultSessionName();
+  appTitle.textContent = `Visual FM - ${sessionName}`;
+  document.title = `Visual FM - ${sessionName}`;
 }
 
 function renderPatchTabs() {
@@ -5515,19 +8354,28 @@ function renderPatchTabs() {
       const name = slot.id === activePatchSlotId ? state.patchName : slot.patch.patchName;
       return `
         <button
-          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""}"
+          class="patch-tab ${slot.id === activePatchSlotId ? "active" : ""} ${slot.id === activePatchSlotId && state.selected.type === "patch" ? "selected" : ""} ${slot.active === false ? "inactive" : ""}"
           type="button"
           data-patch-slot-id="${escapeHtml(slot.id)}"
-          title="${escapeHtml(name || "Untitled Patch")}"
+          title="${escapeHtml(`${name || "Untitled Patch"}${slot.active === false ? " (inactive)" : ""}`)}"
         >${escapeHtml(name || "Untitled Patch")}</button>
       `;
     }).join("")}
     <button class="patch-tab patch-tab-add" id="addPatchTabButton" type="button" aria-label="Add patch tab" title="Add patch tab">+</button>
   `;
   patchTabs.querySelectorAll("[data-patch-slot-id]").forEach((button) => {
-    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      if (button.dataset.patchSlotId === activePatchSlotId) {
+        select("patch", "patch");
+      }
+    });
     button.addEventListener("click", (event) => {
       event.stopPropagation();
+      if (button.dataset.patchSlotId === activePatchSlotId) {
+        select("patch", "patch");
+        return;
+      }
       switchPatchSlot(button.dataset.patchSlotId);
     });
   });
@@ -5556,6 +8404,7 @@ function addNode(position = null) {
     speed: 8,
     audioInputGain: 1,
     customWave: DEFAULT_CUSTOM_WAVE,
+    sample: normalizeSample(),
   };
   state.nodes.push(node);
   select("node", node.id);
@@ -5685,13 +8534,7 @@ function relinkSelectedLink(link, endpoint, targetId) {
   savePatch();
 }
 
-function upsertLink(from, to) {
-  const existing = state.links.find((link) => link.from === from && link.to === to);
-  if (existing) {
-    select("link", existing.id);
-    return;
-  }
-
+function createLink(from, to) {
   const targetLink = linkById(to);
   const link = {
     id: uid("link"),
@@ -6240,11 +9083,11 @@ function onLinkPointerEnd(event) {
         .find(Boolean);
 
       if (inputAnchor?.dataset.nodeId) {
-        upsertLink(linkDrag.from, inputAnchor.dataset.nodeId);
+        createLink(linkDrag.from, inputAnchor.dataset.nodeId);
       } else if (linkAnchor?.dataset.linkId) {
-        upsertLink(linkDrag.from, linkAnchor.dataset.linkId);
+        createLink(linkDrag.from, linkAnchor.dataset.linkId);
       } else if (audioAnchor) {
-        upsertLink(linkDrag.from, "audio");
+        createLink(linkDrag.from, "audio");
       }
     }
   }
@@ -6499,7 +9342,10 @@ fullscreenButton?.addEventListener("click", (event) => {
 audioStatus.addEventListener("click", () => {
   if (audioStatus.disabled || !audioContext || !synthSlots.size) return;
   audioMuted = !audioMuted;
-  syncOutputMute();
+  if (audioMuted) syncOutputMute();
+  syncSynthMuteState();
+  clearLinkMeterLevels();
+  if (!audioMuted) syncOutputMute();
   updateAudioReadyButton();
 });
 
@@ -6575,12 +9421,28 @@ stage.addEventListener("click", (event) => {
   if (event.target === stage || event.target === canvasViewport || event.target === nodeLayer || event.target === wireLayer) {
     state.selected = { type: null, id: null };
     render();
+    savePatch();
   }
 });
 
 audioOut.addEventListener("click", (event) => {
   event.stopPropagation();
   select("audio", "audio");
+});
+
+sessionTitleButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  state.selected = { type: null, id: null };
+  render();
+  savePatch();
+});
+
+sessionTitleButton?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  state.selected = { type: null, id: null };
+  render();
+  savePatch();
 });
 
 window.addEventListener("resize", onStageResize);
@@ -6601,8 +9463,13 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
   if (event.key === "Backspace" || event.key === "Delete") {
+    if (!isTextEditingTarget() && selectedRecordingLane()) {
+      event.preventDefault();
+      deleteSelectedRecordingLane();
+      return;
+    }
+    if (["INPUT", "SELECT", "TEXTAREA", "BUTTON"].includes(document.activeElement?.tagName)) return;
     const removed = removeSelectedElements();
     if (!removed) return;
     event.preventDefault();
@@ -6627,6 +9494,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 initializePatchHistories();
 syncTouchModifierControlsVisibility();
 render();
+hydrateReferencedSamples();
 syncFullscreenButton();
 refreshAudioDevices({ renderPatchPanel: !state.selected.type });
 setupMidi();

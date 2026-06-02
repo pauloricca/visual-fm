@@ -5,6 +5,7 @@ import {
   DEFAULT_LINK_FOLLOWER,
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
+  DEFAULT_SAMPLE,
   DEFAULT_KEYBOARD_LENGTH,
   DEFAULT_KEYBOARD_START_NOTE,
   DEFAULT_MAX_VOICES,
@@ -82,6 +83,7 @@ export function normalizePatch(patch) {
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
       audioInputGain: Number.isFinite(Number(node.audioInputGain)) ? clamp(Number(node.audioInputGain), 0, 4) : 1,
       customWave: normalizeCustomWave(node.customWave),
+      sample: normalizeSample(node.sample),
     };
   });
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -212,10 +214,19 @@ export function normalizeModulationTarget(target, to, targetLink = null, targetN
       : LINK_MODULATION_TARGETS.filter((item) => item !== "pan");
     return targets.includes(target) ? target : "amplitude";
   }
-  const targets = targetNode && OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)
-    ? NODE_MODULATION_TARGETS
-    : NODE_MODULATION_TARGETS.filter((item) => item !== "wave");
+  const targets = nodeModulationTargets(targetNode);
   return targets.includes(target) ? target : "phase";
+}
+
+function nodeModulationTargets(targetNode) {
+  if (!targetNode) return NODE_MODULATION_TARGETS.filter((item) => item !== "wave" && !item.startsWith("sample"));
+  if (targetNode.wave === "sample") {
+    return NODE_MODULATION_TARGETS.filter((item) => item !== "wave");
+  }
+  if (OSCILLATOR_WAVE_TYPES.includes(targetNode.wave)) {
+    return NODE_MODULATION_TARGETS.filter((item) => !item.startsWith("sample"));
+  }
+  return NODE_MODULATION_TARGETS.filter((item) => item !== "wave" && !item.startsWith("sample"));
 }
 
 export function normalizeFrequencyMode(mode) {
@@ -263,6 +274,47 @@ export function normalizeCustomWave(customWave = {}) {
     sustainStart,
     sustainEnd,
     points,
+  };
+}
+
+export function normalizeSample(sample = {}) {
+  const start = Number.isFinite(Number(sample.start))
+    ? clamp(Number(sample.start), 0, 1)
+    : DEFAULT_SAMPLE.start;
+  const end = Number.isFinite(Number(sample.end))
+    ? clamp(Number(sample.end), 0, 1)
+    : DEFAULT_SAMPLE.end;
+  const stretch = Number.isFinite(Number(sample.stretch))
+    ? Math.max(0.001, Number(sample.stretch))
+    : DEFAULT_SAMPLE.stretch;
+  const cycleLength = Number.isFinite(Number(sample.cycleLength))
+    ? Math.max(1, Math.round(Number(sample.cycleLength)))
+    : DEFAULT_SAMPLE.cycleLength;
+  const overlapRatio = Number.isFinite(Number(sample.overlapRatio))
+    ? clamp(Number(sample.overlapRatio), 0, 1)
+    : DEFAULT_SAMPLE.overlapRatio;
+  const mode = ["one-shot", "loop", "ping-pong"].includes(sample.mode) ? sample.mode : DEFAULT_SAMPLE.mode;
+  const data = sample.data instanceof Float32Array
+    ? sample.data
+    : Array.isArray(sample.data)
+    ? sample.data.map((value) => Number(value)).filter(Number.isFinite).map((value) => clamp(value, -1, 1))
+    : [];
+  return {
+    name: typeof sample.name === "string" ? sample.name : DEFAULT_SAMPLE.name,
+    sampleRate: Number.isFinite(Number(sample.sampleRate)) ? Math.max(1, Math.round(Number(sample.sampleRate))) : 0,
+    data,
+    storageKey: typeof sample.storageKey === "string" ? sample.storageKey : DEFAULT_SAMPLE.storageKey,
+    fileName: typeof sample.fileName === "string" ? sample.fileName : DEFAULT_SAMPLE.fileName,
+    path: typeof sample.path === "string" ? sample.path : DEFAULT_SAMPLE.path,
+    mode,
+    start,
+    end,
+    stretch,
+    cycleLength,
+    overlapRatio,
+    originalPitch: Number.isFinite(Number(sample.originalPitch))
+      ? clamp(Math.round(Number(sample.originalPitch)), 0, 127)
+      : DEFAULT_SAMPLE.originalPitch,
   };
 }
 

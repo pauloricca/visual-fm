@@ -29,6 +29,7 @@ const WAVE_IDS = new Map([
   ["perlin", 7],
   ["audio-input", 8],
   ["custom", 9],
+  ["sample", 10],
 ]);
 
 const MODULATION_TARGET_IDS = new Map([
@@ -52,6 +53,10 @@ const MODULATION_TARGET_IDS = new Map([
   ["filterCutoff", 20],
   ["filterResonance", 21],
   ["distortionGain", 22],
+  ["sampleTrigger", 23],
+  ["sampleStart", 24],
+  ["sampleEnd", 25],
+  ["sampleStretch", 26],
 ]);
 
 const SIGNAL_MODE_IDS = new Map([
@@ -84,6 +89,11 @@ const CUSTOM_WAVE_MODE_IDS = new Map([
   ["sustain-loop", 4],
   ["sustain-ping-pong", 5],
 ]);
+const SAMPLE_MODE_IDS = new Map([
+  ["one-shot", 0],
+  ["loop", 1],
+  ["ping-pong", 2],
+]);
 const DEFAULT_CUSTOM_WAVE = Object.freeze({
   mode: "loop",
   sustainStart: 0.5,
@@ -113,6 +123,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.nodesById = new Map();
     this.links = [];
     this.linksById = new Map();
+    this.sampleDataByNodeId = new Map();
     this.linkControlSmoothers = new Map();
     this.activeLinkControlSmoothers = new Set();
     this.hasActiveDroneLinks = false;
@@ -127,6 +138,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.lastOutputPeak = 0;
     this.lastProcessFrames = 128;
     this.ready = false;
+    this.muted = false;
+    this.zeroVoicePhasesOnStart = false;
     this.wasm = null;
     this.leftBuffer = null;
     this.rightBuffer = null;
@@ -155,14 +168,20 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       const { type, payload } = event.data || {};
       if (type === "graph") {
         this.setGraph(payload);
+      } else if (type === "sampleData") {
+        this.setSampleData(payload);
+      } else if (type === "nodeParam") {
+        this.setNodeParam(payload);
       } else if (type === "linkParam") {
         this.setLinkParam(payload);
       } else if (type === "noteOn") {
-        this.noteOn(payload.note, payload.velocity);
+        if (!this.muted) this.noteOn(payload.note, payload.velocity);
       } else if (type === "noteOff") {
         this.noteOff(payload.note);
       } else if (type === "panic") {
         this.resetRuntimeState();
+      } else if (type === "setMuted") {
+        this.setMuted(Boolean(payload?.muted));
       }
     };
 
@@ -273,6 +292,27 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
       customWave: this.normalizeCustomWave(node.customWave),
+      sample: this.normalizeSample(node.sample),
+    };
+  }
+
+  normalizeSample(sample = {}) {
+    const start = Number(sample.start);
+    const end = Number(sample.end);
+    const stretch = Number(sample.stretch);
+    const cycleLength = Number(sample.cycleLength);
+    const overlapRatio = Number(sample.overlapRatio);
+    const originalPitch = Number(sample.originalPitch);
+    return {
+      name: sample.name || "",
+      sampleRate: Number.isFinite(Number(sample.sampleRate)) ? Math.max(1, Number(sample.sampleRate)) : sampleRate,
+      mode: SAMPLE_MODE_IDS.has(sample.mode) ? sample.mode : "one-shot",
+      start: Number.isFinite(start) ? this.clamp(start, 0, 1) : 0,
+      end: Number.isFinite(end) ? this.clamp(end, 0, 1) : 1,
+      stretch: Number.isFinite(stretch) ? Math.max(0.001, stretch) : 1,
+      cycleLength: Number.isFinite(cycleLength) ? Math.max(1, Math.round(cycleLength)) : 4096,
+      overlapRatio: Number.isFinite(overlapRatio) ? this.clamp(overlapRatio, 0, 1) : 0.09,
+      originalPitch: Number.isFinite(originalPitch) ? this.clamp(originalPitch, 0, 127) : 60,
     };
   }
 
@@ -387,12 +427,20 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         CUSTOM_WAVE_MODE_IDS.get(node.customWave?.mode) ?? 0,
         node.customWave?.sustainStart ?? 0.5,
         node.customWave?.sustainEnd ?? 0.75,
+        SAMPLE_MODE_IDS.get(node.sample?.mode) ?? 0,
+        node.sample?.start ?? 0,
+        node.sample?.end ?? 1,
+        node.sample?.stretch ?? 1,
+        node.sample?.cycleLength ?? 4096,
+        node.sample?.overlapRatio ?? 0.09,
+        node.sample?.originalPitch ?? 60,
       );
       if (node.wasmIndex >= 0 && node.wave === "custom" && typeof this.wasm.addCustomWavePoint === "function") {
         for (const point of node.customWave.points) {
           this.wasm.addCustomWavePoint(node.wasmIndex, point.x, point.y);
         }
       }
+      this.copySampleDataToWasm(node);
     }
 
     this.links.forEach((link, index) => {
@@ -442,6 +490,92 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         : -1;
     }
     this.wasm.armCustomOnceTriggers?.(DRONE_SLOT);
+  }
+
+  setSampleData(payload = {}) {
+    if (!payload.nodeId) return;
+    const data = payload.data instanceof Float32Array
+      ? payload.data
+      : Float32Array.from(Array.isArray(payload.data) ? payload.data : []);
+    this.sampleDataByNodeId.set(payload.nodeId, {
+      data,
+      sampleRate: Number.isFinite(Number(payload.sampleRate)) ? Math.max(1, Number(payload.sampleRate)) : sampleRate,
+      name: payload.name || "",
+      storageKey: payload.storageKey || "",
+    });
+    const node = this.nodesById.get(payload.nodeId);
+    if (node) this.copySampleDataToWasm(node);
+  }
+
+  copySampleDataToWasm(node) {
+    if (!this.wasm || node?.wave !== "sample" || node.wasmIndex < 0) return;
+    const entry = this.sampleDataByNodeId.get(node.id);
+    if (!entry?.data?.length || typeof this.wasm.setSampleData !== "function" || typeof this.wasm.sampleDataPtr !== "function") return;
+    const maxFrames = typeof this.wasm.maxSampleFrames === "function" ? this.wasm.maxSampleFrames() : entry.data.length;
+    const length = Math.min(entry.data.length, Math.max(0, maxFrames || 0));
+    if (!length) return;
+    const slot = this.wasm.setSampleData(node.wasmIndex, entry.sampleRate || sampleRate, length);
+    if (slot < 0) return;
+    const ptr = this.wasm.sampleDataPtr(slot);
+    if (!ptr) return;
+    new Float32Array(this.wasm.memory.buffer, ptr, length).set(entry.data.subarray(0, length));
+  }
+
+  setNodeParam({ id, parameter, value } = {}) {
+    const node = this.nodesById.get(id);
+    if (!node || node.wasmIndex < 0) return;
+    if (parameter === "frequencyMode") {
+      node.frequencyMode = value === "fixed" ? "fixed" : "ratio";
+      this.wasm?.setNodeFrequencyMode?.(node.wasmIndex, this.frequencyModeId(node));
+    } else if (parameter === "ratio") {
+      node.ratio = this.clamp(Number(value) || 0, 0, 16);
+      this.wasm?.setNodeRatio?.(node.wasmIndex, node.ratio);
+    } else if (parameter === "frequency") {
+      node.frequency = this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
+      this.wasm?.setNodeFrequency?.(node.wasmIndex, node.frequency);
+    } else if (parameter === "quantise.enabled") {
+      node.quantise.enabled = Boolean(value);
+      this.wasm?.setNodeQuantiseEnabled?.(node.wasmIndex, node.quantise.enabled ? 1 : 0);
+    } else if (parameter === "quantise.root") {
+      node.quantise.root = value === QUANTISE_MIDI_ROOT || QUANTISE_ROOT_NOTES.includes(value) ? value : "C";
+      this.wasm?.setNodeQuantiseRoot?.(
+        node.wasmIndex,
+        node.quantise.root === QUANTISE_MIDI_ROOT ? -1 : QUANTISE_ROOT_NOTES.indexOf(node.quantise.root),
+      );
+    } else if (parameter === "quantise.scale") {
+      node.quantise.scale = QUANTISE_SCALE_IDS.has(value) ? value : "chromatic";
+      this.wasm?.setNodeQuantiseScale?.(node.wasmIndex, QUANTISE_SCALE_IDS.get(node.quantise.scale) ?? 0);
+    } else if (parameter === "quantise.glide") {
+      node.quantise.glide = this.clamp(Number(value) || 0, 0, 4);
+      this.wasm?.setNodeQuantiseGlide?.(node.wasmIndex, node.quantise.glide);
+    } else if (parameter === "speed") {
+      node.speed = this.clamp(Number(value) || 8, 0.01, 60);
+      this.wasm?.setNodeSpeed?.(node.wasmIndex, node.speed);
+    } else if (parameter === "audioInputGain") {
+      node.audioInputGain = this.clamp(Number(value) || 1, 0, 4);
+      this.wasm?.setNodeAudioInputGain?.(node.wasmIndex, node.audioInputGain);
+    } else if (parameter === "sample.mode") {
+      node.sample.mode = SAMPLE_MODE_IDS.has(value) ? value : "one-shot";
+      this.wasm?.setNodeSampleMode?.(node.wasmIndex, SAMPLE_MODE_IDS.get(node.sample.mode) ?? 0);
+    } else if (parameter === "sample.start") {
+      node.sample.start = this.clamp(Number(value) || 0, 0, 1);
+      this.wasm?.setNodeSampleStart?.(node.wasmIndex, node.sample.start);
+    } else if (parameter === "sample.end") {
+      node.sample.end = this.clamp(Number(value) || 0, 0, 1);
+      this.wasm?.setNodeSampleEnd?.(node.wasmIndex, node.sample.end);
+    } else if (parameter === "sample.stretch") {
+      node.sample.stretch = Math.max(0.001, Number(value) || 1);
+      this.wasm?.setNodeSampleStretch?.(node.wasmIndex, node.sample.stretch);
+    } else if (parameter === "sample.cycleLength") {
+      node.sample.cycleLength = Math.max(1, Math.round(Number(value) || 4096));
+      this.wasm?.setNodeSampleCycleLength?.(node.wasmIndex, node.sample.cycleLength);
+    } else if (parameter === "sample.overlapRatio") {
+      node.sample.overlapRatio = this.clamp(Number(value) || 0, 0, 1);
+      this.wasm?.setNodeSampleOverlapRatio?.(node.wasmIndex, node.sample.overlapRatio);
+    } else if (parameter === "sample.originalPitch") {
+      node.sample.originalPitch = this.clamp(Number(value) || 60, 0, 127);
+      this.wasm?.setNodeSampleOriginalPitch?.(node.wasmIndex, node.sample.originalPitch);
+    }
   }
 
   setLinkParam({ id, parameter, value } = {}) {
@@ -866,6 +1000,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const slot = this.allocateSlot();
     if (slot === null) return false;
     this.wasm?.resetVoiceSlot?.(slot);
+    if (this.zeroVoicePhasesOnStart) this.wasm?.resetVoiceSlotPhases?.(slot);
     const voice = {
       id: `voice-${this.voiceCounter++}`,
       slot,
@@ -877,6 +1012,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       stolenAt: null,
       releaseSeconds: 0.24,
       releaseGain: 1,
+      oneShotSampleEndAt: this.oneShotSampleEndAt(startedAt, this.midiNoteFrequency(numericNote)),
     };
     this.voices.set(voice.id, voice);
     this.activeVoicesByNote.set(numericNote, voice.id);
@@ -901,6 +1037,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.pendingVoiceStarts = this.pendingVoiceStarts.filter((pending) => pending.note !== numericNote);
     const voice = this.voices.get(this.activeVoicesByNote.get(numericNote));
     if (!voice) return;
+    if (voice.oneShotSampleEndAt !== null && this.sampleCursor / sampleRate < voice.oneShotSampleEndAt) {
+      return;
+    }
     this.releaseVoice(voice, this.sampleCursor / sampleRate, this.outputReleaseSeconds());
   }
 
@@ -932,6 +1071,38 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     return Math.max(0.001, ...outputReleases);
   }
 
+  sampleRangeLength(node) {
+    const entry = this.sampleDataByNodeId.get(node.id);
+    const length = entry?.data?.length || 0;
+    if (!length) return 0;
+    const start = this.clamp(Number(node.sample?.start) || 0, 0, 1);
+    const end = this.clamp(Number.isFinite(Number(node.sample?.end)) ? Number(node.sample.end) : 1, 0, 1);
+    const maxFrame = Math.max(0, length - 1);
+    return Math.abs(Math.round(end * maxFrame) - Math.round(start * maxFrame)) + 1;
+  }
+
+  oneShotSampleDuration(node, noteFrequency) {
+    if (node.wave !== "sample" || node.sample?.mode !== "one-shot") return 0;
+    const rangeLength = this.sampleRangeLength(node);
+    if (!rangeLength) return 0;
+    const entry = this.sampleDataByNodeId.get(node.id);
+    const original = this.midiNoteFrequency(node.sample?.originalPitch ?? 60);
+    const base = node.frequencyMode === "fixed"
+      ? Number(node.frequency) || 0
+      : noteFrequency * (Number.isFinite(Number(node.ratio)) ? Number(node.ratio) : 1);
+    const playbackRate = Math.max(0.0001, base) / Math.max(0.0001, original);
+    const sourceRate = Math.max(1, entry?.sampleRate || sampleRate);
+    return rangeLength / sourceRate / playbackRate;
+  }
+
+  oneShotSampleEndAt(startedAt, noteFrequency) {
+    let duration = 0;
+    for (const node of this.nodes) {
+      duration = Math.max(duration, this.oneShotSampleDuration(node, noteFrequency));
+    }
+    return duration > 0 ? startedAt + duration : null;
+  }
+
   voiceLifecycleGain(voice, now) {
     const startGain = this.smoothStep((now - voice.startedAt) / VOICE_START_FADE_SECONDS);
     if (voice.stolenAt === null) return startGain;
@@ -941,6 +1112,10 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
   pruneVoices(now) {
     for (const voice of [...this.voices.values()]) {
+      if (voice.releasedAt === null && voice.oneShotSampleEndAt !== null && now >= voice.oneShotSampleEndAt) {
+        this.deleteVoice(voice.id);
+        continue;
+      }
       const stealFinished = voice.stolenAt !== null && now - voice.stolenAt > VOICE_STEAL_FADE_SECONDS;
       const releaseFinished = voice.releasedAt !== null && now - voice.releasedAt > (voice.releaseSeconds || 0.24) + 0.02;
       if (stealFinished || releaseFinished) {
@@ -966,6 +1141,12 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.outputDcBlockers = [this.createDcBlocker(), this.createDcBlocker()];
     if (this.wasm) this.wasm.resetPhases();
     this.wasm?.clearLinkMeters?.();
+  }
+
+  setMuted(muted) {
+    this.muted = muted;
+    this.zeroVoicePhasesOnStart = !muted;
+    this.resetRuntimeState();
   }
 
   waveId(node) {
@@ -1042,6 +1223,11 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.lastProcessFrames = frames;
     const now = this.sampleCursor / sampleRate;
 
+    if (this.muted) {
+      this.fillSilence(outputs);
+      return true;
+    }
+
     if (!this.ready || !this.links.some((link) => link.to === "audio" && link.wasmIndex >= 0)) {
       this.fillSilence(outputs);
       this.sampleCursor += left.length;
@@ -1060,6 +1246,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         velocity: 1,
         startedAt: 0,
         releasedAt: null,
+        stolenAt: null,
       }, now, frames);
     }
 
