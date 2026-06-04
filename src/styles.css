@@ -506,7 +506,7 @@ select {
 .wire-hit {
   fill: none;
   stroke: transparent;
-  stroke-width: 26;
+  stroke-width: 44;
   stroke-linecap: round;
   cursor: pointer;
 }
