@@ -125,6 +125,7 @@ const AUDIO_BACKENDS = {
 const LINK_PARAM_GRAPH_SYNC_DELAY_MS = 180;
 const LINK_AMOUNT_SLIDER_MAX = 8;
 const LINK_AMOUNT_INPUT_MAX = 32;
+const LINK_AMOUNT_INPUT_MIN = -LINK_AMOUNT_INPUT_MAX;
 const FREQUENCY_SLIDER_MAX = 12000;
 const FREQUENCY_SLOW_SLIDER_MAX = 25;
 const RATIO_SLIDER_MAX = 16;
@@ -890,6 +891,17 @@ function nodeParameterDefinitions(node) {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), glide: value };
       },
     }] : []),
+    ...(node.wave === "constant" ? [{
+      id: "frequency",
+      label: "Value",
+      type: "number",
+      min: -1,
+      max: 1,
+      get: () => Number.isFinite(Number(node.frequency)) ? node.frequency : 1,
+      set: (value) => {
+        node.frequency = value;
+      },
+    }] : []),
     ...(isSpeedWave(node.wave) ? [{
       id: "speed",
       label: "Speed",
@@ -1017,7 +1029,7 @@ function linkParameterDefinitions(link, patch = state) {
       id: "amount",
       label: "Amplitude",
       type: "number",
-      min: 0,
+      min: LINK_AMOUNT_INPUT_MIN,
       max: LINK_AMOUNT_INPUT_MAX,
       get: () => link.amount,
       set: (value) => {
@@ -4699,10 +4711,12 @@ function renderPanel() {
     const node = nodeById(selection.id);
     if (!node) return renderEmptyPanel();
     const usesPitchControls = isPitchedWave(node.wave);
+    const usesConstantControl = node.wave === "constant";
     const usesSpeedControl = isSpeedWave(node.wave);
     const usesCustomWave = node.wave === "custom";
     const usesSampleControls = node.wave === "sample";
     const isFixedFrequency = node.frequencyMode === "fixed";
+    const constantValue = Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), -1, 1) : 1;
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
     const usesSlowFrequencyRange = Boolean(node.frequencySlow);
@@ -4860,6 +4874,15 @@ function renderPanel() {
           ${quantiseControls}
         </section>
       ` : ""}
+      ${usesConstantControl ? `
+        <div class="field">
+          ${parameterLabel("constantValue", "Value", "node", node.id, "frequency")}
+          <div class="field-row">
+            <input id="constantValueRange" type="range" min="-1" max="1" step="0.001" value="${constantValue}">
+            <input id="constantValue" type="number" min="-1" max="1" step="0.001" value="${constantValue}">
+          </div>
+        </div>
+      ` : ""}
       ${usesSpeedControl ? `
         <div class="field">
           ${parameterLabel("speed", "Speed", "node", node.id, "speed")}
@@ -4893,6 +4916,7 @@ function renderPanel() {
       }
     });
     panel.querySelector("#wave").addEventListener("change", (event) => {
+      const previousWave = node.wave;
       node.wave = event.target.value;
       if (node.wave === "audio-input") {
         node.audioInputGain = Number.isFinite(Number(node.audioInputGain)) ? node.audioInputGain : 1;
@@ -4900,6 +4924,7 @@ function renderPanel() {
           setAudioStatusLabel("Audio input blocked");
         });
       } else {
+        if (node.wave === "constant" && previousWave !== "constant") node.frequency = 1;
         if (node.wave === "custom") ensureCustomWave(node);
         if (node.wave === "sample") {
           node.sample = updateSampleMetadata(node.sample);
@@ -4972,6 +4997,14 @@ function renderPanel() {
         sendNodeParam(node.id, "speed", value);
         savePatch();
       }, { defaultValue: 8 });
+    }
+    if (usesConstantControl) {
+      bindNumberPair("constantValue", "constantValueRange", -1, 1, (value) => {
+        node.frequency = value;
+        renderNodes();
+        sendNodeParam(node.id, "frequency", value);
+        savePatch();
+      }, { defaultValue: 1 });
     }
     if (usesAudioInputGain) {
       bindNumberPair("audioInputGain", "audioInputGainRange", 0, 4, (value) => {
@@ -5188,7 +5221,7 @@ function renderPanel() {
         ${parameterLabel("amount", "Amplitude", "link", link.id, "amount")}
         <div class="field-row">
           <input id="amountRange" type="range" min="0" max="${amountMax}" step="0.001" value="${clamp(link.amount, 0, amountMax)}">
-          <input id="amount" type="number" min="0" max="${amountInputMax}" step="0.001" value="${clamp(link.amount, 0, amountInputMax)}">
+          <input id="amount" type="number" min="${LINK_AMOUNT_INPUT_MIN}" max="${amountInputMax}" step="0.001" value="${clamp(link.amount, LINK_AMOUNT_INPUT_MIN, amountInputMax)}">
         </div>
       </div>
       ${link.to === "audio" ? `
@@ -5251,7 +5284,7 @@ function renderPanel() {
       link.amount = value;
       sendLinkParam(link.id, "amount", value);
       schedulePatchSave();
-    }, { inputMax: amountInputMax, defaultValue: 0 });
+    }, { inputMin: LINK_AMOUNT_INPUT_MIN, inputMax: amountInputMax, defaultValue: 0 });
 
     if (link.to === "audio") {
       bindNumberPair("pan", "panRange", -1, 1, (value) => {
@@ -7091,6 +7124,10 @@ function openSamplePickerModal(nodeId) {
 function nodeFrequencyLabel(node) {
   if (node.wave === "audio-input") return "line in";
   if (node.wave === "noise") return "random";
+  if (node.wave === "constant") {
+    const value = Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), -1, 1) : 1;
+    return value.toFixed(3).replace(/\.?0+$/, "");
+  }
   if (node.wave === "sample") {
     const sample = sampleGraphMeta(node.sample);
     return sample.name ? midiNoteLabel(sample.originalPitch) : "sample";

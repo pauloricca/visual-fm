@@ -481,7 +481,11 @@ pub extern "C" fn addNode(
             wave,
             frequency_mode,
             ratio: ratio.clamp(0.0, 16.0),
-            frequency: frequency.clamp(0.0, 12_000.0),
+            frequency: if wave == 11 {
+                frequency.clamp(-1.0, 1.0)
+            } else {
+                frequency.clamp(0.0, 12_000.0)
+            },
             quantise_enabled: if quantise_enabled != 0 { 1 } else { 0 },
             quantise_root: quantise_root.clamp(-1, 11),
             quantise_scale: quantise_scale.clamp(0, 8),
@@ -546,7 +550,11 @@ pub extern "C" fn setNodeRatio(index: u32, ratio: f64) {
 pub extern "C" fn setNodeFrequency(index: u32, frequency: f64) {
     unsafe {
         if (index as usize) < NODE_COUNT {
-            NODES[index as usize].frequency = frequency.clamp(0.0, 12_000.0);
+            NODES[index as usize].frequency = if NODES[index as usize].wave == 11 {
+                frequency.clamp(-1.0, 1.0)
+            } else {
+                frequency.clamp(0.0, 12_000.0)
+            };
         }
     }
 }
@@ -712,7 +720,7 @@ pub extern "C" fn addLink(
         LINKS[index] = Link {
             from,
             to,
-            amount: amount.clamp(0.0, 32.0),
+            amount: amount.clamp(-32.0, 32.0),
             delay: delay.clamp(0.0, 3.0),
             noise: noise.clamp(0.0, 1.0),
             pan: pan.clamp(-1.0, 1.0),
@@ -830,7 +838,7 @@ pub extern "C" fn setLinkDistortionGain(index: u32, gain: f64) {
 pub extern "C" fn setLinkAmount(index: u32, amount: f64) {
     unsafe {
         if (index as usize) < LINK_COUNT {
-            LINKS[index as usize].amount = amount.clamp(0.0, 32.0);
+            LINKS[index as usize].amount = amount.clamp(-32.0, 32.0);
         }
     }
 }
@@ -1130,6 +1138,7 @@ fn oscillator(
         },
         8 => unsafe { INPUT[frame.min(MAX_WASM_FRAMES - 1)] as f64 * node.audio_input_gain },
         9 => custom_wave_value(node_index, p),
+        11 => node.frequency.clamp(-1.0, 1.0),
         _ => (TWO_PI * p).sin(),
     }
 }
@@ -2191,7 +2200,7 @@ fn effective_link_params(
         }
 
         let mut effective = base;
-        effective.amount = (base.amount * (1.0 + amplitude_mod).clamp(0.0, 4.0)).clamp(0.0, 32.0);
+        effective.amount = (base.amount * (1.0 + amplitude_mod).clamp(0.0, 4.0)).clamp(-32.0, 32.0);
         effective.delay = (base.delay + delay_mod).clamp(0.0, 3.0);
         effective.noise = (base.noise + noise_mod).clamp(0.0, 1.0);
         effective.pan = (base.pan + pan_mod).clamp(-1.0, 1.0);
@@ -2388,7 +2397,7 @@ fn render_node(
         let phase = PHASES[voice_slot][node_index];
         let node_base_frequency = base_frequency(node, note_frequency);
         let active_wave =
-            node.wave == 6 || node.wave == 8 || node.wave == 10 || node_base_frequency > 0.0;
+            node.wave == 6 || node.wave == 8 || node.wave == 10 || node.wave == 11 || node_base_frequency > 0.0;
         let wave = modulated_wave(node.wave, wave_mod);
         let custom_done = node.wave == 9 && custom_mode_is_finite(node.custom_mode) && CUSTOM_WAVE_DONE[voice_slot][node_index];
         let mut value = if active_wave && !custom_done {
@@ -2549,7 +2558,7 @@ fn advance_phases(voice_slot: usize, sample_rate: f64, note_frequency: f64, rele
     unsafe {
         for node_index in 0..NODE_COUNT {
             let node = NODES[node_index];
-            if node.wave == 6 || node.wave == 8 {
+            if node.wave == 6 || node.wave == 8 || node.wave == 11 {
                 FREQUENCY_MODS[node_index] = 0.0;
                 continue;
             }

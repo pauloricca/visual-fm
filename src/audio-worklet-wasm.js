@@ -30,6 +30,7 @@ const WAVE_IDS = new Map([
   ["audio-input", 8],
   ["custom", 9],
   ["sample", 10],
+  ["constant", 11],
 ]);
 
 const MODULATION_TARGET_IDS = new Map([
@@ -282,7 +283,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       wave: WAVE_IDS.has(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
-      frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
+      frequency: Number.isFinite(frequency)
+        ? node.wave === "constant" ? this.clamp(frequency, -1, 1) : this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45))
+        : node.wave === "constant" ? 1 : 440,
       quantise: {
         enabled: Boolean(node.quantise?.enabled),
         root: node.quantise?.root === QUANTISE_MIDI_ROOT || QUANTISE_ROOT_NOTES.includes(node.quantise?.root) ? node.quantise.root : "C",
@@ -371,7 +374,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       id: link.id,
       from: link.from,
       to: link.to,
-      amount: Number.isFinite(amount) ? this.clamp(amount, 0, 32) : 0,
+      amount: Number.isFinite(amount) ? this.clamp(amount, -32, 32) : 0,
       delay: Number.isFinite(delay) ? this.clamp(delay, 0, 3) : 0,
       noise: Number.isFinite(noise) ? this.clamp(noise, 0, 1) : 0,
       pan: Number.isFinite(pan) ? this.clamp(pan, -1, 1) : 0,
@@ -531,7 +534,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       node.ratio = this.clamp(Number(value) || 0, 0, 16);
       this.wasm?.setNodeRatio?.(node.wasmIndex, node.ratio);
     } else if (parameter === "frequency") {
-      node.frequency = this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
+      node.frequency = node.wave === "constant"
+        ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 1, -1, 1)
+        : this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
       this.wasm?.setNodeFrequency?.(node.wasmIndex, node.frequency);
     } else if (parameter === "quantise.enabled") {
       node.quantise.enabled = Boolean(value);
@@ -582,7 +587,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const link = this.linksById.get(id);
     if (!link) return;
     if (parameter === "amount") {
-      link.amount = this.clamp(Number(value) || 0, 0, 32);
+      link.amount = this.clamp(Number(value) || 0, -32, 32);
     } else if (parameter === "delay") {
       link.delay = this.clamp(Number(value) || 0, 0, 3);
     } else if (parameter === "noise") {

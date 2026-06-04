@@ -23,7 +23,7 @@ const MASTER_DC_BLOCK_HZ = 10;
 const FORMANT_INTENSITY_MAX = 36;
 const EMPTY_LINKS = Object.freeze([]);
 const OSCILLATOR_WAVE_TYPES = ["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom"];
-const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "sample", "noise", "perlin", "audio-input"]);
+const WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "sample", "noise", "perlin", "constant", "audio-input"]);
 const PITCHED_WAVE_TYPES = new Set(["sine", "triangle", "saw", "ramp", "square", "sample-hold", "custom", "sample"]);
 const SPEED_WAVE_TYPES = new Set(["perlin"]);
 const QUANTISE_MIDI_ROOT = "midi-note";
@@ -196,7 +196,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
         drone: Boolean(link.drone),
         signalMode: LINK_SIGNAL_MODES.has(link.signalMode) ? link.signalMode : "raw",
         follower: this.normalizeFollower(link.follower),
-        amount: this.clamp(Number(link.amount) || 0, 0, 32),
+        amount: this.clamp(Number(link.amount) || 0, -32, 32),
         delay: this.clamp(Number(link.delay) || 0, 0, MAX_LINK_DELAY_SECONDS),
         noise: this.clamp(Number(link.noise) || 0, 0, 1),
         pan: this.clamp(Number(link.pan) || 0, -1, 1),
@@ -441,7 +441,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
       wave: WAVE_TYPES.has(node.wave) ? node.wave : "sine",
       frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
-      frequency: Number.isFinite(frequency) ? this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45)) : 440,
+      frequency: Number.isFinite(frequency)
+        ? node.wave === "constant" ? this.clamp(frequency, -1, 1) : this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45))
+        : node.wave === "constant" ? 1 : 440,
       quantise,
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
@@ -646,7 +648,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (!link) return;
 
     if (parameter === "amount") {
-      link.amount = this.clamp(Number(value) || 0, 0, 32);
+      link.amount = this.clamp(Number(value) || 0, -32, 32);
     } else if (parameter === "delay") {
       link.delay = this.clamp(Number(value) || 0, 0, MAX_LINK_DELAY_SECONDS);
     } else if (parameter === "noise") {
@@ -690,7 +692,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (parameter === "ratio") {
       node.ratio = this.clamp(Number(value) || 0, 0, 16);
     } else if (parameter === "frequency") {
-      node.frequency = this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
+      node.frequency = node.wave === "constant"
+        ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 1, -1, 1)
+        : this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
     } else if (parameter === "frequencyMode") {
       node.frequencyMode = value === "fixed" ? "fixed" : "ratio";
     } else if (parameter === "speed") {
@@ -1822,6 +1826,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
         return this.randomBipolar();
       case "perlin":
         return this.perlinValue(voice, node.id, p);
+      case "constant":
+        return this.clamp(Number(node.frequency) || 0, -1, 1);
       case "custom":
         return this.customWaveValue(node, p);
       case "sample":
@@ -2288,7 +2294,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     }
     linkStack.delete(link.id);
 
-    params.amount = this.clamp(params.amount * this.clamp(1 + amplitudeMod, 0, 4), 0, 32);
+    params.amount = this.clamp(params.amount * this.clamp(1 + amplitudeMod, 0, 4), -32, 32);
     params.delay = this.clamp(params.delay + delayMod, 0, MAX_LINK_DELAY_SECONDS);
     params.noise = this.clamp(params.noise + noiseMod, 0, 1);
     params.pan = this.clamp(params.pan + panMod, -1, 1);
@@ -2609,7 +2615,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
   advancePhases(voice) {
     this.advanceSamplePlayers(voice);
     for (const node of this.nodes) {
-      if (node.wave === "noise" || node.wave === "audio-input" || node.wave === "sample") continue;
+      if (node.wave === "noise" || node.wave === "audio-input" || node.wave === "sample" || node.wave === "constant") continue;
       const frequencyMod = PITCHED_WAVE_TYPES.has(node.wave)
         ? this.clamp(voice.frequencyMods.get(node.id) || 0, -5, 5)
         : 0;

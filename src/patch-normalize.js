@@ -77,7 +77,9 @@ export function normalizePatch(patch) {
       wave: WAVE_TYPES.includes(node.wave) ? node.wave : "sine",
       frequencyMode: normalizeFrequencyMode(node.frequencyMode),
       ratio: Number.isFinite(Number(node.ratio)) ? clamp(Number(node.ratio), 0, 16) : 1,
-      frequency: Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), 0, 12000) : 440,
+      frequency: Number.isFinite(Number(node.frequency))
+        ? node.wave === "constant" ? clamp(Number(node.frequency), -1, 1) : clamp(Number(node.frequency), 0, 12000)
+        : node.wave === "constant" ? 1 : 440,
       frequencySlow: Boolean(node.frequencySlow),
       quantise: normalizeNodeQuantise(node.quantise),
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
