@@ -1724,13 +1724,24 @@ function removeNodeFromSelection(id) {
   selectNodes(selectedNodeIds().filter((selectedId) => selectedId !== id));
 }
 
+function cloneSampleAudioData(data) {
+  if (data instanceof Float32Array) return new Float32Array(data);
+  if (Array.isArray(data)) return data.slice();
+  if (ArrayBuffer.isView(data)) return Float32Array.from(data);
+  return [];
+}
+
 function duplicateNodes(ids, { selectCopies = true, sync = true } = {}) {
   const uniqueIds = [...new Set(ids)].filter((id) => nodeById(id));
   const idMap = new Map();
   const copies = uniqueIds.map((id) => {
     const source = nodeById(id);
     const copy = {
-      ...clonePatch(source),
+      ...clonePatch({ ...source, sample: sampleGraphMeta(source.sample) }),
+      sample: normalizeSample({
+        ...sampleGraphMeta(source.sample),
+        data: cloneSampleAudioData(source.sample?.data),
+      }),
       id: uid("op"),
       name: `${nodeName(source)} copy`,
     };
@@ -3274,9 +3285,9 @@ function renderRecordingTimelinePanel() {
             <span>Metronome</span>
           </label>
           <div class="recording-transport-actions">
-            <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Stop" : "Play"}" title="${recordingTransportPlaying ? "Stop" : "Play"}">
+            <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Pause" : "Play"}" title="${recordingTransportPlaying ? "Pause" : "Play"}">
               ${recordingTransportPlaying
-                ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="6" width="4" height="12" rx="1"></rect><rect x="13" y="6" width="4" height="12" rx="1"></rect></svg>`
+                ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 6v12M16 6v12" fill="none"></path></svg>`
                 : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10-6.5z"></path></svg>`}
             </button>
             <button class="icon-button" id="rewindRecordingButton" type="button" aria-label="Move playhead to start" title="Move playhead to start">
@@ -4755,9 +4766,9 @@ function renderPanel() {
       ` : ""}
       ${usesSampleControls ? `
         <div class="field">
-          <label for="sampleFileButton">Sample file</label>
+          <label for="sampleFileButton">Sample</label>
           <button class="sample-file-button" id="sampleFileButton" type="button" title="${escapeHtml(sampleName)}">
-            ${escapeHtml(sample.name || "Choose file")}
+            ${escapeHtml(sample.name || "Pick sample")}
           </button>
           <div class="sample-waveform-preview" id="sampleWaveformPreview">
             ${sampleWaveformSvg(node.sample)}
@@ -9417,6 +9428,15 @@ window.addEventListener("keydown", (event) => {
   if (handleUndoRedoShortcut(event)) return;
   syncRelinkDuplicateModifier(event);
   syncNodeDragDuplicateModifier(event);
+
+  if ((event.code === "Space" || event.key === " ") && activeBottomPanels.timeline) {
+    const activeTag = document.activeElement?.tagName;
+    if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (isTextEditingTarget() || ["INPUT", "SELECT", "TEXTAREA"].includes(activeTag)) return;
+    event.preventDefault();
+    toggleRecordingTransport();
+    return;
+  }
 
   const note = keyMap.get(event.key);
   if (note !== undefined) {
