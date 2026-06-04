@@ -3,6 +3,7 @@ import {
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
+  DEFAULT_LINK_SCOPE,
   DEFAULT_AUDIO_DEVICE_ID,
   DEFAULT_CUSTOM_WAVE,
   DEFAULT_SAMPLE,
@@ -14,6 +15,8 @@ import {
   LINK_DISTORTION_TYPES,
   LINK_MIDI_PARAMETERS,
   LINK_MODULATION_TARGETS,
+  LINK_SCOPE_SECONDS_MAX,
+  LINK_SCOPE_SECONDS_MIN,
   LINK_SIGNAL_MODES,
   MASTER_EFFECT_IDS,
   MASTER_EFFECTS,
@@ -129,6 +132,7 @@ export function normalizePatch(patch) {
         drone: Boolean(link.drone),
         signalMode: normalizeSignalMode(link.signalMode),
         follower: normalizeFollower(link.follower),
+        scope: normalizeLinkScope(link.scope),
         filter: normalizeLinkFilter(link.filter),
         distortion: normalizeLinkDistortion(link.distortion),
         envelope: normalizeEnvelope(link.envelope),
@@ -205,6 +209,19 @@ export function normalizeLinkDistortion(distortion = {}) {
     gain: Number.isFinite(Number(distortion.gain))
       ? clamp(Number(distortion.gain), 0.1, 40)
       : DEFAULT_LINK_DISTORTION.gain,
+  };
+}
+
+export function normalizeLinkScope(scope = {}) {
+  return {
+    enabled: Boolean(scope.enabled),
+    mode: ["continuous", "zero-crossing", "envelope"].includes(scope.mode)
+      ? scope.mode
+      : DEFAULT_LINK_SCOPE.mode,
+    lengthMode: scope.lengthMode === "envelope" ? "envelope" : DEFAULT_LINK_SCOPE.lengthMode,
+    lengthSeconds: Number.isFinite(Number(scope.lengthSeconds))
+      ? clamp(Number(scope.lengthSeconds), LINK_SCOPE_SECONDS_MIN, LINK_SCOPE_SECONDS_MAX)
+      : DEFAULT_LINK_SCOPE.lengthSeconds,
   };
 }
 

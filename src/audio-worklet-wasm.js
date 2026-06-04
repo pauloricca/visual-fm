@@ -12,6 +12,7 @@ const VOICE_STEAL_FADE_SECONDS = 0.03;
 const LINK_CONTROL_SMOOTH_SECONDS = 0.012;
 const LINK_CONTROL_SETTLE_EPSILON = 1e-7;
 const LINK_METER_POST_SECONDS = 1 / 30;
+const LINK_SCOPE_SECONDS_MAX = 30;
 const MASTER_DC_BLOCK_HZ = 10;
 const DENORMAL_EPSILON = 1e-20;
 const FORMANT_INTENSITY_MAX = 36;
@@ -149,6 +150,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.linkMeterOutputSums = null;
     this.linkMeterEnvelopeSums = null;
     this.linkMeterCounts = null;
+    this.linkScopeRequest = null;
+    this.linkScopeSamples = null;
     this.masterEffects = this.normalizeEffects();
     this.chorusBuffers = [
       new Float32Array(Math.ceil(sampleRate * 0.08)),
@@ -183,6 +186,8 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.resetRuntimeState();
       } else if (type === "setMuted") {
         this.setMuted(Boolean(payload?.muted));
+      } else if (type === "setLinkScope") {
+        this.setLinkScope(payload);
       }
     };
 
@@ -222,7 +227,10 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         this.linkMeterEnvelopeSums = new Float64Array(this.wasm.memory.buffer, this.wasm.linkMeterEnvelopePtr(), 1024);
         this.linkMeterCounts = new Uint32Array(this.wasm.memory.buffer, this.wasm.linkMeterCountPtr(), 1024);
       }
-        this.wasm.resetPhases();
+      if (typeof this.wasm.linkScopePtr === "function") {
+        this.linkScopeSamples = new Float32Array(this.wasm.memory.buffer, this.wasm.linkScopePtr(), 512);
+      }
+      this.wasm.resetPhases();
       this.ready = true;
       this.syncRustGraph();
       for (const link of this.links) {
@@ -269,6 +277,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       link.controlSmoother = this.syncLinkControlSmoother(link, true);
       this.applyLinkControlSmoother(link);
     }
+    if (this.linkScopeRequest) this.setLinkScope(this.linkScopeRequest);
     this.enforceVoiceLimit();
   }
 
@@ -1176,6 +1185,43 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     );
   }
 
+  setLinkScope(payload = {}) {
+    if (!payload?.linkId) {
+      this.linkScopeRequest = null;
+      this.wasm?.setLinkScope?.(-1, 0, 0.08, 256, sampleRate);
+      return;
+    }
+    const link = this.linksById.get(String(payload.linkId));
+    const points = this.clamp(Math.round(Number(payload.points) || 256), 32, 512);
+    const seconds = this.clamp(Number(payload.seconds) || 0.08, 0.01, LINK_SCOPE_SECONDS_MAX);
+    const mode = payload.mode === "zero-crossing" ? "zero-crossing" : payload.mode === "envelope" ? "envelope" : "continuous";
+    this.linkScopeRequest = {
+      linkId: String(payload.linkId),
+      mode,
+      points,
+      seconds,
+    };
+    const modeId = mode === "zero-crossing" ? 1 : mode === "envelope" ? 2 : 0;
+    this.wasm?.setLinkScope?.(link?.wasmIndex ?? -1, modeId, seconds, points, sampleRate);
+  }
+
+  linkScopeFrameSamples() {
+    if (!this.linkScopeRequest || !this.linkScopeSamples || !this.wasm) return [];
+    const count = this.clamp(Math.round(this.wasm.linkScopeCount?.() || 0), 0, this.linkScopeRequest.points);
+    if (!count) return [];
+    const mode = this.linkScopeRequest.mode;
+    const writeIndex = mode === "envelope"
+      ? 0
+      : this.clamp(Math.round(this.wasm.linkScopeWriteIndex?.() || 0), 0, this.linkScopeRequest.points - 1);
+    const raw = Array.from(this.linkScopeSamples.slice(0, this.linkScopeRequest.points));
+    const samples = mode === "envelope" || count < this.linkScopeRequest.points
+      ? raw.slice(0, count)
+      : raw.slice(writeIndex).concat(raw.slice(0, writeIndex));
+    if (mode !== "zero-crossing") return samples;
+    const crossing = samples.findIndex((sample, index) => index > 0 && samples[index - 1] < 0 && sample >= 0);
+    return crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples;
+  }
+
   flushLinkMeters() {
     if (this.sampleCursor < this.nextLinkMeterPostSample) return;
     this.nextLinkMeterPostSample = this.sampleCursor + Math.max(1, Math.round(sampleRate * LINK_METER_POST_SECONDS));
@@ -1195,6 +1241,16 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.lastOutputPeak = 0;
     this.wasm?.clearLinkMeters?.();
     this.port.postMessage({ type: "linkMeters", payload: { levels } });
+    if (this.linkScopeRequest) {
+      this.port.postMessage({
+        type: "linkScope",
+        payload: {
+          id: this.linkScopeRequest.linkId,
+          mode: this.linkScopeRequest.mode,
+          samples: this.linkScopeFrameSamples(),
+        },
+      });
+    }
   }
 
   fillSilence(outputs) {

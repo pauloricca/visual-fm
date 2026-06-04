@@ -18,6 +18,7 @@ const LINK_CONTROL_SETTLE_EPSILON = 1e-7;
 const ENVELOPE_TRIGGER_THRESHOLD = 0.5;
 const ENVELOPE_TRIGGER_REARM = 0.45;
 const LINK_METER_POST_SECONDS = 1 / 30;
+const LINK_SCOPE_SECONDS_MAX = 30;
 const DENORMAL_EPSILON = 1e-20;
 const MASTER_DC_BLOCK_HZ = 10;
 const FORMANT_INTENSITY_MAX = 36;
@@ -124,6 +125,8 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.sampleCursor = 0;
     this.nextLinkMeterPostSample = 0;
     this.linkMeterPeaks = new Map();
+    this.linkScopeRequest = null;
+    this.linkScopeState = this.createLinkScopeState();
     this.currentInputSample = 0;
     this.masterGain = 0.18;
     this.linkControlSmoothAlpha = 1 - Math.exp(-1 / (sampleRate * LINK_CONTROL_SMOOTH_SECONDS));
@@ -173,7 +176,40 @@ class VisualFmEngine extends AudioWorkletProcessor {
       if (type === "setMuted") {
         this.setMuted(Boolean(payload?.muted));
       }
+      if (type === "setLinkScope") {
+        this.setLinkScope(payload);
+      }
     };
+  }
+
+  createLinkScopeState() {
+    return {
+      samples: [],
+      writeIndex: 0,
+      filled: 0,
+      decimateCounter: 0,
+      lastSample: 0,
+      lastEnvelope: 0,
+      captureActive: false,
+    };
+  }
+
+  setLinkScope(payload = {}) {
+    if (!payload?.linkId) {
+      this.linkScopeRequest = null;
+      this.linkScopeState = this.createLinkScopeState();
+      return;
+    }
+    const points = this.clamp(Math.round(Number(payload.points) || 256), 32, 512);
+    const seconds = this.clamp(Number(payload.seconds) || 0.08, 0.01, LINK_SCOPE_SECONDS_MAX);
+    this.linkScopeRequest = {
+      linkId: String(payload.linkId),
+      mode: payload.mode === "zero-crossing" || payload.mode === "envelope" ? payload.mode : "continuous",
+      points,
+      seconds,
+      decimate: Math.max(1, Math.round((seconds * sampleRate) / points)),
+    };
+    this.linkScopeState = this.createLinkScopeState();
   }
 
   setGraph(graph) {
@@ -2383,6 +2419,57 @@ class VisualFmEngine extends AudioWorkletProcessor {
     if (input > peak.input) peak.input = input;
     if (output > peak.output) peak.output = output;
     if (envelope > peak.envelope) peak.envelope = envelope;
+    this.observeLinkScope(link.id, outputSignal, envelopeSignal);
+  }
+
+  observeLinkScope(linkId, sample, envelope) {
+    const request = this.linkScopeRequest;
+    if (!request || linkId !== request.linkId) return;
+    const state = this.linkScopeState;
+    const value = Number.isFinite(sample) ? this.clamp(sample, -1, 1) : 0;
+    const env = Number.isFinite(envelope) ? this.clamp(envelope, 0, 1) : 0;
+    if (request.mode === "envelope" && state.lastEnvelope <= 0.001 && env > 0.001) {
+      state.samples = [];
+      state.writeIndex = 0;
+      state.filled = 0;
+      state.decimateCounter = 0;
+      state.captureActive = true;
+    }
+    state.lastEnvelope = env;
+    if (request.mode === "envelope" && !state.captureActive) return;
+    state.decimateCounter += 1;
+    if (state.decimateCounter < request.decimate) return;
+    state.decimateCounter = 0;
+    if (request.mode === "envelope") {
+      if (state.samples.length < request.points) {
+        state.samples.push(value);
+      }
+      if (state.samples.length >= request.points) state.captureActive = false;
+      state.lastSample = value;
+      return;
+    }
+    if (state.samples.length < request.points) {
+      state.samples.push(value);
+      state.filled = state.samples.length;
+    } else {
+      state.samples[state.writeIndex] = value;
+      state.writeIndex = (state.writeIndex + 1) % request.points;
+      state.filled = request.points;
+    }
+    state.lastSample = value;
+  }
+
+  linkScopeSamples() {
+    const request = this.linkScopeRequest;
+    const state = this.linkScopeState;
+    if (!request || !state.samples.length) return [];
+    if (request.mode === "envelope") return state.samples.slice();
+    const samples = state.filled >= request.points
+      ? state.samples.slice(state.writeIndex).concat(state.samples.slice(0, state.writeIndex))
+      : state.samples.slice();
+    if (request.mode !== "zero-crossing") return samples;
+    const crossing = samples.findIndex((sample, index) => index > 0 && samples[index - 1] < 0 && sample >= 0);
+    return crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples;
   }
 
   flushLinkMeters() {
@@ -2404,6 +2491,16 @@ class VisualFmEngine extends AudioWorkletProcessor {
       type: "linkMeters",
       payload: { levels },
     });
+    if (this.linkScopeRequest) {
+      this.port.postMessage({
+        type: "linkScope",
+        payload: {
+          id: this.linkScopeRequest.linkId,
+          mode: this.linkScopeRequest.mode,
+          samples: this.linkScopeSamples(),
+        },
+      });
+    }
   }
 
   linkModulationSignal(link, voice, now, source, cache, stack, linkStack = new Set(), options = {}) {

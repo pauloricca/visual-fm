@@ -6,6 +6,7 @@ import {
   DEFAULT_LINK_FILTER,
   DEFAULT_LINK_DISTORTION,
   DEFAULT_LINK_FOLLOWER,
+  DEFAULT_LINK_SCOPE,
   DEFAULT_MAX_VOICES,
   DEFAULT_NODE_QUANTISE,
   DEFAULT_SAMPLE,
@@ -14,6 +15,8 @@ import {
   LINK_FILTER_TYPES,
   LINK_INPUT_T,
   LINK_MODULATION_TARGETS,
+  LINK_SCOPE_SECONDS_MAX,
+  LINK_SCOPE_SECONDS_MIN,
   LINK_SIGNAL_MODES,
   MASTER_EFFECTS,
   MASTER_EFFECT_IDS,
@@ -50,6 +53,7 @@ import {
   normalizeModulationTarget,
   normalizeNodeQuantise,
   normalizePatch,
+  normalizeLinkScope,
   normalizeSample,
   normalizeSignalMode,
 } from "./patch-normalize.js";
@@ -158,6 +162,7 @@ const RECORDING_RULER_LABEL_TARGET_TICKS = 6;
 const RECORDING_WAVEFORM_POINTS = 72;
 const RECORDING_WAVEFORM_SILENCE_FLOOR = 0.003;
 const RECORDING_WAVEFORM_MIN_VISUAL_PEAK = 0.08;
+const LINK_SCOPE_POINTS = 256;
 const MIDI_NOTE_OPTIONS = Array.from({ length: 128 }, (_, value) => ({
   value,
   label: `${midiNoteLabel(value)} (${value})`,
@@ -282,6 +287,9 @@ let recordingScrubPreviewLastAt = 0;
 let audioMuted = false;
 let audioBackend = patchSession.audioBackend || loadAudioBackend();
 let audioBackendStatus = audioBackend === "wasm" ? { backend: "wasm", ready: false } : { backend: "js", ready: true };
+let activeLinkScopeRequestKey = "";
+let pendingLinkScopeFrame = null;
+const linkScopeFrames = new Map();
 let nodeCounter = 3;
 let linkCounter = 3;
 let midiBindingCounter = 1;
@@ -2147,6 +2155,7 @@ function postGraph(slotId = activePatchSlotId, patch = state) {
     payload: graphPayload(patch),
   });
   syncSampleDataToSlot(slot, patch);
+  if (slotId === activePatchSlotId) syncSelectedLinkScopeRequest(true);
 }
 
 function syncSampleDataToSlot(slot, patch = state) {
@@ -2364,6 +2373,54 @@ function sendLinkParam(id, parameter, value) {
   scheduleLinkParamGraphSync();
 }
 
+function envelopeScopeSeconds(link) {
+  const envelope = link?.envelope || {};
+  return clamp(
+    (Number(envelope.delay) || 0)
+      + (Number(envelope.attack) || 0)
+      + (Number(envelope.decay) || 0)
+      + (Number(envelope.release) || 0),
+    0.02,
+    1,
+  );
+}
+
+function linkScopeSeconds(link) {
+  const scope = normalizeLinkScope(link?.scope || DEFAULT_LINK_SCOPE);
+  return scope.lengthMode === "envelope"
+    ? envelopeScopeSeconds(link)
+    : clamp(Number(scope.lengthSeconds) || DEFAULT_LINK_SCOPE.lengthSeconds, LINK_SCOPE_SECONDS_MIN, LINK_SCOPE_SECONDS_MAX);
+}
+
+function selectedLinkScopeRequest() {
+  if (state.selected.type !== "link") return null;
+  const link = linkById(state.selected.id);
+  if (!link) return null;
+  link.scope = normalizeLinkScope(link.scope || DEFAULT_LINK_SCOPE);
+  if (!link.scope.enabled) return null;
+  return {
+    linkId: link.id,
+    mode: link.scope.mode,
+    seconds: linkScopeSeconds(link),
+    points: LINK_SCOPE_POINTS,
+  };
+}
+
+function syncSelectedLinkScopeRequest(force = false) {
+  const request = selectedLinkScopeRequest();
+  const key = request
+    ? `${request.linkId}:${request.mode}:${request.seconds.toFixed(4)}:${request.points}`
+    : "";
+  if (!force && key === activeLinkScopeRequestKey) return;
+  activeLinkScopeRequestKey = key;
+  const message = { type: "setLinkScope", payload: request || { linkId: null } };
+  const slot = activeSynthSlot();
+  if (slot?.node) slot.node.port.postMessage(message);
+  if (!request) return;
+  linkScopeFrames.delete(request.linkId);
+  scheduleLinkScopePaint();
+}
+
 function sendNodeParam(id, parameter, value) {
   const slot = activeSynthSlot();
   if (!slot?.node) return;
@@ -2409,6 +2466,14 @@ function scheduleLinkMeterPaint() {
   });
 }
 
+function scheduleLinkScopePaint() {
+  if (pendingLinkScopeFrame) return;
+  pendingLinkScopeFrame = requestAnimationFrame(() => {
+    pendingLinkScopeFrame = null;
+    updateSelectedLinkScope();
+  });
+}
+
 function handleWorkletMessageForSlot(slotId, event) {
   const { type, payload } = event.data || {};
   if (type === "backendStatus") {
@@ -2420,6 +2485,14 @@ function handleWorkletMessageForSlot(slotId, event) {
     return;
   }
   if (slotId !== activePatchSlotId) return;
+  if (type === "linkScope" && payload?.id) {
+    linkScopeFrames.set(payload.id, {
+      samples: Array.isArray(payload.samples) ? payload.samples.map((value) => Number(value) || 0) : [],
+      mode: payload.mode || "continuous",
+    });
+    scheduleLinkScopePaint();
+    return;
+  }
   if (type !== "linkMeters" || !Array.isArray(payload?.levels)) return;
 
   for (const [id, inputLevel, outputLevel, envelopeLevel] of payload.levels) {
@@ -2448,6 +2521,15 @@ function updateSelectedLinkMeter() {
   if (inputFill) inputFill.style.transform = `scaleY(${clamp(levels.input || 0, 0, 1)})`;
   if (outputFill) outputFill.style.transform = `scaleY(${clamp(levels.output || 0, 0, 1)})`;
   if (envelopeFill) envelopeFill.style.transform = `scaleY(${clamp(levels.envelope || 0, 0, 1)})`;
+}
+
+function updateSelectedLinkScope() {
+  const scope = panel.querySelector("[data-link-scope]");
+  if (!scope) return;
+  const linkId = scope.dataset.linkScope;
+  const trace = scope.querySelector("[data-link-scope-trace]");
+  const frame = linkScopeFrames.get(linkId);
+  if (trace) trace.setAttribute("d", linkScopePath(frame?.samples || []));
 }
 
 function nodeOutputMeterLevel(nodeId) {
@@ -5091,6 +5173,9 @@ function renderPanel() {
     const signalMode = normalizeSignalMode(link.signalMode);
     const usesFollowerControls = signalMode !== "raw";
     const follower = link.follower || DEFAULT_LINK_FOLLOWER;
+    link.scope = normalizeLinkScope(link.scope || DEFAULT_LINK_SCOPE);
+    const usesScopeControls = Boolean(link.scope.enabled);
+    const scopeLengthSeconds = linkScopeSeconds(link);
     const usesFilterControls = link.filter.type !== "none";
     const distortion = link.distortion || DEFAULT_LINK_DISTORTION;
     const usesDistortionControls = Boolean(distortion.enabled);
@@ -5193,6 +5278,33 @@ function renderPanel() {
         </div>
       </section>
     ` : "";
+    const scopeControls = usesScopeControls ? `
+      ${linkScope(link)}
+      <div class="field">
+        <label for="linkScopeMode">Sync</label>
+        <select id="linkScopeMode">
+          <option value="continuous" ${link.scope.mode === "continuous" ? "selected" : ""}>Continuous</option>
+          <option value="zero-crossing" ${link.scope.mode === "zero-crossing" ? "selected" : ""}>Zero crossing</option>
+          <option value="envelope" ${link.scope.mode === "envelope" ? "selected" : ""}>Envelope trigger</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="linkScopeLengthMode">Length</label>
+        <select id="linkScopeLengthMode">
+          <option value="fixed" ${link.scope.lengthMode === "fixed" ? "selected" : ""}>Fixed</option>
+          <option value="envelope" ${link.scope.lengthMode === "envelope" ? "selected" : ""}>Envelope</option>
+        </select>
+      </div>
+      ${link.scope.lengthMode === "fixed" ? `
+      <div class="field">
+        <label for="linkScopeLength">Window (s)</label>
+        <div class="field-row">
+          <input id="linkScopeLengthRange" type="range" min="${LINK_SCOPE_SECONDS_MIN}" max="${LINK_SCOPE_SECONDS_MAX}" step="0.01" value="${scopeLengthSeconds}">
+          <input id="linkScopeLength" type="number" min="${LINK_SCOPE_SECONDS_MIN}" max="${LINK_SCOPE_SECONDS_MAX}" step="0.01" value="${scopeLengthSeconds}">
+        </div>
+      </div>
+      ` : ""}
+    ` : "";
 
     panel.innerHTML = `
       <div class="panel-heading">
@@ -5255,6 +5367,15 @@ function renderPanel() {
         </div>
       </div>
       ${envelopeControls}
+      <section class="effect-section">
+        <div class="toggle-field">
+          <label class="toggle-row" for="linkScopeEnabled">
+            <input id="linkScopeEnabled" type="checkbox" ${usesScopeControls ? "checked" : ""}>
+            <span>Signal scope</span>
+          </label>
+        </div>
+        ${scopeControls}
+      </section>
       <section class="effect-section">
         <div class="toggle-field">
           <label class="toggle-row" for="filterEnabled">
@@ -5334,6 +5455,47 @@ function renderPanel() {
       sendGraph();
       savePatch();
     });
+
+    panel.querySelector("#linkScopeEnabled").addEventListener("change", (event) => {
+      link.scope = normalizeLinkScope({
+        ...(link.scope || DEFAULT_LINK_SCOPE),
+        enabled: event.target.checked,
+      });
+      renderPanel();
+      syncSelectedLinkScopeRequest(true);
+      savePatch();
+    });
+
+    panel.querySelector("#linkScopeMode")?.addEventListener("change", (event) => {
+      link.scope = normalizeLinkScope({
+        ...(link.scope || DEFAULT_LINK_SCOPE),
+        mode: event.target.value,
+      });
+      syncSelectedLinkScopeRequest(true);
+      savePatch();
+    });
+
+    panel.querySelector("#linkScopeLengthMode")?.addEventListener("change", (event) => {
+      link.scope = normalizeLinkScope({
+        ...(link.scope || DEFAULT_LINK_SCOPE),
+        lengthMode: event.target.value,
+      });
+      renderPanel();
+      syncSelectedLinkScopeRequest(true);
+      savePatch();
+    });
+
+    if (usesScopeControls && link.scope.lengthMode === "fixed") {
+      bindNumberPair("linkScopeLength", "linkScopeLengthRange", LINK_SCOPE_SECONDS_MIN, LINK_SCOPE_SECONDS_MAX, (value) => {
+        link.scope = normalizeLinkScope({
+          ...(link.scope || DEFAULT_LINK_SCOPE),
+          lengthMode: "fixed",
+          lengthSeconds: value,
+        });
+        syncSelectedLinkScopeRequest(true);
+        schedulePatchSave();
+      }, { defaultValue: DEFAULT_LINK_SCOPE.lengthSeconds });
+    }
 
     if (usesFollowerControls) {
       bindNumberPair("followerAttack", "followerAttackRange", 0.001, 2, (value) => {
@@ -5424,6 +5586,7 @@ function renderPanel() {
         bindNumberPair(name, `${name}Range`, min, max, (value) => {
           link.envelope[name] = value;
           refreshAdsrView(link.envelope);
+          if (link.scope?.enabled && link.scope.lengthMode === "envelope") syncSelectedLinkScopeRequest(true);
           sendGraph();
           savePatch();
         }, { defaultValue: () => defaultEnvelopeValue(link, name) });
@@ -7204,6 +7367,29 @@ function linkMeter(linkId) {
   `;
 }
 
+function linkScopePath(samples, width = 220, height = 76) {
+  if (!Array.isArray(samples) || samples.length < 2) return "";
+  const lastIndex = samples.length - 1;
+  return samples.map((sample, index) => {
+    const x = (index / lastIndex) * width;
+    const y = height * 0.5 - clamp(Number(sample) || 0, -1, 1) * height * 0.44;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function linkScope(link) {
+  const frame = linkScopeFrames.get(link.id);
+  const path = linkScopePath(frame?.samples || []);
+  return `
+    <div class="link-scope" data-link-scope="${escapeHtml(link.id)}" aria-label="Link output signal scope">
+      <svg viewBox="0 0 220 76" preserveAspectRatio="none" role="img">
+        <line class="link-scope-midline" x1="0" y1="38" x2="220" y2="38"></line>
+        <path class="link-scope-trace" data-link-scope-trace="${escapeHtml(link.id)}" d="${path}"></path>
+      </svg>
+    </div>
+  `;
+}
+
 function nodeOutputMeter(nodeId) {
   const level = nodeOutputMeterLevel(nodeId);
   return `
@@ -8385,6 +8571,7 @@ function render() {
   renderAudioOut();
   renderWires();
   renderPanel();
+  syncSelectedLinkScopeRequest();
   renderBottomPanel();
   syncHistoryButtons();
 }
@@ -8597,6 +8784,7 @@ function createLink(from, to) {
     drone: false,
     signalMode: "raw",
     follower: { ...DEFAULT_LINK_FOLLOWER },
+    scope: { ...DEFAULT_LINK_SCOPE },
     filter: { ...DEFAULT_LINK_FILTER },
     distortion: { ...DEFAULT_LINK_DISTORTION },
     envelope: to === "audio"

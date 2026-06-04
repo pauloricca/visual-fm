@@ -73,6 +73,14 @@ export const LINK_MODULATION_TARGETS = [
 export const DEFAULT_LINK_FILTER = { type: "none", cutoff: 5000, resonance: 0.7 };
 export const DEFAULT_LINK_DISTORTION = { enabled: false, type: "soft-clip", gain: 1.5 };
 export const DEFAULT_LINK_FOLLOWER = { attack: 0.01, release: 0.12 };
+export const DEFAULT_LINK_SCOPE = {
+  enabled: false,
+  mode: "continuous",
+  lengthMode: "fixed",
+  lengthSeconds: 0.08,
+};
+export const LINK_SCOPE_SECONDS_MIN = 0.01;
+export const LINK_SCOPE_SECONDS_MAX = 30;
 
 export const MASTER_EFFECTS = {
   chorus: {
@@ -193,6 +201,7 @@ export const defaultPatch = {
       drone: false,
       signalMode: "raw",
       follower: { ...DEFAULT_LINK_FOLLOWER },
+      scope: { ...DEFAULT_LINK_SCOPE },
       filter: { ...DEFAULT_LINK_FILTER },
       distortion: { ...DEFAULT_LINK_DISTORTION },
       envelope: { delay: 0, attack: 0.03, decay: 0.16, sustain: 0.65, release: 0.26 },
@@ -210,6 +219,7 @@ export const defaultPatch = {
       drone: false,
       signalMode: "raw",
       follower: { ...DEFAULT_LINK_FOLLOWER },
+      scope: { ...DEFAULT_LINK_SCOPE },
       filter: { ...DEFAULT_LINK_FILTER },
       distortion: { ...DEFAULT_LINK_DISTORTION },
       envelope: { delay: 0, attack: 0.01, decay: 0.18, sustain: 0.78, release: 0.32 },

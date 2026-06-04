@@ -10,6 +10,8 @@ const MAX_FORMANT_BANDS: usize = 3;
 const MAX_CUSTOM_WAVE_POINTS: usize = 64;
 const MAX_SAMPLE_SLOTS: usize = 16;
 const MAX_SAMPLE_FRAMES: usize = 524_288;
+const LINK_SCOPE_POINTS: usize = 512;
+const LINK_SCOPE_SECONDS_MAX: f64 = 30.0;
 const FORMANT_INTENSITY_MAX: f64 = 36.0;
 const CUSTOM_ONESHOT_EDGE_FADE_SECONDS: f64 = 0.002;
 const SAMPLE_EDGE_FADE_SECONDS: f64 = 0.002;
@@ -311,6 +313,16 @@ static mut LINK_METER_INPUT_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
 static mut LINK_METER_OUTPUT_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
 static mut LINK_METER_ENVELOPE_SUMS: [f64; MAX_LINKS] = [0.0; MAX_LINKS];
 static mut LINK_METER_COUNTS: [u32; MAX_LINKS] = [0; MAX_LINKS];
+static mut LINK_SCOPE_SAMPLES: [f32; LINK_SCOPE_POINTS] = [0.0; LINK_SCOPE_POINTS];
+static mut LINK_SCOPE_LINK_INDEX: i32 = -1;
+static mut LINK_SCOPE_MODE: i32 = 0;
+static mut LINK_SCOPE_POINTS_ACTIVE: usize = 256;
+static mut LINK_SCOPE_DECIMATE: u32 = 1;
+static mut LINK_SCOPE_DECIMATE_COUNTER: u32 = 0;
+static mut LINK_SCOPE_COUNT: u32 = 0;
+static mut LINK_SCOPE_WRITE_INDEX: u32 = 0;
+static mut LINK_SCOPE_LAST_ENVELOPE: f64 = 0.0;
+static mut LINK_SCOPE_CAPTURE_ACTIVE: bool = false;
 static mut CURRENT_STAMP: u32 = 1;
 
 #[no_mangle]
@@ -346,6 +358,21 @@ pub extern "C" fn linkMeterEnvelopePtr() -> *const f64 {
 #[no_mangle]
 pub extern "C" fn linkMeterCountPtr() -> *const u32 {
     core::ptr::addr_of!(LINK_METER_COUNTS).cast::<u32>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkScopePtr() -> *const f32 {
+    core::ptr::addr_of!(LINK_SCOPE_SAMPLES).cast::<f32>()
+}
+
+#[no_mangle]
+pub extern "C" fn linkScopeCount() -> u32 {
+    unsafe { LINK_SCOPE_COUNT }
+}
+
+#[no_mangle]
+pub extern "C" fn linkScopeWriteIndex() -> u32 {
+    unsafe { LINK_SCOPE_WRITE_INDEX }
 }
 
 #[no_mangle]
@@ -420,6 +447,8 @@ pub extern "C" fn clearGraph() {
     unsafe {
         NODE_COUNT = 0;
         LINK_COUNT = 0;
+        LINK_SCOPE_LINK_INDEX = -1;
+        reset_link_scope();
         LINK_DELAY_SLOT_COUNT = 0;
         LINK_COMB_SLOT_COUNT = 0;
         for index in 0..MAX_LINKS {
@@ -446,6 +475,45 @@ pub extern "C" fn clearLinkMeters() {
             LINK_METER_ENVELOPE_SUMS[index] = 0.0;
             LINK_METER_COUNTS[index] = 0;
         }
+    }
+}
+
+fn reset_link_scope() {
+    unsafe {
+        for index in 0..LINK_SCOPE_POINTS {
+            LINK_SCOPE_SAMPLES[index] = 0.0;
+        }
+        LINK_SCOPE_DECIMATE_COUNTER = 0;
+        LINK_SCOPE_COUNT = 0;
+        LINK_SCOPE_WRITE_INDEX = 0;
+        LINK_SCOPE_LAST_ENVELOPE = 0.0;
+        LINK_SCOPE_CAPTURE_ACTIVE = false;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setLinkScope(
+    link_index: i32,
+    mode: i32,
+    seconds: f64,
+    points: u32,
+    sample_rate: f64,
+) {
+    unsafe {
+        if link_index < 0 || link_index as usize >= LINK_COUNT {
+            LINK_SCOPE_LINK_INDEX = -1;
+            reset_link_scope();
+            return;
+        }
+        LINK_SCOPE_LINK_INDEX = link_index;
+        LINK_SCOPE_MODE = if mode == 1 || mode == 2 { mode } else { 0 };
+        LINK_SCOPE_POINTS_ACTIVE = (points as usize).clamp(32, LINK_SCOPE_POINTS);
+        let safe_seconds = if seconds.is_finite() { seconds.clamp(0.01, LINK_SCOPE_SECONDS_MAX) } else { 0.08 };
+        let safe_rate = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 44_100.0 };
+        LINK_SCOPE_DECIMATE = ((safe_seconds * safe_rate) / LINK_SCOPE_POINTS_ACTIVE as f64)
+            .round()
+            .max(1.0) as u32;
+        reset_link_scope();
     }
 }
 
@@ -1090,6 +1158,47 @@ fn observe_link_meter(link_index: usize, input: f64, output: f64, envelope: f64)
         LINK_METER_OUTPUT_SUMS[link_index] += output.abs().clamp(0.0, 1.0);
         LINK_METER_ENVELOPE_SUMS[link_index] += envelope.abs().clamp(0.0, 1.0);
         LINK_METER_COUNTS[link_index] = LINK_METER_COUNTS[link_index].saturating_add(1);
+    }
+    observe_link_scope(link_index, output, envelope);
+}
+
+fn observe_link_scope(link_index: usize, output: f64, envelope: f64) {
+    unsafe {
+        if LINK_SCOPE_LINK_INDEX != link_index as i32 || LINK_SCOPE_POINTS_ACTIVE == 0 {
+            return;
+        }
+        let value = output.clamp(-1.0, 1.0) as f32;
+        let env = envelope.clamp(0.0, 1.0);
+        if LINK_SCOPE_MODE == 2 && LINK_SCOPE_LAST_ENVELOPE <= 0.001 && env > 0.001 {
+            LINK_SCOPE_DECIMATE_COUNTER = 0;
+            LINK_SCOPE_COUNT = 0;
+            LINK_SCOPE_WRITE_INDEX = 0;
+            LINK_SCOPE_CAPTURE_ACTIVE = true;
+        }
+        LINK_SCOPE_LAST_ENVELOPE = env;
+        if LINK_SCOPE_MODE == 2 && !LINK_SCOPE_CAPTURE_ACTIVE {
+            return;
+        }
+        LINK_SCOPE_DECIMATE_COUNTER = LINK_SCOPE_DECIMATE_COUNTER.saturating_add(1);
+        if LINK_SCOPE_DECIMATE_COUNTER < LINK_SCOPE_DECIMATE {
+            return;
+        }
+        LINK_SCOPE_DECIMATE_COUNTER = 0;
+        if LINK_SCOPE_MODE == 2 {
+            if (LINK_SCOPE_COUNT as usize) < LINK_SCOPE_POINTS_ACTIVE {
+                LINK_SCOPE_SAMPLES[LINK_SCOPE_COUNT as usize] = value;
+                LINK_SCOPE_COUNT = LINK_SCOPE_COUNT.saturating_add(1);
+            }
+            if (LINK_SCOPE_COUNT as usize) >= LINK_SCOPE_POINTS_ACTIVE {
+                LINK_SCOPE_CAPTURE_ACTIVE = false;
+            }
+            return;
+        }
+        LINK_SCOPE_SAMPLES[LINK_SCOPE_WRITE_INDEX as usize] = value;
+        LINK_SCOPE_WRITE_INDEX = (LINK_SCOPE_WRITE_INDEX + 1) % LINK_SCOPE_POINTS_ACTIVE as u32;
+        if (LINK_SCOPE_COUNT as usize) < LINK_SCOPE_POINTS_ACTIVE {
+            LINK_SCOPE_COUNT = LINK_SCOPE_COUNT.saturating_add(1);
+        }
     }
 }
 
