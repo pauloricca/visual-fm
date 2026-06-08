@@ -3,6 +3,10 @@ const MAX_LINK_DELAY_SECONDS = 3;
 const VELOCITY_SENSITIVITY_MIN = -8;
 const VELOCITY_SENSITIVITY_MAX = 8;
 const DEFAULT_MAX_ACTIVE_VOICES = 5;
+const DEFAULT_TEMPO = 120;
+const TEMPO_MIN = 20;
+const TEMPO_MAX = 300;
+const DEFAULT_SYNC_BEATS = 1;
 const MIN_MAX_ACTIVE_VOICES = 1;
 const MAX_MAX_ACTIVE_VOICES = 16;
 const NOTE_ON_BATCH_SECONDS = 0;
@@ -116,6 +120,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
     this.pendingSampleVoiceStarts = [];
     this.sampleDataByNodeId = new Map();
     this.maxVoices = DEFAULT_MAX_ACTIVE_VOICES;
+    this.tempo = DEFAULT_TEMPO;
     this.voiceCounter = 1;
     this.voicePool = Array.from({ length: MAX_MAX_ACTIVE_VOICES }, () => this.createVoiceShell());
     this.droneVoice = this.createVoice("drone", 440, 1, 0, true, { initialPhaseZero: true });
@@ -219,6 +224,7 @@ class VisualFmEngine extends AudioWorkletProcessor {
       if (!this.nodesById.has(nodeId)) this.sampleDataByNodeId.delete(nodeId);
     }
     this.maxVoices = this.normalizeMaxVoices(graph.maxVoices);
+    this.tempo = this.normalizeTempo(graph.tempo);
     const rawLinks = graph.links || [];
     const rawLinksById = new Map(rawLinks.map((link) => [link.id, link]));
     this.links = rawLinks.map((link) => {
@@ -475,11 +481,12 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return {
       id: node.id,
       wave: WAVE_TYPES.has(node.wave) ? node.wave : "sine",
-      frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
+      frequencyMode: ["ratio", "fixed", "sync"].includes(node.frequencyMode) ? node.frequencyMode : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency)
         ? node.wave === "constant" ? this.clamp(frequency, -1, 1) : this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45))
         : node.wave === "constant" ? 1 : 440,
+      syncBeats: this.normalizeSyncBeats(node.syncBeats),
       quantise,
       speed: Number.isFinite(speed) ? this.clamp(speed, 0.01, 60) : 8,
       audioInputGain: Number.isFinite(audioInputGain) ? this.clamp(audioInputGain, 0, 4) : 1,
@@ -554,6 +561,16 @@ class VisualFmEngine extends AudioWorkletProcessor {
     return Number.isFinite(value)
       ? this.clamp(Math.round(value), MIN_MAX_ACTIVE_VOICES, MAX_MAX_ACTIVE_VOICES)
       : DEFAULT_MAX_ACTIVE_VOICES;
+  }
+
+  normalizeTempo(tempo) {
+    const value = Number(tempo);
+    return Number.isFinite(value) ? this.clamp(value, TEMPO_MIN, TEMPO_MAX) : DEFAULT_TEMPO;
+  }
+
+  normalizeSyncBeats(syncBeats) {
+    const value = Number(syncBeats);
+    return Number.isFinite(value) && value > 0 ? this.clamp(value, 1 / 64, 64) : DEFAULT_SYNC_BEATS;
   }
 
   normalizeEffects(effects = {}) {
@@ -732,7 +749,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
         ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 1, -1, 1)
         : this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
     } else if (parameter === "frequencyMode") {
-      node.frequencyMode = value === "fixed" ? "fixed" : "ratio";
+      node.frequencyMode = ["ratio", "fixed", "sync"].includes(value) ? value : "ratio";
+    } else if (parameter === "syncBeats") {
+      node.syncBeats = this.normalizeSyncBeats(value);
     } else if (parameter === "speed") {
       node.speed = this.clamp(Number(value) || 0.01, 0.01, 60);
     } else if (parameter === "audioInputGain") {
@@ -2462,14 +2481,17 @@ class VisualFmEngine extends AudioWorkletProcessor {
   linkScopeSamples() {
     const request = this.linkScopeRequest;
     const state = this.linkScopeState;
-    if (!request || !state.samples.length) return [];
-    if (request.mode === "envelope") return state.samples.slice();
+    if (!request) return [];
+    const padCount = Math.max(0, request.points - state.samples.length);
+    if (request.mode === "envelope") {
+      return state.samples.concat(Array(padCount).fill(0)).slice(0, request.points);
+    }
     const samples = state.filled >= request.points
       ? state.samples.slice(state.writeIndex).concat(state.samples.slice(0, state.writeIndex))
-      : state.samples.slice();
-    if (request.mode !== "zero-crossing") return samples;
+      : Array(Math.max(0, request.points - state.samples.length)).fill(0).concat(state.samples);
+    if (request.mode !== "zero-crossing") return samples.slice(0, request.points);
     const crossing = samples.findIndex((sample, index) => index > 0 && samples[index - 1] < 0 && sample >= 0);
-    return crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples;
+    return (crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples).slice(0, request.points);
   }
 
   flushLinkMeters() {
@@ -2537,9 +2559,9 @@ class VisualFmEngine extends AudioWorkletProcessor {
   }
 
   baseFrequency(node, voice) {
-    return node.frequencyMode === "fixed"
-      ? node.frequency
-      : voice.frequency * (Number.isFinite(node.ratio) ? node.ratio : 1);
+    if (node.frequencyMode === "fixed") return node.frequency;
+    if (node.frequencyMode === "sync") return (this.tempo / 60) / this.normalizeSyncBeats(node.syncBeats);
+    return voice.frequency * (Number.isFinite(node.ratio) ? node.ratio : 1);
   }
 
   renderNode(nodeId, voice, now, cache, stack, linkStack = new Set()) {

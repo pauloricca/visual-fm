@@ -13,6 +13,7 @@ const MAX_SAMPLE_FRAMES: usize = 524_288;
 const LINK_SCOPE_POINTS: usize = 512;
 const LINK_SCOPE_SECONDS_MAX: f64 = 30.0;
 const FORMANT_INTENSITY_MAX: f64 = 36.0;
+const DEFAULT_TEMPO: f64 = 120.0;
 const CUSTOM_ONESHOT_EDGE_FADE_SECONDS: f64 = 0.002;
 const SAMPLE_EDGE_FADE_SECONDS: f64 = 0.002;
 const VOICE_START_FADE_SECONDS: f64 = 0.006;
@@ -61,6 +62,7 @@ struct Node {
     frequency_mode: i32,
     ratio: f64,
     frequency: f64,
+    sync_beats: f64,
     quantise_enabled: i32,
     quantise_root: i32,
     quantise_scale: i32,
@@ -110,6 +112,7 @@ const EMPTY_NODE: Node = Node {
     frequency_mode: 0,
     ratio: 1.0,
     frequency: 440.0,
+    sync_beats: 1.0,
     quantise_enabled: 0,
     quantise_root: 0,
     quantise_scale: 0,
@@ -324,6 +327,7 @@ static mut LINK_SCOPE_WRITE_INDEX: u32 = 0;
 static mut LINK_SCOPE_LAST_ENVELOPE: f64 = 0.0;
 static mut LINK_SCOPE_CAPTURE_ACTIVE: bool = false;
 static mut CURRENT_STAMP: u32 = 1;
+static mut TEMPO: f64 = DEFAULT_TEMPO;
 
 #[no_mangle]
 pub extern "C" fn leftPtr() -> *const f32 {
@@ -523,6 +527,7 @@ pub extern "C" fn addNode(
     frequency_mode: i32,
     ratio: f64,
     frequency: f64,
+    sync_beats: f64,
     quantise_enabled: i32,
     quantise_root: i32,
     quantise_scale: i32,
@@ -547,13 +552,14 @@ pub extern "C" fn addNode(
         let index = NODE_COUNT;
         NODES[index] = Node {
             wave,
-            frequency_mode,
+            frequency_mode: frequency_mode.clamp(0, 2),
             ratio: ratio.clamp(0.0, 16.0),
             frequency: if wave == 11 {
                 frequency.clamp(-1.0, 1.0)
             } else {
                 frequency.clamp(0.0, 12_000.0)
             },
+            sync_beats: sync_beats.clamp(1.0 / 64.0, 64.0),
             quantise_enabled: if quantise_enabled != 0 { 1 } else { 0 },
             quantise_root: quantise_root.clamp(-1, 11),
             quantise_scale: quantise_scale.clamp(0, 8),
@@ -600,7 +606,23 @@ pub extern "C" fn addCustomWavePoint(node_index: i32, x: f64, y: f64) -> i32 {
 pub extern "C" fn setNodeFrequencyMode(index: u32, frequency_mode: i32) {
     unsafe {
         if (index as usize) < NODE_COUNT {
-            NODES[index as usize].frequency_mode = if frequency_mode == 1 { 1 } else { 0 };
+            NODES[index as usize].frequency_mode = frequency_mode.clamp(0, 2);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setTempo(tempo: f64) {
+    unsafe {
+        TEMPO = tempo.clamp(20.0, 300.0);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn setNodeSyncBeats(index: u32, sync_beats: f64) {
+    unsafe {
+        if (index as usize) < NODE_COUNT {
+            NODES[index as usize].sync_beats = sync_beats.clamp(1.0 / 64.0, 64.0);
         }
     }
 }
@@ -1689,6 +1711,8 @@ fn glide_frequency(
 fn base_frequency(node: Node, note_frequency: f64) -> f64 {
     if node.frequency_mode == 1 {
         node.frequency
+    } else if node.frequency_mode == 2 {
+        unsafe { (TEMPO / 60.0) / node.sync_beats.clamp(1.0 / 64.0, 64.0) }
     } else {
         note_frequency * node.ratio
     }

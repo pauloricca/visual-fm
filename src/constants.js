@@ -31,7 +31,31 @@ export const DEFAULT_CUSTOM_WAVE = Object.freeze({
   ]),
 });
 export const SPEED_WAVE_TYPES = new Set(["perlin"]);
-export const FREQUENCY_MODES = ["ratio", "fixed"];
+export const FREQUENCY_MODES = ["ratio", "fixed", "sync"];
+export const DEFAULT_TEMPO = 120;
+export const TEMPO_MIN = 20;
+export const TEMPO_MAX = 300;
+export const DEFAULT_NODE_SYNC_BEATS = 1;
+export const NODE_SYNC_BEAT_OPTIONS = Object.freeze([
+  Object.freeze({ value: 1 / 64, label: "64th" }),
+  Object.freeze({ value: 1 / 32, label: "32nd" }),
+  Object.freeze({ value: 1 / 16, label: "16th" }),
+  Object.freeze({ value: 1 / 8, label: "8th" }),
+  Object.freeze({ value: 1 / 4, label: "4th" }),
+  Object.freeze({ value: 1 / 3, label: "Triplet" }),
+  Object.freeze({ value: 1 / 2, label: "Half" }),
+  Object.freeze({ value: 1, label: "Beat" }),
+  Object.freeze({ value: 2, label: "2 beats" }),
+  Object.freeze({ value: 3, label: "3 beats" }),
+  Object.freeze({ value: 5, label: "5 beats" }),
+  Object.freeze({ value: 6, label: "6 beats" }),
+  Object.freeze({ value: 7, label: "7 beats" }),
+  Object.freeze({ value: 4, label: "Bar" }),
+  ...Array.from({ length: 15 }, (_, index) => {
+    const bars = index + 2;
+    return Object.freeze({ value: bars * 4, label: `${bars} bars` });
+  }),
+]);
 export const QUANTISE_MIDI_ROOT = "midi-note";
 export const QUANTISE_ROOT_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 export const QUANTISE_ROOT_OPTIONS = [QUANTISE_MIDI_ROOT, ...QUANTISE_ROOT_NOTES];
@@ -129,6 +153,7 @@ export const NODE_MIDI_PARAMETERS = new Set([
   "frequencyMode",
   "ratio",
   "frequency",
+  "syncBeats",
   "quantise.enabled",
   "quantise.root",
   "quantise.scale",
@@ -185,8 +210,8 @@ export const defaultPatch = {
     reverb: { enabled: false, size: 0.55, decay: 0.45, mix: 0.25 },
   },
   nodes: [
-    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
-    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
+    { id: "op-1", name: "A", x: 260, y: 220, wave: "sine", frequencyMode: "ratio", ratio: 1, frequency: 440, syncBeats: DEFAULT_NODE_SYNC_BEATS, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
+    { id: "op-2", name: "B", x: 490, y: 180, wave: "sine", frequencyMode: "ratio", ratio: 2, frequency: 880, syncBeats: DEFAULT_NODE_SYNC_BEATS, frequencySlow: false, quantise: { ...DEFAULT_NODE_QUANTISE }, speed: 8, audioInputGain: 1, customWave: DEFAULT_CUSTOM_WAVE, sample: DEFAULT_SAMPLE },
   ],
   links: [
     {

@@ -8,7 +8,9 @@ import {
   DEFAULT_LINK_FOLLOWER,
   DEFAULT_LINK_SCOPE,
   DEFAULT_MAX_VOICES,
+  DEFAULT_NODE_SYNC_BEATS,
   DEFAULT_NODE_QUANTISE,
+  DEFAULT_TEMPO,
   DEFAULT_SAMPLE,
   FREQUENCY_MODES,
   LINK_DISTORTION_TYPES,
@@ -30,6 +32,7 @@ import {
   MIN_KEYBOARD_LENGTH,
   MIN_KEYBOARD_START_NOTE,
   MIN_MAX_VOICES,
+  NODE_SYNC_BEAT_OPTIONS,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
   QUANTISE_MIDI_ROOT,
@@ -38,6 +41,8 @@ import {
   QUANTISE_SCALES,
   RECENT_MIDI_CC_WINDOW_MS,
   STORAGE_KEY,
+  TEMPO_MAX,
+  TEMPO_MIN,
   VELOCITY_SENSITIVITY_MAX,
   VELOCITY_SENSITIVITY_MIN,
   WAVE_TYPES,
@@ -52,6 +57,7 @@ import {
   normalizeFrequencyMode,
   normalizeModulationTarget,
   normalizeNodeQuantise,
+  normalizeNodeSyncBeats,
   normalizePatch,
   normalizeLinkScope,
   normalizeSample,
@@ -151,9 +157,6 @@ const NODE_LAYOUT_HALF_HEIGHT = 43;
 const AUDIO_OUT_LAYOUT_HALF_WIDTH = 70;
 const AUDIO_OUT_LAYOUT_HALF_HEIGHT = 25;
 const PATCH_PAN_VISIBILITY_MARGIN = 0.2;
-const RECORDING_TEMPO_MIN = 40;
-const RECORDING_TEMPO_MAX = 220;
-const RECORDING_DEFAULT_TEMPO = 120;
 const RECORDING_COUNTDOWN_BEATS = 4;
 const RECORDING_TIMELINE_MIN_SECONDS = 8;
 const RECORDING_RULER_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -228,6 +231,7 @@ const state = {
   sessionName: patchSession.sessionName,
   audioInputDeviceId: patchSession.audioInputDeviceId,
   audioOutputDeviceId: patchSession.audioOutputDeviceId,
+  tempo: patchSession.tempo,
   linkSignalGradientMeters: patchSession.linkSignalGradientMeters,
   keyboardStartNote: patchSession.keyboardStartNote,
   keyboardLength: patchSession.keyboardLength,
@@ -260,7 +264,6 @@ let recordingCountdownActive = false;
 let recordingMetronomeTimer = null;
 let recordingTimelineFrame = null;
 let recordingTimelineStartedAt = 0;
-let recordingTimelineTempo = RECORDING_DEFAULT_TEMPO;
 let recordingMetronomeEnabled = false;
 let recordingLaneCounter = 1;
 const recordingLanes = normalizeStoredRecordingLanes(patchSession.recordings);
@@ -460,6 +463,9 @@ function sessionSettingsFromPatch(patch = normalizeDefaultPatch()) {
     audioBackend: loadAudioBackend(),
     audioInputDeviceId: patch.audioInputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
     audioOutputDeviceId: patch.audioOutputDeviceId || DEFAULT_AUDIO_DEVICE_ID,
+    tempo: Number.isFinite(Number(patch.tempo))
+      ? clamp(Number(patch.tempo), TEMPO_MIN, TEMPO_MAX)
+      : DEFAULT_TEMPO,
     linkSignalGradientMeters: Boolean(patch.linkSignalGradientMeters),
     keyboardStartNote: Number.isFinite(Number(patch.keyboardStartNote))
       ? clamp(Math.round(Number(patch.keyboardStartNote)), MIN_KEYBOARD_START_NOTE, MAX_KEYBOARD_START_NOTE)
@@ -485,6 +491,9 @@ function normalizeSessionSettings(source = {}, fallbackPatch = normalizeDefaultP
     audioOutputDeviceId: typeof source.audioOutputDeviceId === "string" && source.audioOutputDeviceId.trim()
       ? source.audioOutputDeviceId
       : fallback.audioOutputDeviceId,
+    tempo: Number.isFinite(Number(source.tempo))
+      ? clamp(Number(source.tempo), TEMPO_MIN, TEMPO_MAX)
+      : fallback.tempo,
     linkSignalGradientMeters: source.linkSignalGradientMeters === undefined
       ? fallback.linkSignalGradientMeters
       : Boolean(source.linkSignalGradientMeters),
@@ -557,6 +566,7 @@ function currentPatchSessionData() {
     audioBackend,
     audioInputDeviceId: state.audioInputDeviceId,
     audioOutputDeviceId: state.audioOutputDeviceId,
+    tempo: state.tempo,
     linkSignalGradientMeters: Boolean(state.linkSignalGradientMeters),
     keyboardStartNote: state.keyboardStartNote,
     keyboardLength: state.keyboardLength,
@@ -830,7 +840,7 @@ function nodeParameterDefinitions(node) {
       type: "choice",
       options: FREQUENCY_MODES.map((value) => ({
         value,
-        label: value === "fixed" ? "Fixed" : "Ratio",
+        label: value === "sync" ? "BPM sync" : value === "fixed" ? "Fixed" : "Ratio",
       })),
       get: () => node.frequencyMode,
       set: (value) => {
@@ -857,6 +867,16 @@ function nodeParameterDefinitions(node) {
       get: () => node.frequency,
       set: (value) => {
         node.frequency = value;
+      },
+    },
+    {
+      id: "syncBeats",
+      label: "Cycle length",
+      type: "choice",
+      options: NODE_SYNC_BEAT_OPTIONS.map((option) => ({ value: String(option.value), label: option.label })),
+      get: () => String(normalizeNodeSyncBeats(node.syncBeats)),
+      set: (value) => {
+        node.syncBeats = normalizeNodeSyncBeats(value);
       },
     },
     {
@@ -2063,12 +2083,13 @@ function linkGeometry(link, visited = new Set(), context = null) {
 
 function graphPayload(patch = state) {
   return {
-    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, quantise, speed, audioInputGain, customWave, sample }) => ({
+    nodes: patch.nodes.map(({ id, wave, frequencyMode, ratio, frequency, syncBeats, quantise, speed, audioInputGain, customWave, sample }) => ({
       id,
       wave,
       frequencyMode,
       ratio,
       frequency,
+      syncBeats,
       quantise: normalizeNodeQuantise(quantise),
       speed,
       audioInputGain,
@@ -2093,6 +2114,7 @@ function graphPayload(patch = state) {
       envelope: { ...link.envelope },
     })),
     maxVoices: patch.maxVoices,
+    tempo: state.tempo,
     masterEffects: patch.masterEffects,
   };
 }
@@ -3341,16 +3363,36 @@ function renderRecordingTimelinePanel() {
         </div>
       </div>
       <div class="recording-side">
+        ${status ? `<div class="recording-status" aria-live="polite">${escapeHtml(status)}</div>` : ""}
+        <div class="recording-transport-actions">
+          <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Pause" : "Play"}" title="${recordingTransportPlaying ? "Pause" : "Play"}">
+            ${recordingTransportPlaying
+              ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 6v12M16 6v12" fill="none"></path></svg>`
+              : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10-6.5z"></path></svg>`}
+          </button>
+          <button class="icon-button" id="rewindRecordingButton" type="button" aria-label="Move playhead to start" title="Move playhead to start">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5v14" fill="none"></path><path d="M19 6l-10 6 10 6z"></path></svg>
+          </button>
+          <button class="icon-button ${recordingMetronomeEnabled ? "is-active" : ""}" id="recordingMetronome" type="button" aria-label="Metronome" title="Metronome" aria-pressed="${recordingMetronomeEnabled ? "true" : "false"}">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M9 3h6l4 18H5L9 3Z" fill="none"></path>
+              <path d="M12 6v11" fill="none"></path>
+              <path d="M9 17h6" fill="none"></path>
+              <path d="M14.5 7.5 10 14" fill="none"></path>
+            </svg>
+          </button>
+          <button class="text-button primary recording-export-button" id="exportTimelineButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Export</button>
+        </div>
         ${selectedLane ? `
           <div class="field recording-lane-name-field">
             <label for="recordingLaneName">Lane name</label>
             <input id="recordingLaneName" type="text" value="${escapeHtml(selectedLane.name || "")}" autocomplete="off">
           </div>
-          <div class="field recording-lane-volume-field">
-            <label for="recordingLaneVolume">Volume</label>
-            <input id="recordingLaneVolume" type="range" min="0" max="2" step="0.01" value="${normalizeRecordingLaneVolume(selectedLane.volume)}">
-          </div>
-          <div class="recording-lane-actions">
+          <div class="recording-lane-controls">
+            <div class="field recording-lane-volume-field">
+              <label for="recordingLaneVolume">Volume</label>
+              <input id="recordingLaneVolume" type="range" min="0" max="2" step="0.01" value="${normalizeRecordingLaneVolume(selectedLane.volume)}">
+            </div>
             <button class="icon-button" id="snipRecordingClipButton" type="button" aria-label="Snip at playhead" title="Snip at playhead" ${canSnipSelectedRecording ? "" : "disabled"}>
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <circle cx="6" cy="7" r="2.5" fill="none"></circle>
@@ -3367,31 +3409,7 @@ function renderRecordingTimelinePanel() {
               </svg>
             </button>
           </div>
-        ` : `
-          ${status ? `<div class="recording-status" aria-live="polite">${escapeHtml(status)}</div>` : ""}
-          <div class="field recording-tempo-field">
-            <label for="recordingTempo">Tempo</label>
-            <div class="field-row">
-              <input id="recordingTempoRange" type="range" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
-              <input id="recordingTempo" type="number" min="${RECORDING_TEMPO_MIN}" max="${RECORDING_TEMPO_MAX}" step="1" value="${recordingTimelineTempo}">
-            </div>
-          </div>
-          <label class="toggle-row recording-metronome-row" for="recordingMetronome">
-            <input id="recordingMetronome" type="checkbox" ${recordingMetronomeEnabled ? "checked" : ""}>
-            <span>Metronome</span>
-          </label>
-          <div class="recording-transport-actions">
-            <button class="icon-button" id="playRecordingButton" type="button" aria-label="${recordingTransportPlaying ? "Pause" : "Play"}" title="${recordingTransportPlaying ? "Pause" : "Play"}">
-              ${recordingTransportPlaying
-                ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 6v12M16 6v12" fill="none"></path></svg>`
-                : `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5.5v13l10-6.5z"></path></svg>`}
-            </button>
-            <button class="icon-button" id="rewindRecordingButton" type="button" aria-label="Move playhead to start" title="Move playhead to start">
-              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5v14" fill="none"></path><path d="M19 6l-10 6 10 6z"></path></svg>
-            </button>
-            <button class="text-button primary" id="exportTimelineButton" type="button" ${recordingLanes.length ? "" : "disabled"}>Export</button>
-          </div>
-        `}
+        ` : ""}
       </div>
     </div>
   `;
@@ -3432,7 +3450,7 @@ function stopRecordingMetronome() {
 function startRecordingMetronome() {
   stopRecordingMetronome();
   if (!recordingMetronomeEnabled || !activeBottomPanels.timeline || !recordingIsActive()) return;
-  const beatMs = 60000 / recordingTimelineTempo;
+  const beatMs = 60000 / state.tempo;
   playMetronomeTick(true);
   recordingMetronomeTimer = window.setInterval(() => playMetronomeTick(false), beatMs);
 }
@@ -3746,25 +3764,19 @@ function attachRecordingTimelineEvents() {
   recordingTimelinePanel.querySelector("#snipRecordingClipButton")?.addEventListener("click", snipSelectedRecordingClip);
   recordingTimelinePanel.querySelector("#deleteRecordingLaneButton")?.addEventListener("click", deleteSelectedRecordingLane);
 
-  if (!selectedRecordingLane()) {
-    bindNumberPair("recordingTempo", "recordingTempoRange", RECORDING_TEMPO_MIN, RECORDING_TEMPO_MAX, (value) => {
-      recordingTimelineTempo = Math.round(value);
-      restartRecordingMetronome();
-      return recordingTimelineTempo;
-    }, { root: recordingTimelinePanel, defaultValue: RECORDING_DEFAULT_TEMPO });
-    recordingTimelinePanel.querySelector("#recordingMetronome")?.addEventListener("change", (event) => {
-      recordingMetronomeEnabled = event.target.checked;
-      restartRecordingMetronome();
-    });
-    recordingTimelinePanel.querySelector("#playRecordingButton")?.addEventListener("click", toggleRecordingTransport);
-    recordingTimelinePanel.querySelector("#rewindRecordingButton")?.addEventListener("click", () => {
-      stopRecordingTransport();
-      setRecordingPlayheadTime(0, { render: true });
-    });
-    recordingTimelinePanel.querySelector("#exportTimelineButton")?.addEventListener("click", () => {
-      exportRecordingSequence().catch((error) => alert(`Could not export recording mix: ${error.message}`));
-    });
-  }
+  recordingTimelinePanel.querySelector("#recordingMetronome")?.addEventListener("click", () => {
+    recordingMetronomeEnabled = !recordingMetronomeEnabled;
+    restartRecordingMetronome();
+    renderRecordingTimelinePanel();
+  });
+  recordingTimelinePanel.querySelector("#playRecordingButton")?.addEventListener("click", toggleRecordingTransport);
+  recordingTimelinePanel.querySelector("#rewindRecordingButton")?.addEventListener("click", () => {
+    stopRecordingTransport();
+    setRecordingPlayheadTime(0, { render: true });
+  });
+  recordingTimelinePanel.querySelector("#exportTimelineButton")?.addEventListener("click", () => {
+    exportRecordingSequence().catch((error) => alert(`Could not export recording mix: ${error.message}`));
+  });
 }
 
 function snipSelectedRecordingClip() {
@@ -3836,7 +3848,7 @@ function recordingCountdown() {
   if (!recordingMetronomeEnabled || !activeBottomPanels.timeline) return Promise.resolve();
   recordingCountdownActive = true;
   renderRecordingTimelinePanel();
-  const beatMs = 60000 / recordingTimelineTempo;
+  const beatMs = 60000 / state.tempo;
   return new Promise((resolve) => {
     const tick = () => {
       recordingCountdownBeat += 1;
@@ -4798,10 +4810,12 @@ function renderPanel() {
     const usesCustomWave = node.wave === "custom";
     const usesSampleControls = node.wave === "sample";
     const isFixedFrequency = node.frequencyMode === "fixed";
+    const isSyncFrequency = node.frequencyMode === "sync";
     const constantValue = Number.isFinite(Number(node.frequency)) ? clamp(Number(node.frequency), -1, 1) : 1;
     const frequencyValue = isFixedFrequency ? node.frequency : node.ratio;
     const frequencyMin = 0;
-    const usesSlowFrequencyRange = Boolean(node.frequencySlow);
+    const usesFrequencyValueControl = usesPitchControls && !isSyncFrequency;
+    const usesSlowFrequencyRange = usesFrequencyValueControl && Boolean(node.frequencySlow);
     const frequencyMax = isFixedFrequency
       ? usesSlowFrequencyRange ? FREQUENCY_SLOW_SLIDER_MAX : FREQUENCY_SLIDER_MAX
       : usesSlowFrequencyRange ? RATIO_SLOW_SLIDER_MAX : RATIO_SLIDER_MAX;
@@ -4925,26 +4939,35 @@ function renderPanel() {
         </div>
       ` : ""}
       ${usesPitchControls ? `
-        <div class="toggle-field">
+        ${usesFrequencyValueControl ? `<div class="toggle-field">
           <label class="toggle-row" for="frequencySlow">
             <input id="frequencySlow" type="checkbox" ${node.frequencySlow ? "checked" : ""}>
             <span>Slow</span>
           </label>
-        </div>
+        </div>` : ""}
         <div class="field">
           ${parameterLabel("frequencyMode", "Tuning", "node", node.id, "frequencyMode")}
           <select id="frequencyMode">
             <option value="ratio" ${node.frequencyMode === "ratio" ? "selected" : ""}>Ratio</option>
             <option value="fixed" ${node.frequencyMode === "fixed" ? "selected" : ""}>Fixed</option>
+            <option value="sync" ${node.frequencyMode === "sync" ? "selected" : ""}>BPM sync</option>
           </select>
         </div>
-        <div class="field">
+        ${usesFrequencyValueControl ? `<div class="field">
           ${parameterLabel("frequencyValue", isFixedFrequency ? "Frequency (Hz)" : "Ratio (x)", "node", node.id, isFixedFrequency ? "frequency" : "ratio")}
           <div class="field-row">
             <input id="frequencyValueRange" type="range" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
             <input id="frequencyValue" type="number" min="${frequencyMin}" max="${frequencyMax}" step="${frequencyStep}" value="${frequencyValue}">
           </div>
-        </div>
+        </div>` : `
+        <div class="field">
+          ${parameterLabel("syncBeats", "Cycle length", "node", node.id, "syncBeats")}
+          <select id="syncBeats">
+            ${NODE_SYNC_BEAT_OPTIONS.map((option) => (
+              `<option value="${option.value}" ${normalizeNodeSyncBeats(node.syncBeats) === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+            )).join("")}
+          </select>
+        </div>`}
         <section class="effect-section">
           <div class="toggle-field">
             <label class="toggle-row" for="quantiseEnabled">
@@ -5026,28 +5049,37 @@ function renderPanel() {
       savePatch();
     });
     if (usesPitchControls) {
-      panel.querySelector("#frequencySlow").addEventListener("change", (event) => {
+      panel.querySelector("#frequencySlow")?.addEventListener("change", (event) => {
         node.frequencySlow = event.target.checked;
         renderPanel();
         savePatch();
       });
       panel.querySelector("#frequencyMode").addEventListener("change", (event) => {
-        node.frequencyMode = event.target.value;
+        node.frequencyMode = normalizeFrequencyMode(event.target.value);
+        if (node.frequencyMode === "sync") node.syncBeats = normalizeNodeSyncBeats(node.syncBeats);
         render();
         sendNodeParam(node.id, "frequencyMode", node.frequencyMode);
         savePatch();
       });
-      bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
-        const parameter = node.frequencyMode === "fixed" ? "frequency" : "ratio";
-        if (node.frequencyMode === "fixed") {
-          node.frequency = value;
-        } else {
-          node.ratio = value;
-        }
+      if (usesFrequencyValueControl) {
+        bindNumberPair("frequencyValue", "frequencyValueRange", frequencyMin, frequencyMax, (value) => {
+          const parameter = node.frequencyMode === "fixed" ? "frequency" : "ratio";
+          if (node.frequencyMode === "fixed") {
+            node.frequency = value;
+          } else {
+            node.ratio = value;
+          }
+          renderNodes();
+          sendNodeParam(node.id, parameter, value);
+          savePatch();
+        }, { inputMax: frequencyInputMax, defaultValue: () => (node.frequencyMode === "fixed" ? 440 : 1) });
+      }
+      panel.querySelector("#syncBeats")?.addEventListener("change", (event) => {
+        node.syncBeats = normalizeNodeSyncBeats(event.target.value);
         renderNodes();
-        sendNodeParam(node.id, parameter, value);
+        sendNodeParam(node.id, "syncBeats", node.syncBeats);
         savePatch();
-      }, { inputMax: frequencyInputMax, defaultValue: () => (node.frequencyMode === "fixed" ? 440 : 1) });
+      });
       panel.querySelector("#quantiseEnabled").addEventListener("change", (event) => {
         node.quantise = { ...normalizeNodeQuantise(node.quantise), enabled: event.target.checked };
         renderPanel();
@@ -5914,6 +5946,7 @@ async function applySessionData(session) {
   state.sessionName = settings.sessionName;
   state.audioInputDeviceId = settings.audioInputDeviceId;
   state.audioOutputDeviceId = settings.audioOutputDeviceId;
+  state.tempo = settings.tempo;
   state.linkSignalGradientMeters = settings.linkSignalGradientMeters;
   state.keyboardStartNote = settings.keyboardStartNote;
   state.keyboardLength = settings.keyboardLength;
@@ -5948,6 +5981,7 @@ function newSession() {
   activePatchSlotId = slot.id;
   state.sessionId = "";
   state.sessionName = defaultSessionName();
+  state.tempo = DEFAULT_TEMPO;
   recordingLanes.splice(0, recordingLanes.length);
   selectedRecordingLaneId = null;
   selectedRecordingClipId = null;
@@ -6884,6 +6918,10 @@ function midiNoteLabel(note) {
   return `${names[value % 12]}${Math.floor(value / 12) - 1}`;
 }
 
+function syncBeatOptionLabel(value) {
+  return NODE_SYNC_BEAT_OPTIONS.find((option) => option.value === normalizeNodeSyncBeats(value))?.label || "Beat";
+}
+
 function midiNoteOptions() {
   return MIDI_NOTE_OPTIONS;
 }
@@ -7305,6 +7343,7 @@ function nodeFrequencyLabel(node) {
     const label = frequency < 10 ? frequency.toFixed(2) : frequency < 100 ? frequency.toFixed(1) : String(Math.round(frequency));
     return `${label} Hz`;
   }
+  if (node.frequencyMode === "sync") return syncBeatOptionLabel(node.syncBeats);
   return `${Number(node.ratio).toFixed(2)}x`;
 }
 
@@ -7367,10 +7406,12 @@ function linkMeter(linkId) {
   `;
 }
 
-function linkScopePath(samples, width = 220, height = 76) {
-  if (!Array.isArray(samples) || samples.length < 2) return "";
-  const lastIndex = samples.length - 1;
-  return samples.map((sample, index) => {
+function linkScopePath(samples, width = 220, height = 76, pointCount = LINK_SCOPE_POINTS) {
+  const values = Array.isArray(samples) ? samples.slice(0, pointCount) : [];
+  while (values.length < pointCount) values.push(0);
+  if (values.length < 2) return "";
+  const lastIndex = values.length - 1;
+  return values.map((sample, index) => {
     const x = (index / lastIndex) * width;
     const y = height * 0.5 - clamp(Number(sample) || 0, -1, 1) * height * 0.44;
     return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
@@ -8336,6 +8377,13 @@ function renderEmptyPanel() {
         <label for="audioEngine">Audio engine</label>
         <select id="audioEngine">${audioBackendOptions}</select>
       </div>
+      <div class="field">
+        <label for="sessionTempo">Tempo</label>
+        <div class="field-row">
+          <input id="sessionTempoRange" type="range" min="${TEMPO_MIN}" max="${TEMPO_MAX}" step="0.1" value="${state.tempo}">
+          <input id="sessionTempo" type="number" min="${TEMPO_MIN}" max="${TEMPO_MAX}" step="0.1" value="${state.tempo}">
+        </div>
+      </div>
       <label class="toggle-row">
         <input id="linkSignalGradientMeters" type="checkbox" ${state.linkSignalGradientMeters ? "checked" : ""}>
         <span>Visualise signal flow</span>
@@ -8399,6 +8447,12 @@ function renderEmptyPanel() {
     }
     window.location.href = url.toString();
   });
+  bindNumberPair("sessionTempo", "sessionTempoRange", TEMPO_MIN, TEMPO_MAX, (value) => {
+    state.tempo = value;
+    restartRecordingMetronome();
+    sendGraph();
+    savePatch();
+  }, { defaultValue: DEFAULT_TEMPO });
   panel.querySelector("#linkSignalGradientMeters").addEventListener("change", (event) => {
     state.linkSignalGradientMeters = event.target.checked;
     renderWires();
@@ -8634,6 +8688,7 @@ function addNode(position = null) {
     frequencyMode: "ratio",
     ratio: 1,
     frequency: 440,
+    syncBeats: DEFAULT_NODE_SYNC_BEATS,
     frequencySlow: false,
     quantise: { ...DEFAULT_NODE_QUANTISE },
     speed: 8,

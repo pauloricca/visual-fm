@@ -3,6 +3,10 @@ const TWO_PI = Math.PI * 2;
 const LEFT_OFFSET = 0;
 const RIGHT_OFFSET = 8192;
 const MAX_ACTIVE_VOICES = 16;
+const DEFAULT_TEMPO = 120;
+const TEMPO_MIN = 20;
+const TEMPO_MAX = 300;
+const DEFAULT_SYNC_BEATS = 1;
 const DRONE_SLOT = MAX_ACTIVE_VOICES;
 const AUDIO_TARGET = -1;
 const LINK_TARGET_BASE = -2;
@@ -130,6 +134,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     this.activeLinkControlSmoothers = new Set();
     this.hasActiveDroneLinks = false;
     this.maxVoices = 5;
+    this.tempo = DEFAULT_TEMPO;
     this.voices = new Map();
     this.activeVoicesByNote = new Map();
     this.pendingVoiceStarts = [];
@@ -270,6 +275,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       }
     }
     this.maxVoices = this.clamp(Math.round(Number(graph.maxVoices) || 5), 1, MAX_ACTIVE_VOICES);
+    this.tempo = this.normalizeTempo(graph.tempo);
     this.masterEffects = this.normalizeEffects(graph.masterEffects);
     this.hasActiveDroneLinks = this.links.some((link) => link.drone || link.hasEnvelopeTriggers);
     this.syncRustGraph();
@@ -290,11 +296,12 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     return {
       id: node.id,
       wave: WAVE_IDS.has(node.wave) ? node.wave : "sine",
-      frequencyMode: node.frequencyMode === "fixed" ? "fixed" : "ratio",
+      frequencyMode: ["ratio", "fixed", "sync"].includes(node.frequencyMode) ? node.frequencyMode : "ratio",
       ratio: Number.isFinite(ratio) ? this.clamp(ratio, 0, 16) : 1,
       frequency: Number.isFinite(frequency)
         ? node.wave === "constant" ? this.clamp(frequency, -1, 1) : this.clamp(frequency, 0, Math.min(12000, sampleRate * 0.45))
         : node.wave === "constant" ? 1 : 440,
+      syncBeats: this.normalizeSyncBeats(node.syncBeats),
       quantise: {
         enabled: Boolean(node.quantise?.enabled),
         root: node.quantise?.root === QUANTISE_MIDI_ROOT || QUANTISE_ROOT_NOTES.includes(node.quantise?.root) ? node.quantise.root : "C",
@@ -326,6 +333,16 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
       overlapRatio: Number.isFinite(overlapRatio) ? this.clamp(overlapRatio, 0, 1) : 0.09,
       originalPitch: Number.isFinite(originalPitch) ? this.clamp(originalPitch, 0, 127) : 60,
     };
+  }
+
+  normalizeTempo(tempo) {
+    const value = Number(tempo);
+    return Number.isFinite(value) ? this.clamp(value, TEMPO_MIN, TEMPO_MAX) : DEFAULT_TEMPO;
+  }
+
+  normalizeSyncBeats(syncBeats) {
+    const value = Number(syncBeats);
+    return Number.isFinite(value) && value > 0 ? this.clamp(value, 1 / 64, 64) : DEFAULT_SYNC_BEATS;
   }
 
   normalizeCustomWave(customWave = {}) {
@@ -424,12 +441,14 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
 
     this.wasm.clearGraph();
     this.wasm.clearLinkMeters?.();
+    this.wasm.setTempo?.(this.tempo);
     for (const node of this.nodes) {
       node.wasmIndex = this.wasm.addNode(
         this.waveId(node),
         this.frequencyModeId(node),
         node.ratio,
         node.frequency,
+        node.syncBeats,
         node.quantise.enabled ? 1 : 0,
         node.quantise.root === QUANTISE_MIDI_ROOT ? -1 : QUANTISE_ROOT_NOTES.indexOf(node.quantise.root),
         QUANTISE_SCALE_IDS.get(node.quantise.scale) ?? 0,
@@ -537,7 +556,7 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     const node = this.nodesById.get(id);
     if (!node || node.wasmIndex < 0) return;
     if (parameter === "frequencyMode") {
-      node.frequencyMode = value === "fixed" ? "fixed" : "ratio";
+      node.frequencyMode = ["ratio", "fixed", "sync"].includes(value) ? value : "ratio";
       this.wasm?.setNodeFrequencyMode?.(node.wasmIndex, this.frequencyModeId(node));
     } else if (parameter === "ratio") {
       node.ratio = this.clamp(Number(value) || 0, 0, 16);
@@ -547,6 +566,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
         ? this.clamp(Number.isFinite(Number(value)) ? Number(value) : 1, -1, 1)
         : this.clamp(Number(value) || 0, 0, Math.min(12000, sampleRate * 0.45));
       this.wasm?.setNodeFrequency?.(node.wasmIndex, node.frequency);
+    } else if (parameter === "syncBeats") {
+      node.syncBeats = this.normalizeSyncBeats(value);
+      this.wasm?.setNodeSyncBeats?.(node.wasmIndex, node.syncBeats);
     } else if (parameter === "quantise.enabled") {
       node.quantise.enabled = Boolean(value);
       this.wasm?.setNodeQuantiseEnabled?.(node.wasmIndex, node.quantise.enabled ? 1 : 0);
@@ -1101,12 +1123,16 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
     if (!rangeLength) return 0;
     const entry = this.sampleDataByNodeId.get(node.id);
     const original = this.midiNoteFrequency(node.sample?.originalPitch ?? 60);
-    const base = node.frequencyMode === "fixed"
-      ? Number(node.frequency) || 0
-      : noteFrequency * (Number.isFinite(Number(node.ratio)) ? Number(node.ratio) : 1);
+    const base = this.baseFrequency(node, noteFrequency);
     const playbackRate = Math.max(0.0001, base) / Math.max(0.0001, original);
     const sourceRate = Math.max(1, entry?.sampleRate || sampleRate);
     return rangeLength / sourceRate / playbackRate;
+  }
+
+  baseFrequency(node, noteFrequency) {
+    if (node?.frequencyMode === "fixed") return Number(node.frequency) || 0;
+    if (node?.frequencyMode === "sync") return (this.tempo / 60) / this.normalizeSyncBeats(node.syncBeats);
+    return noteFrequency * (Number.isFinite(Number(node?.ratio)) ? Number(node.ratio) : 1);
   }
 
   oneShotSampleEndAt(startedAt, noteFrequency) {
@@ -1168,7 +1194,9 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
   }
 
   frequencyModeId(node) {
-    return node?.frequencyMode === "fixed" ? 1 : 0;
+    if (node?.frequencyMode === "fixed") return 1;
+    if (node?.frequencyMode === "sync") return 2;
+    return 0;
   }
 
   renderVoice(voice, now, frames) {
@@ -1208,18 +1236,20 @@ class VisualFmWasmEngine extends AudioWorkletProcessor {
   linkScopeFrameSamples() {
     if (!this.linkScopeRequest || !this.linkScopeSamples || !this.wasm) return [];
     const count = this.clamp(Math.round(this.wasm.linkScopeCount?.() || 0), 0, this.linkScopeRequest.points);
-    if (!count) return [];
     const mode = this.linkScopeRequest.mode;
     const writeIndex = mode === "envelope"
       ? 0
       : this.clamp(Math.round(this.wasm.linkScopeWriteIndex?.() || 0), 0, this.linkScopeRequest.points - 1);
     const raw = Array.from(this.linkScopeSamples.slice(0, this.linkScopeRequest.points));
-    const samples = mode === "envelope" || count < this.linkScopeRequest.points
-      ? raw.slice(0, count)
+    const samples = mode === "envelope"
+      ? raw.slice(0, count).concat(Array(Math.max(0, this.linkScopeRequest.points - count)).fill(0))
+      : count < this.linkScopeRequest.points
+      ? Array(Math.max(0, this.linkScopeRequest.points - count)).fill(0).concat(raw.slice(0, count))
       : raw.slice(writeIndex).concat(raw.slice(0, writeIndex));
-    if (mode !== "zero-crossing") return samples;
+    if (mode !== "zero-crossing") return samples.slice(0, this.linkScopeRequest.points);
     const crossing = samples.findIndex((sample, index) => index > 0 && samples[index - 1] < 0 && sample >= 0);
-    return crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples;
+    return (crossing > 0 ? samples.slice(crossing).concat(samples.slice(0, crossing)) : samples)
+      .slice(0, this.linkScopeRequest.points);
   }
 
   flushLinkMeters() {

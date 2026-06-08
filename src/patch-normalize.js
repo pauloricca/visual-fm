@@ -10,6 +10,7 @@ import {
   DEFAULT_KEYBOARD_LENGTH,
   DEFAULT_KEYBOARD_START_NOTE,
   DEFAULT_MAX_VOICES,
+  DEFAULT_NODE_SYNC_BEATS,
   FREQUENCY_MODES,
   LINK_FILTER_TYPES,
   LINK_DISTORTION_TYPES,
@@ -27,6 +28,7 @@ import {
   MIN_KEYBOARD_LENGTH,
   MIN_KEYBOARD_START_NOTE,
   MIN_MAX_VOICES,
+  NODE_SYNC_BEAT_OPTIONS,
   NODE_MIDI_PARAMETERS,
   NODE_MODULATION_TARGETS,
   OSCILLATOR_WAVE_TYPES,
@@ -83,6 +85,7 @@ export function normalizePatch(patch) {
       frequency: Number.isFinite(Number(node.frequency))
         ? node.wave === "constant" ? clamp(Number(node.frequency), -1, 1) : clamp(Number(node.frequency), 0, 12000)
         : node.wave === "constant" ? 1 : 440,
+      syncBeats: normalizeNodeSyncBeats(node.syncBeats),
       frequencySlow: Boolean(node.frequencySlow),
       quantise: normalizeNodeQuantise(node.quantise),
       speed: Number.isFinite(Number(node.speed)) ? clamp(Number(node.speed), 0.01, 60) : 8,
@@ -250,6 +253,16 @@ function nodeModulationTargets(targetNode) {
 
 export function normalizeFrequencyMode(mode) {
   return FREQUENCY_MODES.includes(mode) ? mode : "ratio";
+}
+
+export function normalizeNodeSyncBeats(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return DEFAULT_NODE_SYNC_BEATS;
+  const exact = NODE_SYNC_BEAT_OPTIONS.find((option) => Math.abs(option.value - numeric) < 1e-9);
+  if (exact) return exact.value;
+  return NODE_SYNC_BEAT_OPTIONS.reduce((best, option) => (
+    Math.abs(option.value - numeric) < Math.abs(best.value - numeric) ? option : best
+  ), NODE_SYNC_BEAT_OPTIONS.find((option) => option.value === DEFAULT_NODE_SYNC_BEATS) || NODE_SYNC_BEAT_OPTIONS[0]).value;
 }
 
 export function normalizeNodeQuantise(quantise = {}) {
